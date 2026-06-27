@@ -1,66 +1,18 @@
 import os
 import sys
 import shutil
-import urllib.request
 import zipfile
 import subprocess
 import tempfile
 from pathlib import Path
+from setup.downloader import download_file
 
-def download_file_with_resume(url: str, dest_path: Path):
-    """Downloads a file supporting HTTP Range requests for resuming incomplete downloads."""
-    temp_path = dest_path.with_suffix(".tmp")
-    
-    # Check current downloaded size
-    initial_pos = 0
-    if temp_path.exists():
-        initial_pos = temp_path.stat().st_size
-        print(f"Found existing partial download of size {initial_pos} bytes. Resuming...")
-    
-    req = urllib.request.Request(url)
-    if initial_pos > 0:
-        req.add_header("Range", f"bytes={initial_pos}-")
-        
-    try:
-        opener = urllib.request.build_opener()
-        opener.addheaders = [("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")]
-        urllib.request.install_opener(opener)
-        
-        with urllib.request.urlopen(req) as response:
-            status = response.getcode()
-            
-            # 206 Partial Content means the server accepted the Range header
-            # 200 OK means the server ignored Range and is sending the whole file from start
-            mode = "ab" if status == 206 else "wb"
-            if status == 200:
-                print("Server does not support resume. Downloading from start...")
-                initial_pos = 0
-                
-            content_length = response.getheader("Content-Length")
-            total_size = (int(content_length) if content_length else 0) + initial_pos
-            print(f"Downloading: {initial_pos}/{total_size} bytes...")
-            
-            with open(temp_path, mode) as f:
-                chunk_size = 1024 * 1024  # 1MB chunks
-                downloaded = initial_pos
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    percent = (downloaded / total_size) * 100 if total_size else 0
-                    print(f"Downloaded: {downloaded}/{total_size} ({percent:.2f}%)")
-                    sys.stdout.flush()
-                    
-        # Rename temp file to final destination once done
-        if dest_path.exists():
-            dest_path.unlink()
-        temp_path.rename(dest_path)
-        print("Download complete.")
-    except Exception as e:
-        print(f"Download failed: {e}")
-        raise e
+def make_progress_callback(filename: str):
+    def callback(downloaded: int, total_size: int):
+        percent = (downloaded / total_size) * 100 if total_size else 0
+        print(f"[{filename}] Downloaded: {downloaded}/{total_size} ({percent:.2f}%)")
+        sys.stdout.flush()
+    return callback
 
 def bootstrap_codeql(bin_dir: Path) -> Path:
     """Downloads and extracts the CodeQL CLI binary for Windows, caching the download."""
@@ -96,7 +48,7 @@ def bootstrap_codeql(bin_dir: Path) -> Path:
 
     if not use_cached:
         try:
-            download_file_with_resume(CODEQL_URL, zip_path)
+            download_file(CODEQL_URL, zip_path, progress_callback=make_progress_callback("codeql.zip"))
         except Exception as e:
             raise RuntimeError(f"Failed to download CodeQL CLI: {e}")
 
