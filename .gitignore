@@ -21,3 +21,11 @@ graphify-out/
 # Other caches/logs
 *.log
 .DS_Store
+
+# Test project
+test_project/
+
+# Local binaries and downloads
+bin/
+
+

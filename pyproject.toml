@@ -1,0 +1,23 @@
+[project]
+name = "arch-mcp"
+version = "0.1.0"
+description = "Arch-mcp: Agent-Native Code Intelligence & Compliance Stack"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "mcp>=0.1.0",
+    "duckdb>=1.0.0",
+    "protobuf>=4.21.0",
+    "onnxruntime>=1.16.0",
+    "numpy>=1.24.0",
+    "tokenizers>=0.13.0",
+    "pytest>=7.0.0",
+]
+
+[project.scripts]
+arch = "src.main:main"
+
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
