@@ -316,40 +316,33 @@ def audit(filepath: Optional[str] = None) -> str:
     auditor = Auditor(repository, PROJECT_ROOT)
 
     try:
+        # Run static compliance check (updates files status and returns automatic violations)
         violations = auditor.run_audit(filepath_filter=filepath)
+        
+        # Also fetch all violations (both manual/AI and automatic) from compliance_violations table
+        all_violations = repository.get_violations()
+        if filepath:
+            normalized_filter = filepath.replace("\\", "/")
+            all_violations = [v for v in all_violations if v["filepath"].replace("\\", "/").startswith(normalized_filter)]
     except Exception as e:
         return f"Error running compliance audit: {e}"
     finally:
         db_conn.close()
 
-    active_violations = [v for v in violations if v.get("status", "ACTIVE") == "ACTIVE"]
-    overridden_violations = [v for v in violations if v.get("status") == "OVERRIDDEN"]
+    if not all_violations:
+        scope = f"for `{filepath}`" if filepath else "project-wide"
+        return f"## Compliance Audit\n\n**No boundary rule violations found** {scope}."
 
-    md = ["## Compliance Audit Report\n"]
-    
-    scope = f"for `{filepath}`" if filepath else "project-wide"
-    md.append(f"Scope: {scope}\n")
-    
-    md.append(f"### Active Violations ({len(active_violations)})")
-    if not active_violations:
-        md.append("*No active architectural violations found.*\n")
-    else:
-        for i, v in enumerate(active_violations, 1):
-            md.append(f"{i}. **[{v['rule_id']}]** (File: `{v['filepath']}:L{v['line']}`)")
+    md = [f"## Compliance Audit Report: {len(all_violations)} violation(s) found\n"]
+    for i, v in enumerate(all_violations, 1):
+        origin_str = f" [{v['origin'].upper()}]" if v.get("origin") else ""
+        md.append(f"{i}. **[{v['rule_id']}]**{origin_str} (File: `{v['filepath']}:L{v['line']}`)")
+        if v['symbol']:
             md.append(f"   - **Symbol**: `{v['symbol']}`")
-            md.append(f"   - **Violation**: {v['message']}")
-            md.append("")
-
-    if overridden_violations:
-        md.append(f"### Overridden Exceptions ({len(overridden_violations)})")
-        for i, v in enumerate(overridden_violations, 1):
-            md.append(f"{i}. **[{v['rule_id']}]** (File: `{v['filepath']}:L{v['line']}`)")
-            md.append(f"   - **Symbol**: `{v['symbol']}`")
-            md.append(f"   - **Violation**: {v['message']}")
-            md.append(f"   - **Justification**: *{v.get('justification') or 'No justification provided'}*")
-            md.append("")
-            
+        md.append(f"   - **Violation**: {v['message']}")
+        md.append("")
     return "\n".join(md)
+
 
 
 @mcp.tool()
@@ -475,19 +468,23 @@ def report(name: str, format: str = "markdown") -> str:
 
 
 @mcp.tool()
-def set_file_status(filepath: str, status: Optional[str] = None, justification: Optional[str] = None) -> str:
+def set_file_status(filepath: str, status: str, justification: Optional[str] = None) -> str:
     """
-    Sets or clears a manual compliance status override for a file component.
+    Sets the manual compliance status flag (logical audit) for a file component.
     Parameters:
       filepath: Path to the target file.
-      status: Compliance status ('COMPLIANT', 'EXEMPT', or None to clear override).
-      justification: Optional explanation or sign-off comment for the override.
+      status: Compliance status ('PENDING_AUDIT', 'COMPLIANT', or 'VIOLATION_DETECTED').
+      justification: Explanatory comment for the status (required if status is 'VIOLATION_DETECTED').
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
 
-    if status not in (None, "COMPLIANT", "EXEMPT", "VIOLATION_DETECTED", "PENDING_AUDIT"):
-        return f"Error: Invalid compliance status choice: {status}. Allowed values: COMPLIANT, EXEMPT, or null."
+    status = status.upper()
+    if status not in ("COMPLIANT", "VIOLATION_DETECTED", "PENDING_AUDIT"):
+        return f"Error: Invalid compliance status choice: {status}. Allowed values: COMPLIANT, VIOLATION_DETECTED, PENDING_AUDIT."
+
+    if status == "VIOLATION_DETECTED" and not justification:
+        return "Error: Justification must be provided when flagging a file as VIOLATION_DETECTED."
 
     db_conn = DbConnection(DB_PATH)
     repository = Repository(db_conn)
@@ -496,7 +493,6 @@ def set_file_status(filepath: str, status: Optional[str] = None, justification: 
         # Check if the file is registered in the database
         file_info = repository.get_file(filepath)
         if not file_info:
-            # Try to resolve relative path matching
             all_files = repository.get_all_files_metadata()
             matched = None
             for fp in all_files.keys():
@@ -508,14 +504,30 @@ def set_file_status(filepath: str, status: Optional[str] = None, justification: 
             else:
                 return f"Error: File '{filepath}' is not registered in the database. Please index it first."
 
-        repository.update_file_override_status(filepath, status, justification)
-        status_msg = f"manual status set to '{status}'" if status else "manual status override cleared"
+        # 1. Update manual_status and justification in files table
+        repository.update_file_manual_status(filepath, status, justification)
         
-        # Trigger an audit run immediately to update violation statuses and files table status
-        auditor = Auditor(repository, PROJECT_ROOT)
-        auditor.run_audit(filepath_filter=filepath)
+        # 2. Sync manual violations in compliance_violations table
+        # Clear existing manual violations for this file
+        repository.delete_manual_violations(filepath)
         
-        return f"Successfully updated compliance status for '{filepath}': {status_msg}."
+        # If the manual status is VIOLATION_DETECTED, insert a manual violation
+        if status == "VIOLATION_DETECTED":
+            import hashlib
+            violation_text = f"manual_logical_audit_{filepath}_{justification}"
+            violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
+            
+            repository.add_violation(
+                violation_id=violation_id,
+                rule_id="logical_audit",
+                symbol=None,
+                filepath=filepath,
+                line=1,
+                message=justification,
+                origin="manual"
+            )
+
+        return f"Successfully updated manual status for '{filepath}' to '{status}'."
     except Exception as e:
         return f"Error setting file status: {e}"
     finally:
@@ -582,59 +594,9 @@ def set_file_fields(filepath: str, fields: dict, justification: Optional[str] = 
 
 
 @mcp.tool()
-def set_violation_override(violation_id: str, justification: str) -> str:
-    """
-    Overrides a specific compliance violation by its ID hash with a justification comment.
-    """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-
-    try:
-        repository.add_violation_override(violation_id, justification)
-        
-        # Run audit to re-evaluate and mark overrides in the violations table
-        auditor = Auditor(repository, PROJECT_ROOT)
-        auditor.run_audit()
-        
-        return f"Violation '{violation_id}' overridden successfully with justification: '{justification}'."
-    except Exception as e:
-        return f"Error overriding violation: {e}"
-    finally:
-        db_conn.close()
-
-
-@mcp.tool()
-def remove_violation_override(violation_id: str) -> str:
-    """
-    Removes a persistent override for a specific compliance violation ID.
-    """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-
-    try:
-        repository.remove_violation_override(violation_id)
-        
-        # Run audit to re-evaluate violations
-        auditor = Auditor(repository, PROJECT_ROOT)
-        auditor.run_audit()
-        
-        return f"Successfully removed override for violation '{violation_id}'."
-    except Exception as e:
-        return f"Error removing override: {e}"
-    finally:
-        db_conn.close()
-
-
-@mcp.tool()
 def get_file_details(filepath: str) -> str:
     """
-    Retrieves full indexing, compliance, status, and manual override metadata for a specific file.
+    Retrieves full indexing, compliance status, manual status, and metadata fields for a specific file.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -672,7 +634,7 @@ def get_file_details(filepath: str) -> str:
             f"- **SHA-256 Hash**: `{file_info['sha256']}`",
             f"- **Last Indexed**: `{file_info['last_indexed']}`",
             f"- **Automatically Computed Status**: `{file_info['status']}`",
-            f"- **Manual Status Override**: `{file_info['manual_status'] or 'None'}`",
+            f"- **Manual AI Audit Status**: `{file_info['manual_status']}`",
             f"- **Justification Comment**: *{file_info['justification'] or 'None'}*",
             f"- **Manual Fields/Annotations**: `{m_fields}`"
         ]

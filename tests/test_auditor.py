@@ -313,14 +313,14 @@ def test_auditor_naming_conventions(tmp_path):
     db_conn.close()
 
 
-def test_auditor_manual_status_file_level_override(tmp_path):
+def test_auditor_manual_status_logical_flag(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
-    # Insert file with manual override status
+    # Insert files and symbols
     with db_conn.session() as conn:
         conn.execute("""
-            INSERT INTO files (filepath, sha256, language, status, manual_status, justification)
-            VALUES ('lib/ui/widget.dart', 'hash123', 'dart', 'PENDING_AUDIT', 'COMPLIANT', 'Intentional exception')
+            INSERT INTO files (filepath, sha256, language, status, manual_status)
+            VALUES ('lib/ui/widget.dart', 'hash123', 'dart', 'COMPLIANT', 'PENDING_AUDIT')
         """)
         conn.execute("""
             INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
@@ -333,61 +333,69 @@ def test_auditor_manual_status_file_level_override(tmp_path):
             VALUES ('presentation_sym', 'infra_sym', 'Calls')
         """)
 
+    # AI logical audit flags a file as VIOLATION_DETECTED
+    repository.update_file_manual_status('lib/ui/widget.dart', 'VIOLATION_DETECTED', 'Missing security validation in widget')
+    
+    # Add a manual violation
+    repository.add_violation(
+        violation_id="manual_v1",
+        rule_id="logical_audit",
+        symbol=None,
+        filepath='lib/ui/widget.dart',
+        line=1,
+        message='Missing security validation in widget',
+        origin="manual"
+    )
+
+    # Verify manual status and justification are preserved in DB
+    file_metadata = repository.get_all_files_metadata()
+    assert file_metadata['lib/ui/widget.dart']['manual_status'] == 'VIOLATION_DETECTED'
+    assert file_metadata['lib/ui/widget.dart']['justification'] == 'Missing security validation in widget'
+
+    # Run audit - verify manual violation is returned in get_violations
     auditor = Auditor(repository, root)
     violations = auditor.run_audit()
+    
+    all_v = repository.get_violations()
+    manual_v = [v for v in all_v if v["origin"] == "manual"]
+    assert len(manual_v) == 1
+    assert manual_v[0]["message"] == 'Missing security validation in widget'
 
-    # The violation is detected but marked as OVERRIDDEN
-    assert len(violations) == 1
-    assert violations[0]["status"] == "OVERRIDDEN"
-    assert "Intentional exception" in violations[0]["justification"]
-
-    # Verify that the files table status is set to COMPLIANT because all violations in it are overridden
-    file_metadata = repository.get_all_files_metadata()
-    assert file_metadata["lib/ui/widget.dart"]["status"] == "COMPLIANT"
+    # Clear manual status back to COMPLIANT
+    repository.update_file_manual_status('lib/ui/widget.dart', 'COMPLIANT')
+    repository.delete_manual_violations('lib/ui/widget.dart')
+    
+    all_v2 = repository.get_violations()
+    manual_v2 = [v for v in all_v2 if v["origin"] == "manual"]
+    assert len(manual_v2) == 0
 
     db_conn.close()
 
 
-def test_auditor_violation_level_override(tmp_path):
+def test_auditor_change_triggered_pending_audit(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
-    # Insert file and symbols that violate rule
-    with db_conn.session() as conn:
-        conn.execute("""
-            INSERT INTO files (filepath, sha256, language, status)
-            VALUES ('lib/ui/widget.dart', 'hash123', 'dart', 'PENDING_AUDIT')
-        """)
-        conn.execute("""
-            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
-            VALUES
-                ('presentation_sym', 'lib/ui/widget.dart', 'Method', null, null, null),
-                ('infra_sym', 'lib/infra/client.dart', 'Method', null, null, null)
-        """)
-        conn.execute("""
-            INSERT INTO edges (source, target, relation)
-            VALUES ('presentation_sym', 'infra_sym', 'Calls')
-        """)
+    # 1. Insert new file -> should start as PENDING_AUDIT
+    repository.upsert_file('lib/ui/widget.dart', 'hash111', 'dart')
+    
+    file_info = repository.get_file('lib/ui/widget.dart')
+    assert file_info['manual_status'] == 'PENDING_AUDIT'
 
-    # Run audit first to generate violation
-    auditor = Auditor(repository, root)
-    violations = auditor.run_audit()
-    assert len(violations) == 1
-    v_id = violations[0]["violation_id"]
+    # 2. AI audits and sets to COMPLIANT
+    repository.update_file_manual_status('lib/ui/widget.dart', 'COMPLIANT', 'Audited and verified')
+    file_info_audited = repository.get_file('lib/ui/widget.dart')
+    assert file_info_audited['manual_status'] == 'COMPLIANT'
 
-    # Add override for this specific violation ID
-    repository.add_violation_override(v_id, "Specifically approved data access")
+    # 3. File re-indexed with same hash -> manual_status remains COMPLIANT
+    repository.upsert_file('lib/ui/widget.dart', 'hash111', 'dart')
+    file_info_same = repository.get_file('lib/ui/widget.dart')
+    assert file_info_same['manual_status'] == 'COMPLIANT'
 
-    # Run audit again
-    violations_run2 = auditor.run_audit()
-    assert len(violations_run2) == 1
-    assert violations_run2[0]["status"] == "OVERRIDDEN"
-    assert violations_run2[0]["justification"] == "Specifically approved data access"
-
-    # Verify that removing the override restores active status
-    repository.remove_violation_override(v_id)
-    violations_run3 = auditor.run_audit()
-    assert len(violations_run3) == 1
-    assert violations_run3[0]["status"] == "ACTIVE"
+    # 4. File re-indexed with different hash -> manual_status reset to PENDING_AUDIT!
+    repository.upsert_file('lib/ui/widget.dart', 'hash222', 'dart')
+    file_info_changed = repository.get_file('lib/ui/widget.dart')
+    assert file_info_changed['manual_status'] == 'PENDING_AUDIT'
+    assert 'File modified' in file_info_changed['justification']
 
     db_conn.close()
 

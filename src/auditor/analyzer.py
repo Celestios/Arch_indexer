@@ -172,15 +172,7 @@ class Auditor:
             
         return "\nPath:\n" + "\n".join(trace_lines)
 
-    def _determine_violation_status(self, filepath: str, violation_id: str, file_metadata: dict, violation_overrides: dict) -> tuple[str, Optional[str]]:
-        if filepath in file_metadata:
-            f_meta = file_metadata[filepath]
-            if f_meta.get("manual_status") in ("COMPLIANT", "EXEMPT"):
-                justification = f_meta.get("justification") or f"File override: {f_meta.get('manual_status')}"
-                return "OVERRIDDEN", justification
-        if violation_id in violation_overrides:
-            return "OVERRIDDEN", violation_overrides[violation_id]
-        return "ACTIVE", None
+
 
     def _run_propagation(
         self,
@@ -307,11 +299,11 @@ class Auditor:
             if filepath_filter:
                 normalized_filter = filepath_filter.replace("\\", "/")
                 conn.execute(
-                    "DELETE FROM compliance_violations WHERE replace(filepath, '\\', '/') LIKE ?",
+                    "DELETE FROM compliance_violations WHERE replace(filepath, '\\', '/') LIKE ? AND origin = 'automatic'",
                     (f"{normalized_filter}%",)
                 )
             else:
-                conn.execute("DELETE FROM compliance_violations")
+                conn.execute("DELETE FROM compliance_violations WHERE origin = 'automatic'")
 
         # 1. Fetch all symbols from the database
         all_symbols = []
@@ -334,7 +326,6 @@ class Auditor:
 
         # 3. Classify all symbols dynamically
         file_metadata = self.repository.get_all_files_metadata()
-        violation_overrides = self.repository.get_violation_overrides()
 
         symbol_classifications = {}
         for sym in all_symbols:
@@ -422,9 +413,6 @@ class Auditor:
                             violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
                             rule_id = f"{field_name}_pkg_{forbidden_source}".lower().replace("/", "_").replace(".", "_")
                             
-                            status, justification = self._determine_violation_status(
-                                filepath, violation_id, file_metadata, violation_overrides
-                            )
                             violation_data = {
                                 "violation_id": violation_id,
                                 "rule_id": rule_id,
@@ -432,8 +420,7 @@ class Auditor:
                                 "filepath": filepath,
                                 "line": line_number,
                                 "message": msg,
-                                "status": status,
-                                "justification": justification
+                                "origin": "automatic"
                             }
                             violations.append(violation_data)
                             self.repository.add_violation(**violation_data)
@@ -522,9 +509,6 @@ class Auditor:
                                 if matched_prefix:
                                     rule_id = f"{matched_prefix}_{rule_id}".lower().replace("/", "_").replace(".", "_")
                                     
-                                status, justification = self._determine_violation_status(
-                                    filepath, violation_id, file_metadata, violation_overrides
-                                )
                                 violation_data = {
                                     "violation_id": violation_id,
                                     "rule_id": rule_id,
@@ -532,8 +516,7 @@ class Auditor:
                                     "filepath": filepath,
                                     "line": line_number,
                                     "message": trace_msg,
-                                    "status": status,
-                                    "justification": justification
+                                    "origin": "automatic"
                                 }
                                 violations.append(violation_data)
                                 self.repository.add_violation(**violation_data)
@@ -603,9 +586,6 @@ class Auditor:
                             violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
                             rule_id = f"naming_{classification}".lower().replace("/", "_").replace(".", "_")
                             
-                            status, justification = self._determine_violation_status(
-                                filepath, violation_id, file_metadata, violation_overrides
-                            )
                             violation_data = {
                                 "violation_id": violation_id,
                                 "rule_id": rule_id,
@@ -613,26 +593,23 @@ class Auditor:
                                 "filepath": filepath,
                                 "line": line_number,
                                 "message": msg,
-                                "status": status,
-                                "justification": justification
+                                "origin": "automatic"
                             }
                             violations.append(violation_data)
                             self.repository.add_violation(**violation_data)
 
-        # Re-compute automated status for all files based on active violations
+        # Re-compute automated status for all files based on active automatic violations
         violations_by_file = {}
         for v in violations:
             v_filepath = v["filepath"]
-            violations_by_file.setdefault(v_filepath, []).append(v["status"])
+            violations_by_file.setdefault(v_filepath, []).append(v.get("origin", "automatic"))
 
         for f_path in file_metadata.keys():
-            v_statuses = violations_by_file.get(f_path, [])
-            if not v_statuses:
+            v_origins = violations_by_file.get(f_path, [])
+            if not v_origins or all(o != "automatic" for o in v_origins):
                 new_status = "COMPLIANT"
-            elif any(s == "ACTIVE" for s in v_statuses):
-                new_status = "VIOLATION_DETECTED"
             else:
-                new_status = "COMPLIANT"
+                new_status = "VIOLATION_DETECTED"
             self.repository.update_file_status(f_path, new_status)
 
         print(f"[Auditor] Completed audit. Found {len(violations)} architectural violations.")

@@ -14,13 +14,15 @@ class Repository:
     # --- File Tracking & Integrity Cascade ---
     
     def upsert_file(self, filepath: str, sha256: str, language: str):
-        """Registers or updates a file's hashing and index metadata."""
+        """Registers or updates a file's hashing and index metadata. Resets manual_status if changed."""
         with self.db_conn.session() as conn:
             conn.execute(
                 """
-                INSERT INTO files (filepath, sha256, language, last_indexed)
-                VALUES (?, ?, ?, now())
+                INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, manual_fields, justification)
+                VALUES (?, ?, ?, now(), 'COMPLIANT', 'PENDING_AUDIT', '{}', 'New file, pending initial audit')
                 ON CONFLICT (filepath) DO UPDATE SET
+                    manual_status = CASE WHEN files.sha256 <> excluded.sha256 THEN 'PENDING_AUDIT' ELSE files.manual_status END,
+                    justification = CASE WHEN files.sha256 <> excluded.sha256 THEN 'File modified, pending re-audit' ELSE files.justification END,
                     sha256 = excluded.sha256,
                     language = excluded.language,
                     last_indexed = now()
@@ -219,25 +221,23 @@ class Repository:
         filepath: str,
         line: int,
         message: str,
-        status: str = "ACTIVE",
-        justification: Optional[str] = None
+        origin: str = "automatic"
     ):
         """Registers an architectural boundary violation."""
         with self.db_conn.session() as conn:
             conn.execute(
                 """
-                INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message, status, justification)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message, origin)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (violation_id) DO UPDATE SET
                     rule_id = excluded.rule_id,
                     symbol = excluded.symbol,
                     filepath = excluded.filepath,
                     line = excluded.line,
                     message = excluded.message,
-                    status = excluded.status,
-                    justification = excluded.justification
+                    origin = excluded.origin
                 """,
-                (violation_id, rule_id, symbol, filepath, line, message, status, justification)
+                (violation_id, rule_id, symbol, filepath, line, message, origin)
             )
 
     def get_violations(self) -> List[Dict[str, Any]]:
@@ -245,9 +245,9 @@ class Repository:
         with self.db_conn.session() as conn:
             res = conn.execute(
                 """
-                SELECT v.violation_id, v.rule_id, r.description, v.symbol, v.filepath, v.line, v.message, r.severity, v.checked_at, v.status, v.justification
+                SELECT v.violation_id, v.rule_id, r.description, v.symbol, v.filepath, v.line, v.message, r.severity, v.checked_at, v.origin
                 FROM compliance_violations v
-                JOIN compliance_rules r ON v.rule_id = r.rule_id
+                LEFT JOIN compliance_rules r ON v.rule_id = r.rule_id
                 ORDER BY r.severity DESC, v.filepath ASC
                 """
             ).fetchall()
@@ -255,15 +255,14 @@ class Repository:
                 {
                     "violation_id": r[0],
                     "rule_id": r[1],
-                    "rule_description": r[2],
+                    "rule_description": r[2] or "Manual Logical Audit",
                     "symbol": r[3],
                     "filepath": r[4],
                     "line": r[5],
                     "message": r[6],
-                    "severity": r[7],
+                    "severity": r[7] or "WARNING",
                     "checked_at": r[8],
-                    "status": r[9],
-                    "justification": r[10]
+                    "origin": r[9]
                 }
                 for r in res
             ]
@@ -307,7 +306,7 @@ class Repository:
     # --- Bulk Ingestion Helpers ---
 
     def upsert_files_bulk(self, files_list: List[Dict[str, Any]]):
-        """Bulk upserts a list of files in a single transaction."""
+        """Bulk upserts a list of files in a single transaction. Resets manual_status on change."""
         data = [
             (
                 f["filepath"],
@@ -319,9 +318,11 @@ class Repository:
         with self.db_conn.session() as conn:
             conn.executemany(
                 """
-                INSERT INTO files (filepath, sha256, language, last_indexed)
-                VALUES (?, ?, ?, now())
+                INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, manual_fields, justification)
+                VALUES (?, ?, ?, now(), 'COMPLIANT', 'PENDING_AUDIT', '{}', 'New file, pending initial audit')
                 ON CONFLICT (filepath) DO UPDATE SET
+                    manual_status = CASE WHEN files.sha256 <> excluded.sha256 THEN 'PENDING_AUDIT' ELSE files.manual_status END,
+                    justification = CASE WHEN files.sha256 <> excluded.sha256 THEN 'File modified, pending re-audit' ELSE files.justification END,
                     sha256 = excluded.sha256,
                     language = excluded.language,
                     last_indexed = now()
@@ -522,8 +523,8 @@ class Repository:
                 prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
         return prefix_counts
 
-    def update_file_override_status(self, filepath: str, manual_status: Optional[str], justification: Optional[str] = None):
-        """Sets or clears the manual override compliance status for a file."""
+    def update_file_manual_status(self, filepath: str, status: str, justification: Optional[str] = None):
+        """Sets the manual compliance status for a file."""
         with self.db_conn.session() as conn:
             conn.execute(
                 """
@@ -532,7 +533,7 @@ class Repository:
                     justification = ?
                 WHERE filepath = ?
                 """,
-                (manual_status, justification, filepath)
+                (status, justification, filepath)
             )
 
     def update_file_manual_fields(self, filepath: str, manual_fields: dict, justification: Optional[str] = None):
@@ -584,30 +585,13 @@ class Repository:
                 }
             return metadata
 
-    def add_violation_override(self, violation_id: str, justification: str):
-        """Registers an override for a specific violation ID."""
+    def delete_manual_violations(self, filepath: str):
+        """Clears manual violations for a file."""
         with self.db_conn.session() as conn:
             conn.execute(
-                """
-                INSERT INTO violation_overrides (violation_id, justification, overridden_at)
-                VALUES (?, ?, now())
-                ON CONFLICT (violation_id) DO UPDATE SET
-                    justification = excluded.justification,
-                    overridden_at = now()
-                """,
-                (violation_id, justification)
+                "DELETE FROM compliance_violations WHERE filepath = ? AND origin = 'manual'",
+                (filepath,)
             )
-
-    def remove_violation_override(self, violation_id: str):
-        """Removes an override for a specific violation ID."""
-        with self.db_conn.session() as conn:
-            conn.execute("DELETE FROM violation_overrides WHERE violation_id = ?", (violation_id,))
-
-    def get_violation_overrides(self) -> Dict[str, str]:
-        """Returns all persistent violation overrides mapping violation_id -> justification."""
-        with self.db_conn.session() as conn:
-            rows = conn.execute("SELECT violation_id, justification FROM violation_overrides").fetchall()
-            return {r[0]: r[1] for r in rows}
 
 
 

@@ -263,7 +263,7 @@ def cmd_report(args):
 
 
 def cmd_set_status(args):
-    """Sets manual override status for a file."""
+    """Sets manual AI compliance status flag for a file."""
     project_root = Path(args.project_root).resolve()
     arch_dir = project_root / ".arch"
     if not arch_dir.exists():
@@ -272,6 +272,15 @@ def cmd_set_status(args):
 
     db_conn = DbConnection(arch_dir / "arch.db")
     repository = Repository(db_conn)
+
+    status = args.status.upper()
+    if status not in ("COMPLIANT", "VIOLATION_DETECTED", "PENDING_AUDIT"):
+        print(f"Error: Invalid manual compliance status choice: {args.status}. Allowed: COMPLIANT, VIOLATION_DETECTED, PENDING_AUDIT.", file=sys.stderr)
+        sys.exit(1)
+
+    if status == "VIOLATION_DETECTED" and not args.justification:
+        print("Error: Justification must be provided when flagging a file as VIOLATION_DETECTED.", file=sys.stderr)
+        sys.exit(1)
 
     try:
         filepath = args.filepath
@@ -291,19 +300,27 @@ def cmd_set_status(args):
             print(f"Error: File '{args.filepath}' is not registered in the database.", file=sys.stderr)
             sys.exit(1)
 
-        status = args.status
-        if status.lower() == "none":
-            status = None
-        else:
-            status = status.upper()
-
-        repository.update_file_override_status(filepath, status, args.justification)
+        # 1. Update manual_status in files table
+        repository.update_file_manual_status(filepath, status, args.justification)
         
-        auditor = Auditor(repository, project_root)
-        auditor.run_audit(filepath_filter=filepath)
-        
-        status_msg = f"manual status set to '{status}'" if status else "manual status override cleared"
-        print(f"Successfully updated '{filepath}': {status_msg}.")
+        # 2. Sync manual violations in compliance_violations table
+        repository.delete_manual_violations(filepath)
+        if status == "VIOLATION_DETECTED":
+            import hashlib
+            violation_text = f"manual_logical_audit_{filepath}_{args.justification}"
+            violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
+            
+            repository.add_violation(
+                violation_id=violation_id,
+                rule_id="logical_audit",
+                symbol=None,
+                filepath=filepath,
+                line=1,
+                message=args.justification,
+                origin="manual"
+            )
+            
+        print(f"Successfully updated manual status for '{filepath}' to '{status}'.")
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -373,56 +390,6 @@ def cmd_set_fields(args):
         db_conn.close()
 
 
-def cmd_override_violation(args):
-    """Overrides a compliance violation by ID."""
-    project_root = Path(args.project_root).resolve()
-    arch_dir = project_root / ".arch"
-    if not arch_dir.exists():
-        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
-        sys.exit(1)
-
-    db_conn = DbConnection(arch_dir / "arch.db")
-    repository = Repository(db_conn)
-
-    try:
-        repository.add_violation_override(args.violation_id, args.justification)
-        
-        auditor = Auditor(repository, project_root)
-        auditor.run_audit()
-        
-        print(f"Violation '{args.violation_id}' overridden successfully.")
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        db_conn.close()
-
-
-def cmd_remove_override(args):
-    """Removes a violation override by ID."""
-    project_root = Path(args.project_root).resolve()
-    arch_dir = project_root / ".arch"
-    if not arch_dir.exists():
-        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
-        sys.exit(1)
-
-    db_conn = DbConnection(arch_dir / "arch.db")
-    repository = Repository(db_conn)
-
-    try:
-        repository.remove_violation_override(args.violation_id)
-        
-        auditor = Auditor(repository, project_root)
-        auditor.run_audit()
-        
-        print(f"Removed override for violation '{args.violation_id}' successfully.")
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        db_conn.close()
-
-
 def main():
     parser = argparse.ArgumentParser(
         prog="arch",
@@ -448,10 +415,10 @@ def main():
     report_parser.set_defaults(func=cmd_report)
 
     # set-status
-    set_status_parser = subparsers.add_parser("set-status", help="Set manual compliance status for a file")
+    set_status_parser = subparsers.add_parser("set-status", help="Set manual AI logical compliance status for a file")
     set_status_parser.add_argument("filepath", help="Filepath to the target file")
-    set_status_parser.add_argument("status", choices=["COMPLIANT", "EXEMPT", "VIOLATION_DETECTED", "PENDING_AUDIT", "none", "None"], help="Manual compliance status (use 'none' to clear)")
-    set_status_parser.add_argument("justification", nargs="?", default=None, help="Optional override justification")
+    set_status_parser.add_argument("status", choices=["COMPLIANT", "VIOLATION_DETECTED", "PENDING_AUDIT"], help="Manual logical compliance status")
+    set_status_parser.add_argument("justification", nargs="?", default=None, help="Justification comment (required for VIOLATION_DETECTED)")
     set_status_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
     set_status_parser.set_defaults(func=cmd_set_status)
 
@@ -462,19 +429,6 @@ def main():
     set_fields_parser.add_argument("justification", nargs="?", default=None, help="Optional update justification")
     set_fields_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
     set_fields_parser.set_defaults(func=cmd_set_fields)
-
-    # override-violation
-    override_parser = subparsers.add_parser("override-violation", help="Override a specific violation by ID")
-    override_parser.add_argument("violation_id", help="Hexadecimal violation ID to override")
-    override_parser.add_argument("justification", help="Justification comment")
-    override_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
-    override_parser.set_defaults(func=cmd_override_violation)
-
-    # remove-override
-    remove_parser = subparsers.add_parser("remove-override", help="Remove override for a specific violation")
-    remove_parser.add_argument("violation_id", help="Hexadecimal violation ID to restore")
-    remove_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
-    remove_parser.set_defaults(func=cmd_remove_override)
 
     args = parser.parse_args()
 

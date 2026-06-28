@@ -303,8 +303,7 @@ def test_mcp_tools_audit(tmp_path, monkeypatch):
     monkeypatch.setattr("auditor.analyzer.Auditor.run_audit", mock_run_audit)
 
     out = mcp_server.audit()
-    assert "## Compliance Audit Report" in out
-    assert "Active Violations (1)" in out
+    assert "## Compliance Audit Report: 1 violation(s) found" in out
     assert "[rules_test]" in out
     assert "lib/ui/widget.dart:L10" in out
     assert "ui_widget" in out
@@ -441,9 +440,9 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     # Insert a file in the DB
     repository.upsert_file("lib/ui/widget.dart", "sha123", "dart")
 
-    # 1. Test set_file_status
+    # 1. Test set_file_status (COMPLIANT)
     out_status = mcp_server.set_file_status("lib/ui/widget.dart", "COMPLIANT", "Approved legacy module")
-    assert "Successfully updated compliance status" in out_status
+    assert "Successfully updated manual status" in out_status
     assert "COMPLIANT" in out_status
 
     # Check database
@@ -451,7 +450,18 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert file_info["manual_status"] == "COMPLIANT"
     assert file_info["justification"] == "Approved legacy module"
 
-    # 2. Test set_file_fields
+    # 2. Test set_file_status (VIOLATION_DETECTED)
+    out_violation = mcp_server.set_file_status("lib/ui/widget.dart", "VIOLATION_DETECTED", "Needs refactoring")
+    assert "Successfully updated manual status" in out_violation
+    assert "VIOLATION_DETECTED" in out_violation
+
+    # Check manual violation is inserted
+    all_violations = repository.get_violations()
+    manual_violations = [v for v in all_violations if v["origin"] == "manual"]
+    assert len(manual_violations) == 1
+    assert manual_violations[0]["message"] == "Needs refactoring"
+
+    # 3. Test set_file_fields
     out_fields = mcp_server.set_file_fields("lib/ui/widget.dart", {"pattern": "Widget", "tier": 1}, "Set annotations")
     assert "Successfully updated manual fields" in out_fields
     assert "Widget" in out_fields
@@ -463,48 +473,11 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert m_fields["pattern"] == "Widget"
     assert m_fields["tier"] == 1
 
-    # 3. Test get_file_details
+    # 4. Test get_file_details
     out_details = mcp_server.get_file_details("lib/ui/widget.dart")
     assert "File Details:" in out_details
     assert "Widget" in out_details
-    assert "COMPLIANT" in out_details
-
-    db_conn.close()
-
-
-def test_mcp_tools_violation_override(tmp_path, monkeypatch):
-    repository, db_conn, root = setup_workspace(tmp_path)
-
-    import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
-
-    # Insert rule, file, and violation
-    with db_conn.session() as conn:
-        conn.execute("""
-            INSERT INTO compliance_rules (rule_id, description, severity)
-            VALUES ('rules_test', 'presentation ui constraint', 'WARNING')
-        """)
-        conn.execute("""
-            INSERT INTO files (filepath, sha256, language)
-            VALUES ('lib/ui/widget.dart', 'sha123', 'dart')
-        """)
-
-    out_override = mcp_server.set_violation_override("vi_1", "Approved exception")
-    assert "Violation 'vi_1' overridden successfully" in out_override
-
-    # Check DB overrides
-    overrides = repository.get_violation_overrides()
-    assert overrides["vi_1"] == "Approved exception"
-
-    # Remove override
-    out_remove = mcp_server.remove_violation_override("vi_1")
-    assert "Successfully removed override" in out_remove
-
-    # Check DB overrides again
-    overrides2 = repository.get_violation_overrides()
-    assert "vi_1" not in overrides2
+    assert "VIOLATION_DETECTED" in out_details
 
     db_conn.close()
 

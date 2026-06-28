@@ -6,8 +6,8 @@ CREATE TABLE IF NOT EXISTS files (
     sha256 VARCHAR NOT NULL,
     language VARCHAR NOT NULL,
     last_indexed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    status VARCHAR NOT NULL DEFAULT 'PENDING_AUDIT',
-    manual_status VARCHAR, -- 'COMPLIANT', 'EXEMPT', or NULL
+    status VARCHAR NOT NULL DEFAULT 'COMPLIANT', -- 'COMPLIANT' or 'VIOLATION_DETECTED'
+    manual_status VARCHAR NOT NULL DEFAULT 'PENDING_AUDIT', -- 'PENDING_AUDIT', 'COMPLIANT', or 'VIOLATION_DETECTED'
     manual_fields VARCHAR NOT NULL DEFAULT '{}', -- JSON string containing manual metadata fields
     justification TEXT
 );
@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS compliance_rules (
     severity VARCHAR NOT NULL -- e.g., 'Error', 'Warning', 'Info'
 );
 
+-- 6. Track violations discovered during compliance audits
 CREATE TABLE IF NOT EXISTS compliance_violations (
     violation_id VARCHAR PRIMARY KEY,
     rule_id VARCHAR,
@@ -57,13 +58,5 @@ CREATE TABLE IF NOT EXISTS compliance_violations (
     line INTEGER NOT NULL,
     message TEXT NOT NULL,
     checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    status VARCHAR DEFAULT 'ACTIVE',
-    justification TEXT
-);
-
--- 7. Track persistent overrides for individual compliance violations
-CREATE TABLE IF NOT EXISTS violation_overrides (
-    violation_id VARCHAR PRIMARY KEY,
-    justification TEXT NOT NULL,
-    overridden_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    origin VARCHAR DEFAULT 'automatic' -- 'automatic' or 'manual'
 );
