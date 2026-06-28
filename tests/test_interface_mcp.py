@@ -198,13 +198,13 @@ def test_query_tool_multi_query(tmp_path, monkeypatch):
 
     # Test query with single string
     out_single = mcp_server.query("search query")
-    assert 'Semantic Search Results for: "search query"' in out_single
+    assert 'Search Results for: "search query"' in out_single
     assert "sym_a" in out_single
 
     # Test query with list of strings
     out_multi = mcp_server.query(["first search", "second search"])
-    assert 'Semantic Search Results for: "first search"' in out_multi
-    assert 'Semantic Search Results for: "second search"' in out_multi
+    assert 'Search Results for: "first search"' in out_multi
+    assert 'Search Results for: "second search"' in out_multi
     assert "sym_a" in out_multi
 
     db_conn.close()
@@ -440,20 +440,18 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     # Insert a file in the DB
     repository.files.upsert_file("lib/ui/widget.dart", "sha123", "dart")
 
-    # 1. Test set_file_status (COMPLIANT)
-    out_status = mcp_server.set_file_status("lib/ui/widget.dart", "COMPLIANT", "Approved legacy module")
-    assert "Successfully updated manual status" in out_status
-    assert "COMPLIANT" in out_status
+    # 1. Test set_fields status (COMPLIANT)
+    out_status = mcp_server.set_fields(filepath="lib/ui/widget.dart", field="status", value="COMPLIANT", justification="Approved legacy module")
+    assert "Successfully updated manual fields" in out_status
 
     # Check database
     file_info = repository.files.get_file("lib/ui/widget.dart")
     assert file_info["manual_status"] == "COMPLIANT"
     assert file_info["justification"] == "Approved legacy module"
 
-    # 2. Test set_file_status (VIOLATION_DETECTED)
-    out_violation = mcp_server.set_file_status("lib/ui/widget.dart", "VIOLATION_DETECTED", "Needs refactoring")
-    assert "Successfully updated manual status" in out_violation
-    assert "VIOLATION_DETECTED" in out_violation
+    # 2. Test set_fields status (VIOLATION)
+    out_violation = mcp_server.set_fields(filepath="lib/ui/widget.dart", field="status", value="VIOLATION", justification="Needs refactoring")
+    assert "Successfully updated manual fields" in out_violation
 
     # Check manual violation is inserted
     all_violations = repository.compliance.get_violations()
@@ -461,21 +459,23 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert len(manual_violations) == 1
     assert manual_violations[0]["message"] == "Needs refactoring"
 
-    # 3. Test set_file_fields
-    out_fields = mcp_server.set_file_fields("lib/ui/widget.dart", {"pattern": "Controller", "tier": 1}, "Set annotations")
+    # 3. Test set_fields manual field
+    out_fields = mcp_server.set_fields(filepath="lib/ui/widget.dart", field="pattern", value="Controller", justification="Set annotations")
     assert "Successfully updated manual fields" in out_fields
-    assert "Controller" in out_fields
 
     # Check database
     file_info_updated = repository.files.get_file("lib/ui/widget.dart")
     import json
     m_fields = json.loads(file_info_updated["manual_fields"])
     assert m_fields["pattern"] == "Controller"
-    assert m_fields["tier"] == 1
 
-    # 4. Test get_file_details
-    out_details = mcp_server.get_file_details("lib/ui/widget.dart")
-    assert "File Details:" in out_details
+    # Test ontology validation failure
+    out_auto = mcp_server.set_fields(filepath="lib/ui/widget.dart", field="layer", value="Presentation")
+    assert "Ontology Validation Error" in out_auto
+
+    # 4. Test index (details mode)
+    out_details = mcp_server.index(table="files", key="lib/ui/widget.dart")
+    assert "File:" in out_details
     assert "Controller" in out_details
     assert "VIOLATION_DETECTED" in out_details
 

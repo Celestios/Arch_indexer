@@ -1,7 +1,8 @@
 import os
 import sys
+import json
 from pathlib import Path
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Any
 
 # Setup sys.path to resolve imports from src/
 src_dir = Path(__file__).resolve().parent.parent
@@ -32,7 +33,7 @@ mcp = FastMCP("arch")
 @mcp.tool()
 def query(text: Union[List[str], str], limit: int = 5) -> str:
     """
-    Runs a semantic search over the docstrings of indexed symbols in the codebase.
+    Runs keyword and semantic searches over symbols, docstrings, and files in the codebase.
     Accepts a single query string or a list of query strings, returning matches for each.
     """
     if not DB_PATH.exists():
@@ -55,26 +56,69 @@ def query(text: Union[List[str], str], limit: int = 5) -> str:
     md = []
     try:
         for q in queries:
-            embedding = embedder.embed(q)
-            results = repository.symbols.semantic_search(embedding, limit=limit)
-            
-            md.append(f"## Semantic Search Results for: \"{q}\"\n")
-            if not results:
-                md.append("*No matching symbols found.*\n")
-                continue
+            # 1. Keyword search on symbol (nodes) names
+            with db_conn.session() as conn:
+                keyword_symbols = conn.execute(
+                    "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE LOWER(symbol) LIKE ? LIMIT ?",
+                    (f"%{q.lower()}%", limit)
+                ).fetchall()
                 
-            for i, res in enumerate(results, 1):
-                md.append(f"{i}. **{res['symbol']}** (Similarity: {res['similarity']:.2f})")
-                md.append(f"   - **File**: `{res['filepath']}`")
-                md.append(f"   - **Kind**: `{res['kind']}`")
-                if res['signature']:
-                    md.append(f"   - **Signature**: `{res['signature']}`")
-                if res['docstring']:
-                    doc = res['docstring'].strip().replace("\n", "\n     ")
-                    md.append(f"   - **Doc**: {doc}")
+                # 2. Keyword search on filepaths
+                file_matches = conn.execute(
+                    "SELECT filepath, language, status FROM files WHERE LOWER(filepath) LIKE ? LIMIT ?",
+                    (f"%{q.lower()}%", limit)
+                ).fetchall()
+
+            # 3. Semantic search over docstrings (vector similarity)
+            results = []
+            try:
+                embedding = embedder.embed(q)
+                results = repository.symbols.semantic_search(embedding, limit=limit)
+            except Exception as e:
+                # Fallback if embedding generation fails
+                pass
+
+            md.append(f"## Search Results for: \"{q}\"\n")
+            
+            # Section 1: Symbol Name Matches (Keyword)
+            md.append("### 1. Symbol Name Matches (Keyword Search)")
+            if not keyword_symbols:
+                md.append("*No matching symbols found by name.*\n")
+            else:
+                for idx, row in enumerate(keyword_symbols, 1):
+                    md.append(f"{idx}. **{row[0]}**")
+                    md.append(f"   - **File**: `{row[1]}`")
+                    md.append(f"   - **Kind**: `{row[2]}`")
+                    if row[3]:
+                        md.append(f"   - **Signature**: `{row[3]}`")
+                md.append("")
+                
+            # Section 2: Semantic Matches (Docstrings)
+            md.append("### 2. Semantic Docstring Matches")
+            if not results:
+                md.append("*No semantically matching symbols found in docstrings.*\n")
+            else:
+                for idx, res in enumerate(results, 1):
+                    md.append(f"{idx}. **{res['symbol']}** (Similarity: {res['similarity']:.2f})")
+                    md.append(f"   - **File**: `{res['filepath']}`")
+                    md.append(f"   - **Kind**: `{res['kind']}`")
+                    if res['docstring']:
+                        doc = res['docstring'].strip().replace("\n", "\n     ")
+                        md.append(f"   - **Doc**: {doc}")
+                md.append("")
+                
+            # Section 3: Filepath Matches
+            md.append("### 3. Filepath Matches")
+            if not file_matches:
+                md.append("*No matching files found by path.*\n")
+            else:
+                for idx, row in enumerate(file_matches, 1):
+                    md.append(f"{idx}. **{row[0]}**")
+                    md.append(f"   - **Language**: `{row[1]}`")
+                    md.append(f"   - **Audit Status**: `{row[2]}`")
                 md.append("")
     except Exception as e:
-        return f"Error executing semantic search: {e}"
+        return f"Error executing query search: {e}"
     finally:
         db_conn.close()
 
@@ -82,92 +126,123 @@ def query(text: Union[List[str], str], limit: int = 5) -> str:
 
 
 @mcp.tool()
-def context(filepath: str) -> str:
+def context(filepaths: Union[List[str], str]) -> str:
     """
     Provides a compact structural index (Table of Contents) of all classes, methods,
-    and functions declared in the specified file, along with their precise line ranges.
+    and functions declared in the specified file(s), along with their precise line ranges.
     Use this to locate specific definitions before reading the code.
+    
+    Accepts:
+      - A single filepath string
+      - A comma-separated filepath string (e.g. 'file1.dart, file2.dart')
+      - A list/array of filepaths
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
 
+    # Normalize files to a list
+    if isinstance(filepaths, str):
+        if "," in filepaths:
+            paths = [p.strip() for p in filepaths.split(",") if p.strip()]
+        else:
+            paths = [filepaths.strip()]
+    else:
+        paths = filepaths
+
     db_conn = DbConnection(DB_PATH)
     repository = Repository(db_conn)
 
+    out_md = []
+
     try:
-        symbols = repository.symbols.get_symbols_in_file(filepath)
-        # Fetch all occurrences in this file to match start/end line coordinates in a single session
-        with db_conn.session() as conn:
-            occs = conn.execute(
-                """
-                SELECT symbol, start_line, end_line, role 
-                FROM occurrences 
-                WHERE replace(filepath, '\\', '/') = ? OR filepath = ?
-                """,
-                (filepath.replace("\\", "/"), filepath)
-            ).fetchall()
+        for fp in paths:
+            symbols = repository.symbols.get_symbols_in_file(fp)
+            # Resolve relative file name match if not found exactly
+            if not symbols:
+                all_files = repository.files.get_all_files_metadata()
+                matched = None
+                for real_fp in all_files.keys():
+                    if real_fp.replace("\\", "/").endswith(fp.replace("\\", "/")):
+                        matched = real_fp
+                        break
+                if matched:
+                    fp = matched
+                    symbols = repository.symbols.get_symbols_in_file(fp)
+
+            if not symbols:
+                out_md.append(f"## File Index: `{fp}`\n\n*No indexed symbols found in file. Make sure the file exists and is indexed.*")
+                continue
+
+            with db_conn.session() as conn:
+                occs = conn.execute(
+                    """
+                    SELECT symbol, start_line, end_line, role 
+                    FROM occurrences 
+                    WHERE replace(filepath, '\\', '/') = ? OR filepath = ?
+                    """,
+                    (fp.replace("\\", "/"), fp)
+                ).fetchall()
+
+            # Map symbols to their occurrences (prefer role = 1: SCIP Definition)
+            symbol_to_lines = {}
+            for sym_name, start_line, end_line, role in occs:
+                if sym_name not in symbol_to_lines or role == 1:
+                    symbol_to_lines[sym_name] = (start_line, end_line)
+
+            classes = []
+            methods_and_funcs = []
+
+            for sym in symbols:
+                sym_name = sym["symbol"]
+                line_range = ""
+                if sym_name in symbol_to_lines:
+                    start_line, end_line = symbol_to_lines[sym_name]
+                    line_range = f"L{start_line}-{end_line}"
+
+                sym_data = {
+                    "symbol": sym_name,
+                    "signature": sym["signature"],
+                    "docstring": sym["docstring"],
+                    "line_range": line_range,
+                    "kind": sym["kind"]
+                }
+
+                if sym["kind"].lower() in ("class", "struct", "interface"):
+                    classes.append(sym_data)
+                else:
+                    methods_and_funcs.append(sym_data)
+
+            md = [f"## File Index: `{fp}`\n"]
+
+            if classes:
+                md.append("### Classes")
+                for cl in classes:
+                    range_str = f" [{cl['line_range']}]" if cl['line_range'] else ""
+                    md.append(f"- **{cl['symbol']}**{range_str} ({cl['kind']})")
+                    if cl['docstring']:
+                        doc = cl['docstring'].strip().split("\n")[0]
+                        md.append(f"  * {doc}")
+                md.append("")
+
+            if methods_and_funcs:
+                md.append("### Methods & Functions")
+                for mf in methods_and_funcs:
+                    range_str = f" [{mf['line_range']}]" if mf['line_range'] else ""
+                    md.append(f"- **{mf['symbol']}**{range_str}")
+                    if mf['signature']:
+                        md.append(f"  * *Signature*: `{mf['signature']}`")
+                    if mf['docstring']:
+                        doc = mf['docstring'].strip().split("\n")[0]
+                        md.append(f"  * *Docstring*: {doc}")
+                md.append("")
+
+            out_md.append("\n".join(md))
     except Exception as e:
-        return f"Error retrieving context for file {filepath}: {e}"
+        return f"Error retrieving context: {e}"
     finally:
         db_conn.close()
 
-    if not symbols:
-        return f"No indexed symbols found in file: `{filepath}`. Make sure the file has been indexed."
-
-    # Map symbols to their occurrences (prefer role = 1: SCIP Definition)
-    symbol_to_lines = {}
-    for sym_name, start_line, end_line, role in occs:
-        if sym_name not in symbol_to_lines or role == 1:
-            symbol_to_lines[sym_name] = (start_line, end_line)
-
-    classes = []
-    methods_and_funcs = []
-
-    for sym in symbols:
-        sym_name = sym["symbol"]
-        line_range = ""
-        if sym_name in symbol_to_lines:
-            start_line, end_line = symbol_to_lines[sym_name]
-            line_range = f"L{start_line}-{end_line}"
-
-        sym_data = {
-            "symbol": sym_name,
-            "signature": sym["signature"],
-            "docstring": sym["docstring"],
-            "line_range": line_range,
-            "kind": sym["kind"]
-        }
-
-        if sym["kind"].lower() in ("class", "struct", "interface"):
-            classes.append(sym_data)
-        else:
-            methods_and_funcs.append(sym_data)
-
-    md = [f"## File Index: `{filepath}`\n"]
-
-    if classes:
-        md.append("### Classes")
-        for cl in classes:
-            range_str = f" [{cl['line_range']}]" if cl['line_range'] else ""
-            md.append(f"- **{cl['symbol']}**{range_str} ({cl['kind']})")
-            if cl['docstring']:
-                doc = cl['docstring'].strip().split("\n")[0]
-                md.append(f"  * {doc}")
-        md.append("")
-
-    if methods_and_funcs:
-        md.append("### Methods & Functions")
-        for mf in methods_and_funcs:
-            range_str = f" [{mf['line_range']}]" if mf['line_range'] else ""
-            md.append(f"- **{mf['symbol']}**{range_str}")
-            if mf['signature']:
-                md.append(f"  * *Signature*: `{mf['signature']}`")
-            if mf['docstring']:
-                doc = mf['docstring'].strip().split("\n")[0]
-                md.append(f"  * *Docstring*: {doc}")
-        md.append("")
-
-    return "\n".join(md)
+    return "\n\n---\n\n".join(out_md)
 
 
 @mcp.tool()
@@ -221,10 +296,9 @@ def impact(symbol: str, max_depth: int = 3) -> str:
 
 
 @mcp.tool()
-def audit(filepath: Optional[str] = None) -> str:
+def audit() -> str:
     """
-    Runs the architectural boundary rules compliance audit.
-    If filepath is provided, restricts checks to code calling from that file/prefix.
+    Runs the project-wide architectural boundary rules compliance audit.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -235,21 +309,17 @@ def audit(filepath: Optional[str] = None) -> str:
 
     try:
         # Run static compliance check (updates files status and returns automatic violations)
-        violations = auditor.run_audit(filepath_filter=filepath)
+        violations = auditor.run_audit()
         
         # Also fetch all violations (both manual/AI and automatic) from compliance_violations table
         all_violations = repository.compliance.get_violations()
-        if filepath:
-            normalized_filter = filepath.replace("\\", "/")
-            all_violations = [v for v in all_violations if v["filepath"].replace("\\", "/").startswith(normalized_filter)]
     except Exception as e:
         return f"Error running compliance audit: {e}"
     finally:
         db_conn.close()
 
     if not all_violations:
-        scope = f"for `{filepath}`" if filepath else "project-wide"
-        return f"## Compliance Audit\n\n**No boundary rule violations found** {scope}."
+        return "## Compliance Audit\n\n**No boundary rule violations found** project-wide."
 
     md = [f"## Compliance Audit Report: {len(all_violations)} violation(s) found\n"]
     for i, v in enumerate(all_violations, 1):
@@ -385,133 +455,181 @@ def report(name: str, format: str = "markdown") -> str:
 
 
 @mcp.tool()
-def set_file_status(filepath: str, status: str, justification: Optional[str] = None) -> str:
+def set_fields(
+    filepath: Optional[str] = None,
+    field: Optional[str] = None,
+    value: Optional[Any] = None,
+    justification: Optional[str] = None,
+    json_filepath: Optional[str] = None
+) -> str:
     """
-    Sets the manual compliance status flag (logical audit) for a file component.
-    Parameters:
-      filepath: Path to the target file.
-      status: Compliance status ('COMPLIANT' or 'VIOLATION_DETECTED').
-      justification: Explanatory comment for the status (required if status is 'VIOLATION_DETECTED').
+    Updates manual compliance status or manual metadata fields for files.
+    Enforces the configuration ontology strictly from config.json.
+    
+    You must provide EITHER:
+      1. 'filepath', 'field', 'value', and 'justification' (optional) to set a single field on a file.
+         To set status, use field='status' and value='COMPLIANT' or 'VIOLATION'.
+      2. 'json_filepath' pointing to a JSON file containing a mapping of filepaths to fields and values.
+         Example: {"lib/widget.dart": {"status": "VIOLATION", "pattern": "Controller"}}
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
 
-    status = status.upper()
-    if status not in ("COMPLIANT", "VIOLATION_DETECTED"):
-        return f"Error: Invalid compliance status choice: {status}. Allowed values: COMPLIANT, VIOLATION_DETECTED."
-
-    if status == "VIOLATION_DETECTED" and not justification:
-        return "Error: Justification must be provided when flagging a file as VIOLATION_DETECTED."
-
     db_conn = DbConnection(DB_PATH)
     repository = Repository(db_conn)
 
-    try:
-        # Check if the file is registered in the database
-        file_info = repository.files.get_file(filepath)
-        if not file_info:
-            all_files = repository.files.get_all_files_metadata()
-            matched = None
-            for fp in all_files.keys():
-                if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
-                    matched = fp
-                    break
-            if matched:
-                filepath = matched
-            else:
-                return f"Error: File '{filepath}' is not registered in the database. Please index it first."
-
-        # 1. Update manual_status and justification in files table
-        repository.files.update_file_manual_status(filepath, status, justification)
-        
-        # 2. Sync manual violations in compliance_violations table
-        # Clear existing manual violations for this file
-        repository.compliance.delete_manual_violations(filepath)
-        
-        # If the manual status is VIOLATION_DETECTED, insert a manual violation
-        if status == "VIOLATION_DETECTED":
-            import hashlib
-            violation_text = f"manual_logical_audit_{filepath}_{justification}"
-            violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
-            
-            repository.compliance.add_violation(
-                violation_id=violation_id,
-                rule_id="logical_audit",
-                symbol=None,
-                filepath=filepath,
-                line=1,
-                message=justification,
-                origin="manual"
-            )
-
-        return f"Successfully updated manual status for '{filepath}' to '{status}'."
-    except Exception as e:
-        return f"Error setting file status: {e}"
-    finally:
+    # 1. Load config for ontology validation
+    config_path = PROJECT_ROOT / ".arch" / "config.json"
+    if not config_path.exists():
         db_conn.close()
-
-
-@mcp.tool()
-def set_file_fields(filepath: str, fields: dict, justification: Optional[str] = None) -> str:
-    """
-    Attaches arbitrary manual metadata fields to a file component.
-    Parameters:
-      filepath: Path to the target file.
-      fields: Dict containing metadata key-value annotations (e.g. {"pattern": "Controller"}).
-      justification: Optional explanation of the metadata update.
-    """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
+        return "Error: Ontology config not found at .arch/config.json. Please run 'arch init' first."
 
     try:
-        file_info = repository.files.get_file(filepath)
-        if not file_info:
-            # Try resolving path
-            all_files = repository.files.get_all_files_metadata()
-            matched = None
-            for fp in all_files.keys():
-                if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
-                    matched = fp
-                    break
-            if matched:
-                filepath = matched
-            else:
-                return f"Error: File '{filepath}' is not registered in the database. Please index it first."
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as e:
+        db_conn.close()
+        return f"Error loading config.json: {e}"
 
-        # Fetch current manual fields to merge updates
-        current_fields = {}
-        if file_info.get("manual_fields"):
-            import json
-            try:
-                current_fields = json.loads(file_info["manual_fields"])
-            except Exception:
-                pass
-        
-        # Update/Merge fields
-        for k, v in fields.items():
-            if v is None:
-                current_fields.pop(k, None)
-            else:
-                current_fields[k] = v
+    # Helper function to resolve filepath to database matching key
+    def resolve_filepath(fp: str) -> Optional[str]:
+        file_info = repository.files.get_file(fp)
+        if file_info:
+            return fp
+        all_files = repository.files.get_all_files_metadata()
+        for real_fp in all_files.keys():
+            if real_fp.replace("\\", "/").endswith(fp.replace("\\", "/")):
+                return real_fp
+        return None
 
-        repository.files.update_file_manual_fields(filepath, current_fields, justification)
+    # Helper to validate a specific file field updates against the config ontology
+    def validate_file_fields(fp: str, fields: dict) -> Optional[str]:
+        normalized_path = fp.replace("\\", "/")
+        matching_prefix = None
+        for prefix in config.keys():
+            if prefix == ".":
+                if matching_prefix is None:
+                    matching_prefix = "."
+            elif normalized_path.startswith(prefix):
+                if matching_prefix is None or len(prefix) > len(matching_prefix):
+                    matching_prefix = prefix
         
-        # Run audit to propagate metadata changes
+        if not matching_prefix:
+            return f"No configuration prefix matches file '{fp}'."
+            
+        prefix_conf = config[matching_prefix]
+        manual_cfg = prefix_conf.get("manual_fields", {})
+        auto_cfg = prefix_conf.get("automatic_fields", {})
+
+        for f_name, val in fields.items():
+            if f_name == "status":
+                if str(val).upper() not in ("COMPLIANT", "VIOLATION"):
+                    return f"Invalid value '{val}' for field 'status'. Allowed values: 'COMPLIANT', 'VIOLATION'."
+                continue
+
+            if f_name in auto_cfg:
+                return f"Field '{f_name}' in '{fp}' is an automatic field defined in the ontology and cannot be modified manually."
+
+            if f_name not in manual_cfg:
+                return f"Field '{f_name}' is not defined as a manual field in the ontology for prefix '{matching_prefix}'."
+
+            field_conf = manual_cfg[f_name]
+            allowed_values = field_conf.get("values")
+            if allowed_values is not None:
+                if val not in allowed_values:
+                    return f"Invalid value '{val}' for manual field '{f_name}' in '{fp}'. Allowed values: {allowed_values}."
+            else:
+                if not isinstance(val, str):
+                    return f"Value for manual field '{f_name}' in '{fp}' must be a string."
+        return None
+
+    # Helper to apply the updates to database
+    def apply_updates(fp: str, fields: dict):
+        status_val = fields.get("status")
+        manual_updates = {k: v for k, v in fields.items() if k != "status"}
+
+        if status_val is not None:
+            status_db = "VIOLATION_DETECTED" if status_val.upper() == "VIOLATION" else "COMPLIANT"
+            repository.files.update_file_manual_status(fp, status_db, justification)
+            
+            repository.compliance.delete_manual_violations(fp)
+            if status_db == "VIOLATION_DETECTED":
+                import hashlib
+                violation_text = f"manual_logical_audit_{fp}_{justification or ''}"
+                violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
+                repository.compliance.add_violation(
+                    violation_id=violation_id,
+                    rule_id="logical_audit",
+                    symbol=None,
+                    filepath=fp,
+                    line=1,
+                    message=justification or "Manual compliance violation flagged",
+                    origin="manual"
+                )
+
+        if manual_updates:
+            file_info = repository.files.get_file(fp)
+            current_fields = {}
+            if file_info and file_info.get("manual_fields"):
+                try:
+                    current_fields = json.loads(file_info["manual_fields"])
+                except Exception:
+                    pass
+            for k, v in manual_updates.items():
+                if v is None:
+                    current_fields.pop(k, None)
+                else:
+                    current_fields[k] = v
+            repository.files.update_file_manual_fields(fp, current_fields, justification)
+
+    try:
+        updates_map = {}
+        if json_filepath:
+            path_obj = Path(json_filepath)
+            if not path_obj.is_absolute():
+                path_obj = PROJECT_ROOT / path_obj
+            if not path_obj.exists():
+                return f"Error: JSON file not found at {path_obj}"
+            with open(path_obj, "r", encoding="utf-8") as f:
+                raw_json = json.load(f)
+            if not isinstance(raw_json, dict):
+                return "Error: JSON file must contain a top-level object mapping filepaths to fields."
+            updates_map = raw_json
+        else:
+            if not filepath or not field:
+                return "Error: You must provide either 'json_filepath' or both 'filepath' and 'field'."
+            updates_map = {filepath: {field: value}}
+
+        # Resolve paths and validate first (atomic validations)
+        resolved_updates = {}
+        for raw_fp, fields in updates_map.items():
+            real_fp = resolve_filepath(raw_fp)
+            if not real_fp:
+                return f"Error: File '{raw_fp}' is not registered in the database. Please index it first."
+            
+            val_err = validate_file_fields(real_fp, fields)
+            if val_err:
+                return f"Ontology Validation Error: {val_err}"
+            
+            resolved_updates[real_fp] = fields
+
+        # Apply updates
+        for real_fp, fields in resolved_updates.items():
+            apply_updates(real_fp, fields)
+
+        # Run compliance audit to propagate changes
         auditor = Auditor(repository, PROJECT_ROOT)
         auditor.run_audit()
-        
-        return f"Successfully updated manual fields for '{filepath}' to: {current_fields}."
+
+        return f"Successfully updated manual fields and compliance status for {len(resolved_updates)} file(s) and re-ran audit."
     except Exception as e:
-        return f"Error setting file fields: {e}"
+        return f"Error updating fields: {e}"
     finally:
         db_conn.close()
 
 
 @mcp.tool()
-def clear_pending_audits(justification: str) -> str:
+def clear_pending_audits() -> str:
     """
     Clears the pending audit flags for all files in the database.
     Use this after large refactors or git checkout operations when you know the changes are compliant.
@@ -523,7 +641,7 @@ def clear_pending_audits(justification: str) -> str:
     repository = Repository(db_conn)
 
     try:
-        repository.files.clear_all_pending_audits(justification)
+        repository.files.clear_all_pending_audits("Cleared manually via API")
         # Run audit to clean up all pending_audit violations
         auditor = Auditor(repository, PROJECT_ROOT)
         auditor.run_audit()
@@ -535,56 +653,198 @@ def clear_pending_audits(justification: str) -> str:
 
 
 @mcp.tool()
-def get_file_details(filepath: str) -> str:
+def index(table: str, key: Optional[str] = None, limit: int = 50) -> str:
     """
-    Retrieves full indexing, compliance status, manual status, and metadata fields for a specific file.
+    Retrieves metadata, properties, and relationships from the database index tables.
+    Supported tables:
+      - 'files': Lists/details files in the project index. key = filepath or suffix.
+      - 'symbols' (or 'nodes'): Lists/details code symbols. key = symbol name.
+      - 'occurrences': Lists coordinates/line numbers of symbol definitions/references. key = symbol name.
+      - 'edges': Lists call-graph dependencies. key = symbol name (matches either caller/source or callee/target).
+      - 'violations': Lists architectural compliance violations. key = filepath or rule_id.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
 
     db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
+    
+    table_lower = table.lower().strip()
+    if table_lower in ("nodes", "node"):
+        table_name = "symbols"
+    elif table_lower in ("violations", "violation"):
+        table_name = "compliance_violations"
+    elif table_lower in ("edges", "edge", "dependencies", "dependency"):
+        table_name = "edges"
+    elif table_lower in ("occurrences", "occurrence"):
+        table_name = "occurrences"
+    elif table_lower in ("files", "file"):
+        table_name = "files"
+    else:
+        db_conn.close()
+        return f"Error: Unsupported table '{table}'. Supported tables: files, symbols (nodes), occurrences, edges, violations."
+
+    md = [f"## Database Index: `{table_name}`\n"]
 
     try:
-        file_info = repository.files.get_file(filepath)
-        if not file_info:
-            all_files = repository.files.get_all_files_metadata()
-            matched = None
-            for fp in all_files.keys():
-                if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
-                    matched = fp
-                    break
-            if matched:
-                filepath = matched
-                file_info = repository.files.get_file(filepath)
-            
-        if not file_info:
-            return f"Error: File '{filepath}' is not registered in the database."
+        with db_conn.session() as conn:
+            if not key:
+                # Listing mode
+                if table_name == "files":
+                    rows = conn.execute(
+                        "SELECT filepath, language, status, manual_status, pending_audit FROM files LIMIT ?",
+                        (limit,)
+                    ).fetchall()
+                    md.append("| Filepath | Language | Status | Manual Status | Pending Audit |")
+                    md.append("| :--- | :--- | :--- | :--- | :--- |")
+                    for r in rows:
+                        md.append(f"| `{r[0]}` | `{r[1]}` | `{r[2]}` | `{r[3]}` | `{r[4]}` |")
 
-        import json
-        m_fields = {}
-        if file_info.get("manual_fields"):
-            try:
-                m_fields = json.loads(file_info["manual_fields"])
-            except Exception:
-                pass
+                elif table_name == "symbols":
+                    rows = conn.execute(
+                        "SELECT symbol, filepath, kind, signature, docstring FROM symbols LIMIT ?",
+                        (limit,)
+                    ).fetchall()
+                    md.append("| Symbol | Filepath | Kind | Signature | Docstring |")
+                    md.append("| :--- | :--- | :--- | :--- | :--- |")
+                    for r in rows:
+                        doc = r[4].strip().split("\n")[0] if r[4] else ""
+                        md.append(f"| `{r[0]}` | `{r[1] or ''}` | `{r[2]}` | `{r[3] or ''}` | {doc} |")
 
-        md = [
-            f"## File Details: `{file_info['filepath']}`\n",
-            f"- **Language**: `{file_info['language']}`",
-            f"- **SHA-256 Hash**: `{file_info['sha256']}`",
-            f"- **Last Indexed**: `{file_info['last_indexed']}`",
-            f"- **Automatically Computed Status**: `{file_info['status']}`",
-            f"- **Manual AI Audit Status**: `{file_info['manual_status']}`",
-            f"- **Pending Audit**: `{file_info['pending_audit']}`",
-            f"- **Justification Comment**: *{file_info['justification'] or 'None'}*",
-            f"- **Manual Fields/Annotations**: `{m_fields}`"
-        ]
-        return "\n".join(md)
+                elif table_name == "occurrences":
+                    rows = conn.execute(
+                        "SELECT symbol, filepath, start_line, end_line, role FROM occurrences LIMIT ?",
+                        (limit,)
+                    ).fetchall()
+                    md.append("| Symbol | Filepath | Line Range | Role |")
+                    md.append("| :--- | :--- | :--- | :--- |")
+                    for r in rows:
+                        md.append(f"| `{r[0]}` | `{r[1]}` | L{r[2]}-{r[3]} | {r[4]} |")
+
+                elif table_name == "edges":
+                    rows = conn.execute(
+                        "SELECT source, target, relation FROM edges LIMIT ?",
+                        (limit,)
+                    ).fetchall()
+                    md.append("| Source (Caller) | Target (Callee) | Relation |")
+                    md.append("| :--- | :--- | :--- |")
+                    for r in rows:
+                        md.append(f"| `{r[0]}` | `{r[1]}` | `{r[2]}` |")
+
+                elif table_name == "compliance_violations":
+                    rows = conn.execute(
+                        "SELECT violation_id, rule_id, symbol, filepath, line, message, origin FROM compliance_violations LIMIT ?",
+                        (limit,)
+                    ).fetchall()
+                    md.append("| Violation ID | Rule ID | Symbol | Filepath:Line | Message | Origin |")
+                    md.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+                    for r in rows:
+                        md.append(f"| `{r[0]}` | `{r[1]}` | `{r[2] or ''}` | `{r[3]}:{r[4]}` | {r[5]} | `{r[6]}` |")
+
+                md.append(f"\n*Showing up to {limit} rows (no key specified).*")
+
+            else:
+                # Key details mode
+                key_wildcard = f"%{key}%"
+                if table_name == "files":
+                    rows = conn.execute(
+                        """
+                        SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification 
+                        FROM files 
+                        WHERE filepath = ? OR filepath LIKE ?
+                        """,
+                        (key, f"%{key.replace('\\', '/')}%")
+                    ).fetchall()
+                    if not rows:
+                        md.append(f"*No matching files found for key '{key}'.*")
+                    for r in rows:
+                        md.append(f"### File: `{r[0]}`")
+                        md.append(f"- **Language**: `{r[2]}`")
+                        md.append(f"- **SHA-256 Hash**: `{r[1]}`")
+                        md.append(f"- **Last Indexed**: `{r[3]}`")
+                        md.append(f"- **Computed Status**: `{r[4]}`")
+                        md.append(f"- **Manual Status**: `{r[5]}`")
+                        md.append(f"- **Pending Audit**: `{r[6]}`")
+                        md.append(f"- **Justification Comment**: *{r[8] or 'None'}*")
+                        md.append(f"- **Manual Fields**: `{r[7]}`")
+                        md.append("")
+
+                elif table_name == "symbols":
+                    rows = conn.execute(
+                        """
+                        SELECT symbol, filepath, kind, signature, docstring, body_hash 
+                        FROM symbols 
+                        WHERE symbol = ? OR symbol LIKE ?
+                        """,
+                        (key, key_wildcard)
+                    ).fetchall()
+                    if not rows:
+                        md.append(f"*No matching symbols found for key '{key}'.*")
+                    for r in rows:
+                        md.append(f"### Symbol: `{r[0]}`")
+                        md.append(f"- **Filepath**: `{r[1] or 'External'}`")
+                        md.append(f"- **Kind**: `{r[2]}`")
+                        md.append(f"- **Signature**: `{r[3] or 'None'}`")
+                        md.append(f"- **Body AST Hash**: `{r[5] or 'None'}`")
+                        doc = r[4].strip() if r[4] else "None"
+                        md.append(f"- **Docstring**:\n  {doc.replace('\n', '\n  ')}")
+                        md.append("")
+
+                elif table_name == "occurrences":
+                    rows = conn.execute(
+                        """
+                        SELECT symbol, filepath, start_line, start_col, end_line, end_col, role 
+                        FROM occurrences 
+                        WHERE symbol = ? OR symbol LIKE ?
+                        """,
+                        (key, key_wildcard)
+                    ).fetchall()
+                    if not rows:
+                        md.append(f"*No matching occurrences found for key '{key}'.*")
+                    else:
+                        md.append("| Symbol | Filepath | Line Range | Cols | Role |")
+                        md.append("| :--- | :--- | :--- | :--- | :--- |")
+                        for r in rows:
+                            md.append(f"| `{r[0]}` | `{r[1]}` | L{r[2]}-{r[4]} | C{r[3]}-{r[5]} | {r[6]} |")
+
+                elif table_name == "edges":
+                    rows = conn.execute(
+                        """
+                        SELECT source, target, relation 
+                        FROM edges 
+                        WHERE source = ? OR target = ? OR source LIKE ? OR target LIKE ?
+                        """,
+                        (key, key, key_wildcard, key_wildcard)
+                    ).fetchall()
+                    if not rows:
+                        md.append(f"*No matching edges found for key '{key}'.*")
+                    else:
+                        md.append("| Source (Caller) | Target (Callee) | Relation |")
+                        md.append("| :--- | :--- | :--- |")
+                        for r in rows:
+                            md.append(f"| `{r[0]}` | `{r[1]}` | `{r[2]}` |")
+
+                elif table_name == "compliance_violations":
+                    rows = conn.execute(
+                        """
+                        SELECT violation_id, rule_id, symbol, filepath, line, message, checked_at, origin 
+                        FROM compliance_violations 
+                        WHERE filepath LIKE ? OR rule_id = ? OR symbol = ?
+                        """,
+                        (f"%{key}%", key, key)
+                    ).fetchall()
+                    if not rows:
+                        md.append(f"*No matching compliance violations found for key '{key}'.*")
+                    else:
+                        md.append("| Violation ID | Rule ID | Symbol | Filepath:Line | Message | Checked At | Origin |")
+                        md.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+                        for r in rows:
+                            md.append(f"| `{r[0]}` | `{r[1]}` | `{r[2] or ''}` | `{r[3]}:{r[4]}` | {r[5]} | `{r[6]}` | `{r[7]}` |")
     except Exception as e:
-        return f"Error retrieving file details: {e}"
+        return f"Error executing index query: {e}"
     finally:
         db_conn.close()
+
+    return "\n".join(md)
 
 
 @mcp.tool()
