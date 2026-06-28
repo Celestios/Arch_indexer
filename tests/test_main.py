@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 from unittest.mock import patch
-from main import main, cmd_init, cmd_index, cmd_audit
+from main import main, cmd_init, cmd_audit
 
 
 def test_main_no_args(capsys):
@@ -16,14 +16,22 @@ def test_main_no_args(capsys):
     assert "usage:" in captured.out.lower() or "arch" in captured.out.lower()
 
 
-def test_cmd_init_creates_workspace(tmp_path):
-    """cmd_init creates .arch/ directory."""
+def test_cmd_init_creates_workspace(tmp_path, monkeypatch, capsys):
+    """cmd_init creates .arch/ directory, scans languages, and handles skip model choice."""
+    # Mock interactive choice to '4' (Skip model download) to prevent downloading during tests
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "4")
+
     args = type("Args", (), {"project_root": str(tmp_path)})()
     cmd_init(args)
 
     assert (tmp_path / ".arch").exists()
     assert (tmp_path / ".arch" / "config.json").exists()
     assert (tmp_path / ".arch" / "arch.db").exists()
+
+    captured = capsys.readouterr()
+    assert "Workspace folder initialized" in captured.out
+    assert "No supported toolchains detected" in captured.out or "Indexer" in captured.out
 
 
 def test_cmd_audit_no_violations(tmp_path, capsys):
@@ -36,15 +44,3 @@ def test_cmd_audit_no_violations(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert "No violations" in captured.out or "violations" in captured.out.lower()
-
-
-def test_cmd_index_no_languages(tmp_path, capsys):
-    """cmd_index handles project with no supported languages."""
-    from setup.initializer import initialize_workspace
-    initialize_workspace(tmp_path)
-
-    args = type("Args", (), {"project_root": str(tmp_path)})()
-    cmd_index(args)
-
-    captured = capsys.readouterr()
-    assert "No supported languages" in captured.out

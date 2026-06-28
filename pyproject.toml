@@ -13,7 +13,6 @@ dependencies = [
     "numpy>=1.24.0",
     "tokenizers>=0.13.0",
     "pytest>=7.0.0",
-    "grpcio-tools>=1.50.0",
 ]
 
 
@@ -23,3 +22,8 @@ arch = "src.main:main"
 [build-system]
 requires = ["setuptools>=61.0.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+norecursedirs = ["archive"]
+

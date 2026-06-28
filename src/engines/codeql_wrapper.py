@@ -16,7 +16,7 @@ class CodeQlWrapper:
     def __init__(self, bin_dir: Path):
         """Initializes the wrapper and locates the local codeql.exe executable."""
         self.bin_dir = bin_dir
-        self.codeql_exe = bin_dir / "codeql" / "codeql" / "codeql.exe"
+        self.codeql_exe = bin_dir / "codeql" / "codeql.exe"
         
         # Fallback to checking the system path if local executable is missing
         if not self.codeql_exe.exists():

@@ -273,7 +273,7 @@ class Repository:
                     kind, 
                     signature, 
                     docstring,
-                    array_cosine_similarity(embedding, ?::FLOAT[]) as similarity
+                    list_cosine_similarity(embedding, ?::FLOAT[]) as similarity
                 FROM symbols
                 WHERE embedding IS NOT NULL
                 ORDER BY similarity DESC
@@ -391,4 +391,125 @@ class Repository:
                 """,
                 data
             )
+
+    def get_symbols_in_file(self, filepath: str) -> List[Dict[str, Any]]:
+        """Retrieves all symbols defined inside a specific file."""
+        normalized = filepath.replace("\\", "/")
+        with self.db_conn.session() as conn:
+            res = conn.execute(
+                """
+                SELECT symbol, filepath, kind, signature, docstring, body_hash
+                FROM symbols
+                WHERE replace(filepath, '\\', '/') = ? OR filepath = ?
+                """,
+                (normalized, filepath)
+            ).fetchall()
+            return [
+                {
+                    "symbol": r[0],
+                    "filepath": r[1],
+                    "kind": r[2],
+                    "signature": r[3],
+                    "docstring": r[4],
+                    "body_hash": r[5]
+                }
+                for r in res
+            ]
+
+    def get_transitive_closure(self, symbol: str, max_depth: int = 3) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Computes the transitive closure of callers (upstream) and callees (downstream)
+        for a given symbol up to max_depth.
+        Returns a dict: {"upstream": [...], "downstream": [...]}
+        """
+        upstream = []
+        downstream = []
+
+        with self.db_conn.session() as conn:
+            # Upstream BFS (incoming callers)
+            queue = [(symbol, 0, [symbol])]
+            visited = {symbol}
+            while queue:
+                curr, depth, path = queue.pop(0)
+                if depth >= max_depth:
+                    continue
+                callers = conn.execute(
+                    "SELECT source FROM edges WHERE target = ?", (curr,)
+                ).fetchall()
+                for (caller,) in callers:
+                    if caller not in visited:
+                        visited.add(caller)
+                        new_path = [caller] + path
+                        upstream.append({
+                            "symbol": caller,
+                            "depth": depth + 1,
+                            "path": new_path
+                        })
+                        queue.append((caller, depth + 1, new_path))
+
+            # Downstream BFS (outgoing callees)
+            queue = [(symbol, 0, [symbol])]
+            visited = {symbol}
+            while queue:
+                curr, depth, path = queue.pop(0)
+                if depth >= max_depth:
+                    continue
+                callees = conn.execute(
+                    "SELECT target FROM edges WHERE source = ?", (curr,)
+                ).fetchall()
+                for (callee,) in callees:
+                    if callee not in visited:
+                        visited.add(callee)
+                        new_path = path + [callee]
+                        downstream.append({
+                            "symbol": callee,
+                            "depth": depth + 1,
+                            "path": new_path
+                        })
+                        queue.append((callee, depth + 1, new_path))
+
+        return {"upstream": upstream, "downstream": downstream}
+
+    def get_symbol_counts_by_kind(self) -> Dict[str, int]:
+        """Returns symbol counts grouped by their declaration kind."""
+        with self.db_conn.session() as conn:
+            res = conn.execute(
+                "SELECT kind, COUNT(*) FROM symbols GROUP BY kind"
+            ).fetchall()
+            return {r[0]: r[1] for r in res}
+
+    def get_repo_totals(self) -> Dict[str, int]:
+        """Returns total counts for files, symbols, edges, and violations."""
+        with self.db_conn.session() as conn:
+            files_cnt = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            symbols_cnt = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+            edges_cnt = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            violations_cnt = conn.execute("SELECT COUNT(*) FROM compliance_violations").fetchone()[0]
+            return {
+                "files": files_cnt,
+                "symbols": symbols_cnt,
+                "edges": edges_cnt,
+                "violations": violations_cnt
+            }
+
+    def get_symbols_by_file_prefix(self) -> Dict[str, int]:
+        """Groups symbol counts by their top-level directory prefix."""
+        prefix_counts = {}
+        with self.db_conn.session() as conn:
+            res = conn.execute(
+                "SELECT filepath FROM symbols WHERE filepath IS NOT NULL"
+            ).fetchall()
+            for (fp,) in res:
+                fp_norm = fp.replace("\\", "/")
+                parts = fp_norm.split("/")
+                if len(parts) > 1:
+                    if len(parts) >= 3:
+                        prefix = f"{parts[0]}/{parts[1]}/"
+                    else:
+                        prefix = f"{parts[0]}/"
+                else:
+                    prefix = "./"
+                prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+        return prefix_counts
+
 

@@ -124,7 +124,7 @@ class ScipWrapper:
     def parse_index(scip_file: Path) -> Dict[str, Any]:
         """
         Parses a binary index.scip file and returns a normalized dictionary
-        of nodes (symbols) and edges (caller/callee relations).
+        of symbols, occurrences, and edges.
         """
         if not scip_file.exists():
             raise FileNotFoundError(f"SCIP index file not found at {scip_file}")
@@ -139,22 +139,36 @@ class ScipWrapper:
                 "tool_name": index.metadata.tool_info.name,
                 "tool_version": index.metadata.tool_info.version
             },
-            "nodes": {},
+            "symbols": {},
+            "occurrences": [],
             "edges": []
         }
 
-        # First pass: Extract symbol definitions & hover/docstrings
+        # 1. Parse external symbols (from external packages)
+        for sym_info in index.external_symbols:
+            docs = "\n".join(sym_info.documentation) if sym_info.documentation else ""
+            kind_val = sym_info.kind
+            kind_str = scip_pb2.SymbolInformation.Kind.Name(kind_val) if kind_val in scip_pb2.SymbolInformation.Kind.values() else "UnspecifiedKind"
+            
+            parsed_data["symbols"][sym_info.symbol] = {
+                "symbol": sym_info.symbol,
+                "filepath": None,
+                "kind": kind_str,
+                "signature": None,
+                "docstring": docs,
+                "body_hash": None
+            }
+
+        # 2. First pass: Extract local symbol definitions & hover/docstrings
         for document in index.documents:
             filepath = document.relative_path
             
-            # Map symbol informations (documentation and kinds)
+            # Map symbol metadata inside this file
             symbol_metadata = {}
             for sym_info in document.symbols:
                 docs = "\n".join(sym_info.documentation) if sym_info.documentation else ""
-                
-                # Resolve kind using protobuf Enum mappings
                 kind_val = sym_info.kind
-                kind_str = scip_pb2.Kind.Name(kind_val) if kind_val in scip_pb2.Kind.values() else "UnspecifiedKind"
+                kind_str = scip_pb2.SymbolInformation.Kind.Name(kind_val) if kind_val in scip_pb2.SymbolInformation.Kind.values() else "UnspecifiedKind"
                 
                 symbol_metadata[sym_info.symbol] = {
                     "docs": docs,
@@ -168,8 +182,6 @@ class ScipWrapper:
                 # Check if this occurrence is a definition (SymbolRole = 1)
                 is_definition = bool(occ.symbol_roles & 1)
                 
-                # Ranges are represented as [start_line, start_col, end_line, end_col] 
-                # or [line, start_col, end_col] (single line)
                 r = occ.range
                 if len(r) == 3:
                     start_line, start_col, end_line, end_col = r[0], r[1], r[0], r[2]
@@ -178,52 +190,66 @@ class ScipWrapper:
                 else:
                     continue  # Invalid range format
 
-                meta = symbol_metadata.get(symbol, {"docs": "", "kind": "UnspecifiedKind"})
+                # Record occurrence coordinates
+                parsed_data["occurrences"].append({
+                    "symbol": symbol,
+                    "filepath": filepath,
+                    "start_line": start_line + 1,  # SCIP uses 0-based lines
+                    "start_col": start_col,
+                    "end_line": end_line + 1,
+                    "end_col": end_col,
+                    "role": occ.symbol_roles
+                })
 
-                # If this is a definition, register it as a code node
-                if is_definition:
-                    # Ignore local variables/symbols to keep graph size focused
-                    if symbol.startswith("local "):
-                        continue
-
-                    parsed_data["nodes"][symbol] = {
+                # Register as a local definition symbol if role includes definition
+                if is_definition and not symbol.startswith("local "):
+                    meta = symbol_metadata.get(symbol, {"docs": "", "kind": "UnspecifiedKind"})
+                    
+                    parsed_data["symbols"][symbol] = {
                         "symbol": symbol,
                         "filepath": filepath,
-                        "start_line": start_line + 1,  # SCIP uses 0-based indexing
-                        "end_line": end_line + 1,
                         "kind": meta["kind"],
-                        "docs": meta["docs"]
+                        "signature": None,
+                        "docstring": meta["docs"],
+                        "body_hash": None
                     }
 
-        # Second pass: Extract call & reference edges
+        # 3. Second pass: Extract call & reference edges
+        # Pre-group definition occurrences by filepath to avoid O(N * M) nested loops
+        occurrences_by_file = {}
+        for occ in parsed_data["occurrences"]:
+            # Check if role contains Definition (bit 0)
+            if (occ["role"] & 1) and occ["symbol"] in parsed_data["symbols"]:
+                fp = occ["filepath"]
+                if fp not in occurrences_by_file:
+                    occurrences_by_file[fp] = []
+                occurrences_by_file[fp].append(occ)
+
+        # Sort the occurrences of each file by span size (smallest first) so innermost definitions win
+        for fp, defs in occurrences_by_file.items():
+            defs.sort(key=lambda d: d["end_line"] - d["start_line"])
+
         for document in index.documents:
             filepath = document.relative_path
             
-            # A call is mapped when a document contains a reference occurrence of a symbol.
-            # We track which definition/function contains the caller range
-            # to build exact 'source_symbol CALLS target_symbol' edges.
-            
-            # 1. Collect all local definitions in this file to determine caller contexts
-            local_defs = [
-                node for node in parsed_data["nodes"].values() 
-                if node["filepath"] == filepath
-            ]
-            
+            # Fetch pre-grouped definition occurrences for this file
+            file_defs = occurrences_by_file.get(filepath, [])
+
             for occ in document.occurrences:
                 symbol = occ.symbol
                 is_reference = not bool(occ.symbol_roles & 1)
                 
-                if not is_reference or symbol.startswith("local ") or symbol not in parsed_data["nodes"]:
+                # Check if target is a known symbol (local or external)
+                if not is_reference or symbol.startswith("local ") or symbol not in parsed_data["symbols"]:
                     continue
                 
-                # Find which definition encompasses this reference call range
-                r = occ.range
-                ref_line = r[0] + 1
+                ref_line = occ.range[0] + 1
                 
+                # Find which definition encompasses this reference call range
                 caller_symbol = None
-                for node in local_defs:
-                    if node["start_line"] <= ref_line <= node["end_line"]:
-                        caller_symbol = node["symbol"]
+                for def_occ in file_defs:
+                    if def_occ["start_line"] <= ref_line <= def_occ["end_line"]:
+                        caller_symbol = def_occ["symbol"]
                         break
                 
                 if caller_symbol and caller_symbol != symbol:
@@ -234,3 +260,59 @@ class ScipWrapper:
                     })
 
         return parsed_data
+
+    @staticmethod
+    def ingest_index(repository: Any, parsed_data: Dict[str, Any], embedder: Optional[Any] = None):
+        """
+        Ingests the parsed symbols, occurrences, and edges into the database.
+        Optionally uses an embedder to compute vector representations for symbol docstrings.
+        """
+        # 1. Register files first
+        files_to_register = set()
+        for occ in parsed_data["occurrences"]:
+            if occ["filepath"]:
+                files_to_register.add(occ["filepath"])
+        for sym in parsed_data["symbols"].values():
+            if sym["filepath"]:
+                files_to_register.add(sym["filepath"])
+
+        # Register files in bulk
+        files_to_ingest = [
+            {"filepath": fp, "sha256": "initial_hash", "language": "rust"}
+            for fp in files_to_register
+        ]
+        repository.upsert_files_bulk(files_to_ingest)
+
+        # 2. Ingest symbols
+        print(f"[SCIP Ingest] Ingesting {len(parsed_data['symbols'])} symbols into database...")
+        symbols_to_ingest = []
+        for sym_id, sym in parsed_data["symbols"].items():
+            embedding = None
+            if embedder and sym["docstring"]:
+                try:
+                    embedding = embedder.embed(sym["docstring"])
+                except Exception as e:
+                    print(f"Warning: Failed to generate embedding for {sym_id}: {e}", file=sys.stderr)
+            
+            symbols_to_ingest.append({
+                "symbol": sym["symbol"],
+                "filepath": sym["filepath"],
+                "kind": sym["kind"],
+                "signature": sym["signature"],
+                "docstring": sym["docstring"],
+                "body_hash": sym["body_hash"],
+                "embedding": embedding
+            })
+        repository.upsert_symbols_bulk(symbols_to_ingest)
+
+        # 3. Ingest occurrences
+        print(f"[SCIP Ingest] Ingesting {len(parsed_data['occurrences'])} occurrences...")
+        repository.add_occurrences_bulk(parsed_data["occurrences"])
+
+        # 4. Ingest call graph edges
+        print(f"[SCIP Ingest] Ingesting {len(parsed_data['edges'])} edges...")
+        repository.add_edges_bulk(parsed_data["edges"])
+        
+        print("[SCIP Ingest] Ingestion complete.")
+
+

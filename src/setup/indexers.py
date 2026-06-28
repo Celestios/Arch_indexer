@@ -15,16 +15,29 @@ def make_progress_callback(filename: str):
     return callback
 
 def bootstrap_codeql(bin_dir: Path) -> Path:
-    """Downloads and extracts the CodeQL CLI binary for Windows, caching the download."""
+    """Downloads and extracts the CodeQL CLI binary for Windows, caching the download in the archive directory."""
     codeql_dir = bin_dir / "codeql"
-    codeql_exe = codeql_dir / "codeql" / "codeql.exe"
+    codeql_exe = codeql_dir / "codeql.exe"
 
     if codeql_exe.exists():
         print("CodeQL CLI is already installed locally.")
         return codeql_exe
 
     bin_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = bin_dir / "codeql.zip"
+    
+    archive_dir = bin_dir.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = archive_dir / "codeql.zip"
+    old_zip_path = bin_dir / "codeql.zip"
+
+    # Migrate from bin/ to archive/ if it exists from previous setup runs
+    if old_zip_path.exists() and not zip_path.exists():
+        try:
+            print("Migrating codeql.zip from bin/ to archive/...")
+            old_zip_path.rename(zip_path)
+        except Exception:
+            pass
+
     CODEQL_URL = "https://github.com/github/codeql-cli-binaries/releases/latest/download/codeql-win64.zip"
 
     # Check if a valid cached zip file exists
@@ -56,9 +69,9 @@ def bootstrap_codeql(bin_dir: Path) -> Path:
         # Extract Zip file
         if codeql_dir.exists():
             shutil.rmtree(codeql_dir)
-        print(f"Extracting CodeQL CLI to {codeql_dir}...")
+        print(f"Extracting CodeQL CLI to {bin_dir}...")
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(codeql_dir)
+            zip_ref.extractall(bin_dir)
         print("CodeQL CLI successfully bootstrapped.")
     except Exception as e:
         # If extraction fails, clean up partially extracted files but keep the zip file
@@ -70,65 +83,34 @@ def bootstrap_codeql(bin_dir: Path) -> Path:
         raise RuntimeError(f"Failed to extract CodeQL CLI: {e}")
 
     return codeql_exe
-
-
-
-def bootstrap_scip(bin_dir: Path) -> Path:
-    """Compiles the SCIP CLI from source using Go and places it in the bin folder."""
-    scip_exe = bin_dir / "scip.exe"
-
-    if scip_exe.exists():
-        print("SCIP CLI is already compiled locally.")
-        return scip_exe
-
-    go_path = shutil.which("go")
-    if not go_path:
-        print("Go not found. Skipping optional SCIP CLI local compilation.")
-        return scip_exe
-
-    print("Bootstrapping SCIP CLI (compiling from source)...")
-    bin_dir.mkdir(parents=True, exist_ok=True)
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        try:
-            # Clone SCIP repository
-            print("Cloning scip-code/scip repository...")
-            subprocess.run(
-                ["git", "clone", "https://github.com/scip-code/scip.git", "--depth", "1", str(temp_path)],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-
-            # Build binary using Go
-            print("Compiling SCIP CLI using Go...")
-            subprocess.run(
-                ["go", "build", "-o", str(scip_exe), "./cmd/scip"],
-                cwd=str(temp_path),
-                check=True
-            )
-            print("SCIP CLI successfully compiled.")
-        except Exception as e:
-            if scip_exe.exists():
-                scip_exe.unlink()
-            raise RuntimeError(f"Failed to compile SCIP: {e}")
-
-    return scip_exe
-
-
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Bootstrap CodeQL indexer")
+    parser.add_argument("--skip-codeql", action="store_true", help="Skip CodeQL CLI setup")
+    parser.add_argument("--non-interactive", action="store_true", help="Run without interactive prompts")
+    args = parser.parse_args()
+
     project_root = Path(__file__).parent.parent.parent
     bin_folder = project_root / "bin"
-    
-    # Bootstrap CodeQL
-    try:
-        bootstrap_codeql(bin_folder)
-    except Exception as err:
-        print(f"Error: {err}", file=sys.stderr)
 
-    # Bootstrap SCIP
-    try:
-        bootstrap_scip(bin_folder)
-    except Exception as err:
-        print(f"Error: {err}", file=sys.stderr)
+    setup_codeql = not args.skip_codeql
+
+    # If interactive, prompt the user to confirm choices
+    if not args.non-interactive and sys.stdin.isatty():
+        print("\n--- CodeQL CLI Setup Configuration ---")
+        try:
+            cql_ans = input("Setup CodeQL CLI? [Y/n]: ").strip().lower()
+            setup_codeql = cql_ans not in ("n", "no")
+        except (KeyboardInterrupt, EOFError):
+            print("\nSetup cancelled or interrupted. Defaulting to setup CodeQL CLI.")
+            setup_codeql = True
+
+    # Bootstrap CodeQL
+    if setup_codeql:
+        try:
+            bootstrap_codeql(bin_folder)
+        except Exception as err:
+            print(f"Error bootstrapping CodeQL: {err}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("Skipping CodeQL CLI setup.")

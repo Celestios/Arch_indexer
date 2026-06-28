@@ -16,7 +16,7 @@ build/
 .gemini/
 .mimocode/
 .graphify/
-graphify-out/
+.arch/
 
 # Other caches/logs
 *.log
