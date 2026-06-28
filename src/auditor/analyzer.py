@@ -2,23 +2,29 @@ import os
 import json
 import sys
 import hashlib
-import fnmatch
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Set
-from collections import deque
-from db.connection import DbConnection
+from typing import Dict, List, Any, Optional
+
 from db.repository import Repository
+from auditor.classifier import SymbolClassifier
+from auditor.propagation import MetadataPropagator
+from auditor.path_tracer import PathTracer
 
 class Auditor:
     """
     Evaluates workspace architectural boundary compliance rules.
-    Loads configurations from .arch/config.json and audits symbols/edges inside the DuckDB.
+    Loads configurations from .arch/config.json and audits symbols/edges inside the database.
+    Delegates tasks to classifier, propagator, and path tracer modules.
     """
 
     def __init__(self, repository: Repository, project_root: Path):
         self.repository = repository
         self.project_root = project_root
         self.config_path = project_root / ".arch" / "config.json"
+        
+        self.classifier = SymbolClassifier(repository)
+        self.propagator = MetadataPropagator()
+        self.tracer = PathTracer(repository)
 
     def load_config(self) -> Dict[str, Any]:
         """Loads and parses the .arch/config.json file."""
@@ -49,239 +55,6 @@ class Auditor:
                     matching_prefix = prefix
                     
         return config.get(matching_prefix) if matching_prefix else None
-
-    def evaluate_conditions(self, symbol_info: Dict[str, Any], conditions: Dict[str, Any], outgoing_targets: List[str]) -> bool:
-        """
-        Returns True if a symbol definition meets all the specified assignment conditions.
-        """
-        # 1. Path prefix matching
-        if "path_prefix" in conditions:
-            prefix = conditions["path_prefix"]
-            filepath = symbol_info.get("filepath")
-            if not filepath or not filepath.replace("\\", "/").startswith(prefix):
-                return False
-                
-        # 2. Class name suffix matching
-        symbol_name = symbol_info["symbol"].split(" ")[-1]  # Extract simple name from SCIP FQN
-        if "class_suffix" in conditions:
-            suffix = conditions["class_suffix"]
-            if not symbol_name.endswith(suffix):
-                return False
-
-        # 3. Class name containing string matching
-        if "class_contains" in conditions:
-            substring = conditions["class_contains"]
-            if substring not in symbol_name:
-                return False
-
-        # 4. Name containing matching
-        if "name_contains" in conditions:
-            substring = conditions["name_contains"]
-            if substring not in symbol_name:
-                return False
-
-        # 5. Calls prefix matching (checks if symbol calls any symbol starting with the prefix)
-        if "calls_prefix" in conditions:
-            prefix = conditions["calls_prefix"]
-            matched_call = False
-            for target in outgoing_targets:
-                # Resolve the target symbol details to check its file path
-                target_node = self.repository.get_symbol(target)
-                if target_node and target_node.get("filepath"):
-                    if target_node["filepath"].replace("\\", "/").startswith(prefix):
-                        matched_call = True
-                        break
-            if not matched_call:
-                return False
-
-        return True
-
-    def assign_automatic_fields(
-        self,
-        symbol_info: Dict[str, Any],
-        prefix_conf: Dict[str, Any],
-        outgoing_targets: List[str]
-    ) -> Dict[str, Any]:
-        """
-        Evaluates the prefix configuration's automatic fields and returns the assigned values.
-        """
-        assigned_values = {}
-        auto_fields = prefix_conf.get("automatic_fields", {})
-        
-        for field_name, field_conf in auto_fields.items():
-            default_val = field_conf.get("default")
-            assigned_val = default_val
-            
-            # Check assignment rules in order (first match wins)
-            assignment_rules = field_conf.get("assignment_rules", [])
-            for rule in assignment_rules:
-                target_value = rule.get("value")
-                conditions = rule.get("conditions", {})
-                
-                if self.evaluate_conditions(symbol_info, conditions, outgoing_targets):
-                    assigned_val = target_value
-                    break
-                    
-            assigned_values[field_name] = assigned_val
-            
-        return assigned_values
-
-    def _get_simple_name(self, symbol: str) -> str:
-        """Extracts the simple class or function name from a SCIP FQN."""
-        sym = symbol.strip()
-        for separator in [" ", "::", ".", "/"]:
-            if separator in sym:
-                sym = sym.split(separator)[-1]
-        return sym
-
-    def _format_path_trace(self, path: List[str]) -> str:
-        """Generates a formatted, line-numbered path trace from source to target."""
-        trace_lines = []
-        for i, sym in enumerate(path):
-            symbol_info = self.repository.get_symbol(sym)
-            filepath = symbol_info.get("filepath") if symbol_info else None
-            
-            line_str = ""
-            if filepath:
-                if i < len(path) - 1:
-                    # Find where it calls the next node
-                    next_sym = path[i+1]
-                    occs = self.repository.get_occurrences_for_symbol(next_sym)
-                    call_line = None
-                    for occ in occs:
-                        if occ["filepath"] == filepath:
-                            call_line = occ["start_line"]
-                            break
-                    if call_line is not None:
-                        line_str = f":L{call_line}"
-                else:
-                    # Last node: find its definition line
-                    occs = self.repository.get_occurrences_for_symbol(sym)
-                    def_line = None
-                    for occ in occs:
-                        if occ["filepath"] == filepath and occ["role"] == 1:
-                            def_line = occ["start_line"]
-                            break
-                    if def_line is None and occs:
-                        def_line = occs[0]["start_line"]
-                    if def_line is not None:
-                        line_str = f":L{def_line}"
-            
-            fp_display = filepath if filepath else "[external]"
-            trace_lines.append(f"  {i+1}. {fp_display}{line_str} (symbol: {sym})")
-            
-        return "\nPath:\n" + "\n".join(trace_lines)
-
-
-
-    def _run_propagation(
-        self,
-        symbol_classifications: Dict[str, Dict[str, Any]],
-        all_edges: List[Dict[str, Any]],
-        config: Dict[str, Any]
-    ) -> Dict[tuple, str]:
-        """
-        Runs the dynamic fixed-point worklist propagation algorithm on the call graph.
-        Returns a predecessor mapping (child, field_name) -> parent to trace the origin of values.
-        """
-        propagation_fields = {}
-        for prefix, prefix_conf in config.items():
-            auto_fields = prefix_conf.get("automatic_fields", {})
-            for field_name, field_conf in auto_fields.items():
-                if field_conf.get("handler") == "propagation":
-                    propagation_fields[field_name] = {
-                        "direction": field_conf.get("propagation_direction", "upstream"),
-                        "weights": field_conf.get("weights") or {},
-                        "barriers": set(field_conf.get("barriers") or []),
-                        "barrier_field": field_conf.get("barrier_field") or field_name,
-                        "values": field_conf.get("values") or [],
-                        "default": field_conf.get("default")
-                    }
-
-        if not propagation_fields:
-            return {}
-
-        # Build adjacency lists for the call graph
-        adj_forward = {}
-        adj_backward = {}
-        for edge in all_edges:
-            src = edge["source"]
-            tgt = edge["target"]
-            if src in symbol_classifications and tgt in symbol_classifications:
-                adj_forward.setdefault(src, set()).add(tgt)
-                adj_backward.setdefault(tgt, set()).add(src)
-
-        # Tracks predecessor mappings: (child, field_name) -> parent
-        propagation_sources = {}
-
-        for field_name, p_cfg in propagation_fields.items():
-            direction = p_cfg["direction"]
-            weights = p_cfg["weights"]
-            barriers = p_cfg["barriers"]
-            barrier_field = p_cfg["barrier_field"]
-            values = p_cfg["values"]
-            default_val = p_cfg["default"]
-
-            # Map values to integer weights (priority)
-            if not weights:
-                weights = {val: idx for idx, val in enumerate(values)}
-
-            def get_weight(val):
-                if val is None or val == "Unknown":
-                    return -1
-                return weights.get(val, 0)
-
-            # Determine neighbors traversal function
-            if direction == "upstream":
-                get_neighbors = lambda n: adj_backward.get(n, [])
-            else:
-                get_neighbors = lambda n: adj_forward.get(n, [])
-
-            # Initialize worklist with all symbols having non-default values
-            worklist = []
-            visited = set()
-            for sym, data in symbol_classifications.items():
-                val = data["fields"].get(field_name, default_val)
-                if val is not None and val != default_val:
-                    worklist.append(sym)
-                    visited.add(sym)
-
-            queue = deque(worklist)
-            iterations = 0
-            max_iterations = 10000
-
-            while queue and iterations < max_iterations:
-                n = queue.popleft()
-                visited.discard(n)
-                iterations += 1
-
-                n_val = symbol_classifications[n]["fields"].get(field_name, default_val)
-                n_weight = get_weight(n_val)
-
-                for m in get_neighbors(n):
-                    # Check barriers on neighbor node `m`
-                    m_barrier_val = symbol_classifications[m]["fields"].get(barrier_field, default_val)
-                    if m_barrier_val in barriers:
-                        continue
-
-                    m_val = symbol_classifications[m]["fields"].get(field_name, default_val)
-                    m_weight = get_weight(m_val)
-
-                    if n_weight > m_weight:
-                        symbol_classifications[m]["fields"][field_name] = n_val
-                        propagation_sources[(m, field_name)] = n
-                        if m not in visited:
-                            queue.append(m)
-                            visited.add(m)
-
-        return propagation_sources
-
-    def _matches_blocklist(self, symbol: str, blocklist: List[str]) -> bool:
-        """Checks if a symbol matches any pattern in a blocklist."""
-        for pattern in blocklist:
-            if fnmatch.fnmatch(symbol, pattern):
-                return True
-        return False
 
     def run_audit(self, filepath_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -321,11 +94,11 @@ class Auditor:
         # 2. Map outgoing edges for callers
         outgoing_calls_map = {}
         for sym in all_symbols:
-            outgoing = self.repository.get_outgoing_edges(sym["symbol"])
+            outgoing = self.repository.edges.get_outgoing_edges(sym["symbol"])
             outgoing_calls_map[sym["symbol"]] = [o["target"] for o in outgoing]
 
         # 3. Classify all symbols dynamically
-        file_metadata = self.repository.get_all_files_metadata()
+        file_metadata = self.repository.files.get_all_files_metadata()
 
         symbol_classifications = {}
         for sym in all_symbols:
@@ -338,7 +111,7 @@ class Auditor:
                 continue
 
             outgoing = outgoing_calls_map.get(sym["symbol"], [])
-            classifications = self.assign_automatic_fields(sym, prefix_conf, outgoing)
+            classifications = self.classifier.assign_automatic_fields(sym, prefix_conf, outgoing)
             
             # Merge manual fields from files metadata (taking precedence)
             if filepath in file_metadata:
@@ -359,7 +132,7 @@ class Auditor:
             all_edges = [{"source": r[0], "target": r[1], "relation": r[2]} for r in res]
 
         # 4. Run Graph-based Metadata Propagation
-        propagation_sources = self._run_propagation(symbol_classifications, all_edges, config)
+        propagation_sources = self.propagator.run_propagation(symbol_classifications, all_edges, config)
 
         # 5. Audit call graph edges for compliance violations
         violations = []
@@ -398,12 +171,12 @@ class Auditor:
                         forbidden_source = rule.get("source")
                         blocklist = rule.get("blocklist", [])
                         
-                        if source_val == forbidden_source and self._matches_blocklist(target_sym, blocklist):
+                        if source_val == forbidden_source and self.tracer.matches_blocklist(target_sym, blocklist):
                             msg = rule.get("message", f"Package restriction violation: {source_val} cannot depend on {target_sym}")
                             
                             # Retrieve coordinate line number
                             line_number = 1
-                            occs = self.repository.get_occurrences_for_symbol(target_sym)
+                            occs = self.repository.symbols.get_occurrences_for_symbol(target_sym)
                             for occ in occs:
                                 if occ["filepath"] == filepath:
                                     line_number = occ["start_line"]
@@ -423,7 +196,7 @@ class Auditor:
                                 "origin": "automatic"
                             }
                             violations.append(violation_data)
-                            self.repository.add_violation(**violation_data)
+                            self.repository.compliance.add_violation(**violation_data)
 
                 # Check standard dependency rules (only if target is classified)
                 if target_sym in symbol_classifications:
@@ -487,11 +260,11 @@ class Auditor:
                                         seen.add(node)
                                 
                                 # Generate actionable trace message
-                                trace_msg = msg + self._format_path_trace(final_path)
+                                trace_msg = msg + self.tracer.format_path_trace(final_path)
                                 
                                 # Retrieve coordinate line number
                                 line_number = 1
-                                occs = self.repository.get_occurrences_for_symbol(target_sym)
+                                occs = self.repository.symbols.get_occurrences_for_symbol(target_sym)
                                 for occ in occs:
                                     if occ["filepath"] == filepath:
                                         line_number = occ["start_line"]
@@ -519,7 +292,7 @@ class Auditor:
                                     "origin": "automatic"
                                 }
                                 violations.append(violation_data)
-                                self.repository.add_violation(**violation_data)
+                                self.repository.compliance.add_violation(**violation_data)
 
         # 5b. Naming Convention Checks
         naming_rules = []
@@ -562,7 +335,7 @@ class Auditor:
                             break
                             
                     if is_match:
-                        simple_name = self._get_simple_name(sym)
+                        simple_name = self.tracer.get_simple_name(sym)
                         violated = False
                         if suffix and not simple_name.endswith(suffix):
                             violated = True
@@ -574,7 +347,7 @@ class Auditor:
                             
                             # Find definition line
                             line_number = 1
-                            occs = self.repository.get_occurrences_for_symbol(sym)
+                            occs = self.repository.symbols.get_occurrences_for_symbol(sym)
                             for occ in occs:
                                 if occ["filepath"] == filepath and occ["role"] == 1:
                                     line_number = occ["start_line"]
@@ -596,7 +369,7 @@ class Auditor:
                                 "origin": "automatic"
                             }
                             violations.append(violation_data)
-                            self.repository.add_violation(**violation_data)
+                            self.repository.compliance.add_violation(**violation_data)
 
         # Re-compute automated status for all files based on active automatic violations
         violations_by_file = {}
@@ -610,7 +383,7 @@ class Auditor:
                 new_status = "COMPLIANT"
             else:
                 new_status = "VIOLATION_DETECTED"
-            self.repository.update_file_status(f_path, new_status)
+            self.repository.files.update_file_status(f_path, new_status)
 
         print(f"[Auditor] Completed audit. Found {len(violations)} architectural violations.")
         return violations

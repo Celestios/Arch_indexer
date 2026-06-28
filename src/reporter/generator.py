@@ -35,9 +35,9 @@ class OverviewReport(BaseReport):
     Generates a high-level summary of the codebase statistics.
     """
     def generate(self) -> Dict[str, Any]:
-        totals = self.repository.get_repo_totals()
-        kinds = self.repository.get_symbol_counts_by_kind()
-        prefixes = self.repository.get_symbols_by_file_prefix()
+        totals = self.repository.metrics.get_repo_totals()
+        kinds = self.repository.metrics.get_symbol_counts_by_kind()
+        prefixes = self.repository.metrics.get_symbols_by_file_prefix()
         return {
             "totals": totals,
             "kinds": kinds,
@@ -81,7 +81,7 @@ class ComplianceReport(BaseReport):
     Generates a detailed summary of all active architectural compliance violations.
     """
     def generate(self) -> Dict[str, Any]:
-        violations = self.repository.get_violations()
+        violations = self.repository.compliance.get_violations()
         summary = {"warning": 0, "critical": 0, "info": 0}
         for v in violations:
             sev = v.get("severity", "warning").lower()

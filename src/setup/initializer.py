@@ -107,7 +107,7 @@ def initialize_workspace(project_root: Path) -> Path:
                         
                         # Unique identifier for the rule
                         rule_id = f"{prefix}_{field_name}_{source}_{target}".lower().replace("/", "_").replace(".", "_")
-                        repository.upsert_compliance_rule(rule_id, msg, severity)
+                        repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
                         
         print("Architectural compliance rules successfully synchronized.")
     except Exception as e:

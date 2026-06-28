@@ -284,9 +284,9 @@ def cmd_set_status(args):
 
     try:
         filepath = args.filepath
-        file_info = repository.get_file(filepath)
+        file_info = repository.files.get_file(filepath)
         if not file_info:
-            all_files = repository.get_all_files_metadata()
+            all_files = repository.files.get_all_files_metadata()
             matched = None
             for fp in all_files.keys():
                 if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
@@ -294,23 +294,23 @@ def cmd_set_status(args):
                     break
             if matched:
                 filepath = matched
-                file_info = repository.get_file(filepath)
+                file_info = repository.files.get_file(filepath)
                 
         if not file_info:
             print(f"Error: File '{args.filepath}' is not registered in the database.", file=sys.stderr)
             sys.exit(1)
 
         # 1. Update manual_status in files table
-        repository.update_file_manual_status(filepath, status, args.justification)
+        repository.files.update_file_manual_status(filepath, status, args.justification)
         
         # 2. Sync manual violations in compliance_violations table
-        repository.delete_manual_violations(filepath)
+        repository.compliance.delete_manual_violations(filepath)
         if status == "VIOLATION_DETECTED":
             import hashlib
             violation_text = f"manual_logical_audit_{filepath}_{args.justification}"
             violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
             
-            repository.add_violation(
+            repository.compliance.add_violation(
                 violation_id=violation_id,
                 rule_id="logical_audit",
                 symbol=None,
@@ -348,9 +348,9 @@ def cmd_set_fields(args):
 
     try:
         filepath = args.filepath
-        file_info = repository.get_file(filepath)
+        file_info = repository.files.get_file(filepath)
         if not file_info:
-            all_files = repository.get_all_files_metadata()
+            all_files = repository.files.get_all_files_metadata()
             matched = None
             for fp in all_files.keys():
                 if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
@@ -358,7 +358,7 @@ def cmd_set_fields(args):
                     break
             if matched:
                 filepath = matched
-                file_info = repository.get_file(filepath)
+                file_info = repository.files.get_file(filepath)
                 
         if not file_info:
             print(f"Error: File '{args.filepath}' is not registered in the database.", file=sys.stderr)
@@ -377,7 +377,7 @@ def cmd_set_fields(args):
             else:
                 current_fields[k] = v
 
-        repository.update_file_manual_fields(filepath, current_fields, args.justification)
+        repository.files.update_file_manual_fields(filepath, current_fields, args.justification)
         
         auditor = Auditor(repository, project_root)
         auditor.run_audit()

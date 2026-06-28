@@ -334,10 +334,10 @@ def test_auditor_manual_status_logical_flag(tmp_path):
         """)
 
     # AI logical audit flags a file as VIOLATION_DETECTED
-    repository.update_file_manual_status('lib/ui/widget.dart', 'VIOLATION_DETECTED', 'Missing security validation in widget')
+    repository.files.update_file_manual_status('lib/ui/widget.dart', 'VIOLATION_DETECTED', 'Missing security validation in widget')
     
     # Add a manual violation
-    repository.add_violation(
+    repository.compliance.add_violation(
         violation_id="manual_v1",
         rule_id="logical_audit",
         symbol=None,
@@ -348,7 +348,7 @@ def test_auditor_manual_status_logical_flag(tmp_path):
     )
 
     # Verify manual status and justification are preserved in DB
-    file_metadata = repository.get_all_files_metadata()
+    file_metadata = repository.files.get_all_files_metadata()
     assert file_metadata['lib/ui/widget.dart']['manual_status'] == 'VIOLATION_DETECTED'
     assert file_metadata['lib/ui/widget.dart']['justification'] == 'Missing security validation in widget'
 
@@ -356,16 +356,16 @@ def test_auditor_manual_status_logical_flag(tmp_path):
     auditor = Auditor(repository, root)
     violations = auditor.run_audit()
     
-    all_v = repository.get_violations()
+    all_v = repository.compliance.get_violations()
     manual_v = [v for v in all_v if v["origin"] == "manual"]
     assert len(manual_v) == 1
     assert manual_v[0]["message"] == 'Missing security validation in widget'
 
     # Clear manual status back to COMPLIANT
-    repository.update_file_manual_status('lib/ui/widget.dart', 'COMPLIANT')
-    repository.delete_manual_violations('lib/ui/widget.dart')
+    repository.files.update_file_manual_status('lib/ui/widget.dart', 'COMPLIANT')
+    repository.compliance.delete_manual_violations('lib/ui/widget.dart')
     
-    all_v2 = repository.get_violations()
+    all_v2 = repository.compliance.get_violations()
     manual_v2 = [v for v in all_v2 if v["origin"] == "manual"]
     assert len(manual_v2) == 0
 
@@ -376,24 +376,24 @@ def test_auditor_change_triggered_pending_audit(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
     # 1. Insert new file -> should start as PENDING_AUDIT
-    repository.upsert_file('lib/ui/widget.dart', 'hash111', 'dart')
+    repository.files.upsert_file('lib/ui/widget.dart', 'hash111', 'dart')
     
-    file_info = repository.get_file('lib/ui/widget.dart')
+    file_info = repository.files.get_file('lib/ui/widget.dart')
     assert file_info['manual_status'] == 'PENDING_AUDIT'
 
     # 2. AI audits and sets to COMPLIANT
-    repository.update_file_manual_status('lib/ui/widget.dart', 'COMPLIANT', 'Audited and verified')
-    file_info_audited = repository.get_file('lib/ui/widget.dart')
+    repository.files.update_file_manual_status('lib/ui/widget.dart', 'COMPLIANT', 'Audited and verified')
+    file_info_audited = repository.files.get_file('lib/ui/widget.dart')
     assert file_info_audited['manual_status'] == 'COMPLIANT'
 
     # 3. File re-indexed with same hash -> manual_status remains COMPLIANT
-    repository.upsert_file('lib/ui/widget.dart', 'hash111', 'dart')
-    file_info_same = repository.get_file('lib/ui/widget.dart')
+    repository.files.upsert_file('lib/ui/widget.dart', 'hash111', 'dart')
+    file_info_same = repository.files.get_file('lib/ui/widget.dart')
     assert file_info_same['manual_status'] == 'COMPLIANT'
 
     # 4. File re-indexed with different hash -> manual_status reset to PENDING_AUDIT!
-    repository.upsert_file('lib/ui/widget.dart', 'hash222', 'dart')
-    file_info_changed = repository.get_file('lib/ui/widget.dart')
+    repository.files.upsert_file('lib/ui/widget.dart', 'hash222', 'dart')
+    file_info_changed = repository.files.get_file('lib/ui/widget.dart')
     assert file_info_changed['manual_status'] == 'PENDING_AUDIT'
     assert 'File modified' in file_info_changed['justification']
 

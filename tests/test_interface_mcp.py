@@ -25,19 +25,19 @@ def test_get_symbols_in_file(tmp_path):
         """)
 
     # Query existing file
-    syms = repository.get_symbols_in_file("lib/ui/widget.dart")
+    syms = repository.symbols.get_symbols_in_file("lib/ui/widget.dart")
     assert len(syms) == 1
     assert syms[0]["symbol"] == "my_func"
     assert syms[0]["signature"] == "my_func()"
     assert syms[0]["docstring"] == "Docstring 1"
 
     # Query with alternative separator
-    syms_win = repository.get_symbols_in_file("lib\\ui\\widget.dart")
+    syms_win = repository.symbols.get_symbols_in_file("lib\\ui\\widget.dart")
     assert len(syms_win) == 1
     assert syms_win[0]["symbol"] == "my_func"
 
     # Query non-existent file
-    syms_none = repository.get_symbols_in_file("lib/ui/none.dart")
+    syms_none = repository.symbols.get_symbols_in_file("lib/ui/none.dart")
     assert len(syms_none) == 0
 
     db_conn.close()
@@ -55,7 +55,7 @@ def test_get_transitive_closure(tmp_path):
                 ('X', 'B', 'Calls')
         """)
 
-    closure = repository.get_transitive_closure("B", max_depth=3)
+    closure = repository.edges.get_transitive_closure("B", max_depth=3)
     upstream = closure["upstream"]
     downstream = closure["downstream"]
 
@@ -82,15 +82,15 @@ def test_layer_aggregations(tmp_path):
                 ('sym4', 'src/main.py', 'Function', null, null, null)
         """)
 
-    totals = repository.get_repo_totals()
+    totals = repository.metrics.get_repo_totals()
     assert totals["symbols"] == 4
     
-    kinds = repository.get_symbol_counts_by_kind()
+    kinds = repository.metrics.get_symbol_counts_by_kind()
     assert kinds["Method"] == 2
     assert kinds["Class"] == 1
     assert kinds["Function"] == 1
 
-    prefixes = repository.get_symbols_by_file_prefix()
+    prefixes = repository.metrics.get_symbols_by_file_prefix()
     assert prefixes["src/db/"] == 2
     assert prefixes["src/engines/"] == 1
     assert prefixes["src/"] == 1
@@ -438,7 +438,7 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     # Insert a file in the DB
-    repository.upsert_file("lib/ui/widget.dart", "sha123", "dart")
+    repository.files.upsert_file("lib/ui/widget.dart", "sha123", "dart")
 
     # 1. Test set_file_status (COMPLIANT)
     out_status = mcp_server.set_file_status("lib/ui/widget.dart", "COMPLIANT", "Approved legacy module")
@@ -446,7 +446,7 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert "COMPLIANT" in out_status
 
     # Check database
-    file_info = repository.get_file("lib/ui/widget.dart")
+    file_info = repository.files.get_file("lib/ui/widget.dart")
     assert file_info["manual_status"] == "COMPLIANT"
     assert file_info["justification"] == "Approved legacy module"
 
@@ -456,7 +456,7 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert "VIOLATION_DETECTED" in out_violation
 
     # Check manual violation is inserted
-    all_violations = repository.get_violations()
+    all_violations = repository.compliance.get_violations()
     manual_violations = [v for v in all_violations if v["origin"] == "manual"]
     assert len(manual_violations) == 1
     assert manual_violations[0]["message"] == "Needs refactoring"
@@ -467,7 +467,7 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert "Widget" in out_fields
 
     # Check database
-    file_info_updated = repository.get_file("lib/ui/widget.dart")
+    file_info_updated = repository.files.get_file("lib/ui/widget.dart")
     import json
     m_fields = json.loads(file_info_updated["manual_fields"])
     assert m_fields["pattern"] == "Widget"

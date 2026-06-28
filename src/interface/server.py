@@ -1,6 +1,5 @@
 import os
 import sys
-import random
 from pathlib import Path
 from typing import Optional, Union, List
 
@@ -14,6 +13,7 @@ from db.connection import DbConnection
 from db.repository import Repository
 from auditor.analyzer import Auditor
 from engines.embedder import LocalEmbedder
+from engines.communities import detect_communities
 
 # Resolve the target project root (where the .arch/ database resides)
 if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
@@ -26,89 +26,6 @@ DB_PATH = ARCH_DIR / "arch.db"
 
 # Initialize FastMCP Server
 mcp = FastMCP("arch")
-
-
-def detect_communities(repository: Repository):
-    """
-    Groups repository symbols into cohesive communities using Label Propagation (LPA).
-    """
-    # Fetch symbols and edges
-    with repository.db_conn.session() as conn:
-        symbols_res = conn.execute("SELECT symbol, filepath FROM symbols").fetchall()
-        edges_res = conn.execute("SELECT source, target FROM edges").fetchall()
-
-    symbols = {r[0]: r[1] for r in symbols_res}
-    edges = [(r[0], r[1]) for r in edges_res]
-
-    # Build adjacency list (undirected for community propagation)
-    adj = {sym: set() for sym in symbols}
-    for src, tgt in edges:
-        if src in adj and tgt in adj:
-            adj[src].add(tgt)
-            adj[tgt].add(src)
-
-    # Calculate degree for each symbol (sum of incoming and outgoing edges)
-    degrees = {sym: 0 for sym in symbols}
-    for src, tgt in edges:
-        if src in degrees:
-            degrees[src] += 1
-        if tgt in degrees:
-            degrees[tgt] += 1
-
-    # Initialize labels to directory prefixes
-    labels = {}
-    for sym, fp in symbols.items():
-        if fp:
-            fp_norm = fp.replace("\\", "/")
-            parts = fp_norm.split("/")
-            if len(parts) > 1:
-                labels[sym] = "/".join(parts[:-1]) + "/"
-            else:
-                labels[sym] = "./"
-        else:
-            labels[sym] = "external/"
-
-    # Run LPA for 5 iterations
-    # Seed random for determinism under tests
-    random.seed(42)
-    for _ in range(5):
-        nodes = list(symbols.keys())
-        random.shuffle(nodes)
-        for u in nodes:
-            neighbors = adj[u]
-            if not neighbors:
-                continue
-            # Count neighbor label frequencies
-            freq = {}
-            for v in neighbors:
-                lbl = labels[v]
-                freq[lbl] = freq.get(lbl, 0) + 1
-            # Find maximum frequency label
-            max_freq = max(freq.values())
-            candidates = [lbl for lbl, count in freq.items() if count == max_freq]
-            # Tie breaking: prefer current label if candidate, else deterministic choice
-            if labels[u] in candidates:
-                continue
-            # Sort candidates for determinism
-            candidates.sort()
-            labels[u] = candidates[0]
-
-    # Group nodes by community label
-    communities = {}
-    for sym, lbl in labels.items():
-        communities.setdefault(lbl, []).append(sym)
-
-    # Calculate inter-community connections
-    # connections[comm_a][comm_b] = weight
-    connections = {}
-    for src, tgt in edges:
-        lbl_src = labels.get(src)
-        lbl_tgt = labels.get(tgt)
-        if lbl_src and lbl_tgt and lbl_src != lbl_tgt:
-            connections.setdefault(lbl_src, {}).setdefault(lbl_tgt, 0)
-            connections[lbl_src][lbl_tgt] += 1
-
-    return communities, connections, degrees
 
 
 @mcp.tool()
@@ -138,7 +55,7 @@ def query(text: Union[List[str], str], limit: int = 5) -> str:
     try:
         for q in queries:
             embedding = embedder.embed(q)
-            results = repository.semantic_search(embedding, limit=limit)
+            results = repository.symbols.semantic_search(embedding, limit=limit)
             
             md.append(f"## Semantic Search Results for: \"{q}\"\n")
             if not results:
@@ -177,7 +94,7 @@ def context(filepath: str) -> str:
     repository = Repository(db_conn)
 
     try:
-        symbols = repository.get_symbols_in_file(filepath)
+        symbols = repository.symbols.get_symbols_in_file(filepath)
         # Fetch all occurrences in this file to match start/end line coordinates in a single session
         with db_conn.session() as conn:
             occs = conn.execute(
@@ -266,7 +183,7 @@ def impact(symbol: str, max_depth: int = 3) -> str:
     repository = Repository(db_conn)
 
     try:
-        closure = repository.get_transitive_closure(symbol, max_depth=max_depth)
+        closure = repository.edges.get_transitive_closure(symbol, max_depth=max_depth)
     except Exception as e:
         return f"Error computing blast radius: {e}"
     finally:
@@ -320,7 +237,7 @@ def audit(filepath: Optional[str] = None) -> str:
         violations = auditor.run_audit(filepath_filter=filepath)
         
         # Also fetch all violations (both manual/AI and automatic) from compliance_violations table
-        all_violations = repository.get_violations()
+        all_violations = repository.compliance.get_violations()
         if filepath:
             normalized_filter = filepath.replace("\\", "/")
             all_violations = [v for v in all_violations if v["filepath"].replace("\\", "/").startswith(normalized_filter)]
@@ -344,7 +261,6 @@ def audit(filepath: Optional[str] = None) -> str:
     return "\n".join(md)
 
 
-
 @mcp.tool()
 def map() -> str:
     """
@@ -359,7 +275,7 @@ def map() -> str:
     repository = Repository(db_conn)
 
     try:
-        totals = repository.get_repo_totals()
+        totals = repository.metrics.get_repo_totals()
         communities, connections, degrees = detect_communities(repository)
     except Exception as e:
         return f"Error building architectural graph map: {e}"
@@ -491,9 +407,9 @@ def set_file_status(filepath: str, status: str, justification: Optional[str] = N
 
     try:
         # Check if the file is registered in the database
-        file_info = repository.get_file(filepath)
+        file_info = repository.files.get_file(filepath)
         if not file_info:
-            all_files = repository.get_all_files_metadata()
+            all_files = repository.files.get_all_files_metadata()
             matched = None
             for fp in all_files.keys():
                 if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
@@ -505,11 +421,11 @@ def set_file_status(filepath: str, status: str, justification: Optional[str] = N
                 return f"Error: File '{filepath}' is not registered in the database. Please index it first."
 
         # 1. Update manual_status and justification in files table
-        repository.update_file_manual_status(filepath, status, justification)
+        repository.files.update_file_manual_status(filepath, status, justification)
         
         # 2. Sync manual violations in compliance_violations table
         # Clear existing manual violations for this file
-        repository.delete_manual_violations(filepath)
+        repository.compliance.delete_manual_violations(filepath)
         
         # If the manual status is VIOLATION_DETECTED, insert a manual violation
         if status == "VIOLATION_DETECTED":
@@ -517,7 +433,7 @@ def set_file_status(filepath: str, status: str, justification: Optional[str] = N
             violation_text = f"manual_logical_audit_{filepath}_{justification}"
             violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
             
-            repository.add_violation(
+            repository.compliance.add_violation(
                 violation_id=violation_id,
                 rule_id="logical_audit",
                 symbol=None,
@@ -550,10 +466,10 @@ def set_file_fields(filepath: str, fields: dict, justification: Optional[str] = 
     repository = Repository(db_conn)
 
     try:
-        file_info = repository.get_file(filepath)
+        file_info = repository.files.get_file(filepath)
         if not file_info:
             # Try resolving path
-            all_files = repository.get_all_files_metadata()
+            all_files = repository.files.get_all_files_metadata()
             matched = None
             for fp in all_files.keys():
                 if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
@@ -580,7 +496,7 @@ def set_file_fields(filepath: str, fields: dict, justification: Optional[str] = 
             else:
                 current_fields[k] = v
 
-        repository.update_file_manual_fields(filepath, current_fields, justification)
+        repository.files.update_file_manual_fields(filepath, current_fields, justification)
         
         # Run audit to propagate metadata changes
         auditor = Auditor(repository, PROJECT_ROOT)
@@ -605,9 +521,9 @@ def get_file_details(filepath: str) -> str:
     repository = Repository(db_conn)
 
     try:
-        file_info = repository.get_file(filepath)
+        file_info = repository.files.get_file(filepath)
         if not file_info:
-            all_files = repository.get_all_files_metadata()
+            all_files = repository.files.get_all_files_metadata()
             matched = None
             for fp in all_files.keys():
                 if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
@@ -615,7 +531,7 @@ def get_file_details(filepath: str) -> str:
                     break
             if matched:
                 filepath = matched
-                file_info = repository.get_file(filepath)
+                file_info = repository.files.get_file(filepath)
             
         if not file_info:
             return f"Error: File '{filepath}' is not registered in the database."

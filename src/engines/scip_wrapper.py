@@ -281,7 +281,7 @@ class ScipWrapper:
             {"filepath": fp, "sha256": "initial_hash", "language": "rust"}
             for fp in files_to_register
         ]
-        repository.upsert_files_bulk(files_to_ingest)
+        repository.files.upsert_files_bulk(files_to_ingest)
 
         # 2. Ingest symbols
         print(f"[SCIP Ingest] Ingesting {len(parsed_data['symbols'])} symbols into database...")
@@ -303,16 +303,17 @@ class ScipWrapper:
                 "body_hash": sym["body_hash"],
                 "embedding": embedding
             })
-        repository.upsert_symbols_bulk(symbols_to_ingest)
+        repository.symbols.upsert_symbols_bulk(symbols_to_ingest)
 
         # 3. Ingest occurrences
         print(f"[SCIP Ingest] Ingesting {len(parsed_data['occurrences'])} occurrences...")
-        repository.add_occurrences_bulk(parsed_data["occurrences"])
+        repository.symbols.add_occurrences_bulk(parsed_data["occurrences"])
 
         # 4. Ingest call graph edges
         print(f"[SCIP Ingest] Ingesting {len(parsed_data['edges'])} edges...")
-        repository.add_edges_bulk(parsed_data["edges"])
+        repository.edges.add_edges_bulk(parsed_data["edges"])
         
         print("[SCIP Ingest] Ingestion complete.")
+
 
 
