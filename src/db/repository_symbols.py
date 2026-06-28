@@ -205,3 +205,52 @@ class SymbolsRepository(BaseRepository):
                 }
                 for r in res
             ]
+
+    def get_symbols_metadata_batch(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Retrieves symbol metadata and definition occurrences in bulk.
+        """
+        if not symbols:
+            return {}
+
+        placeholders = ",".join("?" for _ in symbols)
+        result = {}
+        with self.db_conn.session() as conn:
+            # 1. Fetch metadata
+            sym_rows = conn.execute(
+                f"SELECT symbol, filepath, kind, signature, docstring, body_hash FROM symbols WHERE symbol IN ({placeholders})",
+                symbols
+            ).fetchall()
+            for r in sym_rows:
+                result[r[0]] = {
+                    "symbol": r[0],
+                    "filepath": r[1],
+                    "kind": r[2],
+                    "signature": r[3],
+                    "docstring": r[4],
+                    "body_hash": r[5],
+                    "definition": None
+                }
+
+            # 2. Fetch definition occurrences (role & 1 == 1)
+            occ_rows = conn.execute(
+                f"""
+                SELECT symbol, filepath, start_line, start_col, end_line, end_col, role 
+                FROM occurrences 
+                WHERE symbol IN ({placeholders}) AND (role & 1) = 1
+                """,
+                symbols
+            ).fetchall()
+            for r in occ_rows:
+                sym_name = r[0]
+                if sym_name in result:
+                    result[sym_name]["definition"] = {
+                        "filepath": r[1],
+                        "start_line": r[2],
+                        "start_col": r[3],
+                        "end_line": r[4],
+                        "end_col": r[5],
+                        "role": r[6]
+                    }
+        return result
+

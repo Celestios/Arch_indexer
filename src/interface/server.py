@@ -12,6 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from db.connection import DbConnection
 from db.repository import Repository
 from auditor.analyzer import Auditor
+from auditor.compiler import ContextCompiler
 from engines.embedder import LocalEmbedder
 from engines.communities import detect_communities
 
@@ -582,6 +583,55 @@ def get_file_details(filepath: str) -> str:
         return "\n".join(md)
     except Exception as e:
         return f"Error retrieving file details: {e}"
+    finally:
+        db_conn.close()
+
+
+@mcp.tool()
+def compile_context(
+    symbol: str,
+    radius: int = 2,
+    direction: str = "downstream",
+    resolution: str = "full",
+    out_filepath: Optional[str] = None
+) -> str:
+    """
+    Compiles a deterministic markdown-formatted architectural context document
+    starting from a focal symbol, traversing its call graph neighborhood.
+    Use this to see caller/callee implementations and metadata.
+    
+    Parameters:
+      symbol: The name of the focal symbol to start compilation from.
+      radius: Traversal depth / number of hops along the call graph (default: 2).
+      direction: Traversal direction: 'downstream' (callees), 'upstream' (callers), or 'both' (default: 'downstream').
+      resolution: Neighbors detail level: 'full' (include complete code bodies) or 'signature' (signatures & docstrings only) (default: 'full').
+      out_filepath: Optional path (relative to project root) to write the compiled context markdown to.
+    """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
+    direction = direction.lower()
+    if direction not in ("upstream", "downstream", "both"):
+        return f"Error: Invalid direction: '{direction}'. Allowed: upstream, downstream, both."
+
+    resolution = resolution.lower()
+    if resolution not in ("full", "signature"):
+        return f"Error: Invalid resolution: '{resolution}'. Allowed: full, signature."
+
+    db_conn = DbConnection(DB_PATH)
+    repository = Repository(db_conn)
+    compiler = ContextCompiler(repository, PROJECT_ROOT)
+
+    try:
+        return compiler.compile(
+            focal_symbol=symbol,
+            radius=radius,
+            direction=direction,
+            resolution=resolution,
+            out_filepath=out_filepath
+        )
+    except Exception as e:
+        return f"Error compiling architectural context: {e}"
     finally:
         db_conn.close()
 
