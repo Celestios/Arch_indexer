@@ -7,14 +7,14 @@ class FilesRepository(BaseRepository):
     """
 
     def upsert_file(self, filepath: str, sha256: str, language: str):
-        """Registers or updates a file's hashing and index metadata. Resets manual_status if changed."""
+        """Registers or updates a file's hashing and index metadata. Sets pending_audit if changed."""
         with self.db_conn.session() as conn:
             conn.execute(
                 """
-                INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, manual_fields, justification)
-                VALUES (?, ?, ?, now(), 'COMPLIANT', 'PENDING_AUDIT', '{}', 'New file, pending initial audit')
+                INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification)
+                VALUES (?, ?, ?, now(), 'COMPLIANT', 'COMPLIANT', TRUE, '{}', 'New file, pending initial audit')
                 ON CONFLICT (filepath) DO UPDATE SET
-                    manual_status = CASE WHEN files.sha256 <> excluded.sha256 THEN 'PENDING_AUDIT' ELSE files.manual_status END,
+                    pending_audit = CASE WHEN files.sha256 <> excluded.sha256 THEN TRUE ELSE files.pending_audit END,
                     justification = CASE WHEN files.sha256 <> excluded.sha256 THEN 'File modified, pending re-audit' ELSE files.justification END,
                     sha256 = excluded.sha256,
                     language = excluded.language,
@@ -49,7 +49,7 @@ class FilesRepository(BaseRepository):
         """Retrieves indexing metadata for a specific file."""
         with self.db_conn.session() as conn:
             res = conn.execute(
-                "SELECT filepath, sha256, language, last_indexed, status, manual_status, manual_fields, justification FROM files WHERE filepath = ?",
+                "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE filepath = ?",
                 (filepath,)
             ).fetchone()
             if res:
@@ -60,13 +60,14 @@ class FilesRepository(BaseRepository):
                     "last_indexed": res[3],
                     "status": res[4],
                     "manual_status": res[5],
-                    "manual_fields": res[6],
-                    "justification": res[7]
+                    "pending_audit": bool(res[6]),
+                    "manual_fields": res[7],
+                    "justification": res[8]
                 }
         return None
 
     def upsert_files_bulk(self, files_list: List[Dict[str, Any]]):
-        """Bulk upserts a list of files in a single transaction. Resets manual_status on change."""
+        """Bulk upserts a list of files in a single transaction. Sets pending_audit on change."""
         data = [
             (
                 f["filepath"],
@@ -78,10 +79,10 @@ class FilesRepository(BaseRepository):
         with self.db_conn.session() as conn:
             conn.executemany(
                 """
-                INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, manual_fields, justification)
-                VALUES (?, ?, ?, now(), 'COMPLIANT', 'PENDING_AUDIT', '{}', 'New file, pending initial audit')
+                INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification)
+                VALUES (?, ?, ?, now(), 'COMPLIANT', 'COMPLIANT', TRUE, '{}', 'New file, pending initial audit')
                 ON CONFLICT (filepath) DO UPDATE SET
-                    manual_status = CASE WHEN files.sha256 <> excluded.sha256 THEN 'PENDING_AUDIT' ELSE files.manual_status END,
+                    pending_audit = CASE WHEN files.sha256 <> excluded.sha256 THEN TRUE ELSE files.pending_audit END,
                     justification = CASE WHEN files.sha256 <> excluded.sha256 THEN 'File modified, pending re-audit' ELSE files.justification END,
                     sha256 = excluded.sha256,
                     language = excluded.language,
@@ -91,12 +92,13 @@ class FilesRepository(BaseRepository):
             )
 
     def update_file_manual_status(self, filepath: str, status: str, justification: Optional[str] = None):
-        """Sets the manual compliance status for a file."""
+        """Sets the manual compliance status for a file and clears pending_audit."""
         with self.db_conn.session() as conn:
             conn.execute(
                 """
                 UPDATE files
                 SET manual_status = ?,
+                    pending_audit = FALSE,
                     justification = ?
                 WHERE filepath = ?
                 """,
@@ -131,23 +133,55 @@ class FilesRepository(BaseRepository):
             )
 
     def get_all_files_metadata(self) -> Dict[str, Dict[str, Any]]:
-        """Retrieves all files' status, manual status, manual fields and justification."""
+        """Retrieves all files' status, manual status, pending_audit, manual fields and justification."""
         import json
         with self.db_conn.session() as conn:
             rows = conn.execute(
-                "SELECT filepath, status, manual_status, manual_fields, justification FROM files"
+                "SELECT filepath, status, manual_status, pending_audit, manual_fields, justification FROM files"
             ).fetchall()
             metadata = {}
             for r in rows:
                 try:
-                    manual_fields = json.loads(r[3]) if r[3] else {}
+                    manual_fields = json.loads(r[4]) if r[4] else {}
                 except Exception:
                     manual_fields = {}
                 metadata[r[0]] = {
                     "filepath": r[0],
                     "status": r[1],
                     "manual_status": r[2],
+                    "pending_audit": bool(r[3]),
                     "manual_fields": manual_fields,
-                    "justification": r[4]
+                    "justification": r[5]
                 }
             return metadata
+
+    def clear_all_pending_audits(self, justification: str):
+        """Sets pending_audit = FALSE for all files in the database."""
+        with self.db_conn.session() as conn:
+            conn.execute(
+                """
+                UPDATE files
+                SET pending_audit = FALSE,
+                    justification = ?
+                """,
+                (justification,)
+            )
+
+    def clean_files_symbols_and_relations(self, filepaths: List[str]):
+        """Cleans up occurrences, edges, and symbols for the given filepaths before re-ingesting."""
+        if not filepaths:
+            return
+        with self.db_conn.session() as conn:
+            # Delete edges linking to symbols in these files
+            conn.execute(
+                """
+                DELETE FROM edges 
+                WHERE source IN (SELECT symbol FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[])))
+                   OR target IN (SELECT symbol FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[])))
+                """,
+                (filepaths, filepaths)
+            )
+            # Delete occurrences
+            conn.execute("DELETE FROM occurrences WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))", (filepaths,))
+            # Delete symbols
+            conn.execute("DELETE FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))", (filepaths,))

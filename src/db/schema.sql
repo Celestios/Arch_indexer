@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS files (
     language VARCHAR NOT NULL,
     last_indexed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status VARCHAR NOT NULL DEFAULT 'COMPLIANT', -- 'COMPLIANT' or 'VIOLATION_DETECTED'
-    manual_status VARCHAR NOT NULL DEFAULT 'PENDING_AUDIT', -- 'PENDING_AUDIT', 'COMPLIANT', or 'VIOLATION_DETECTED'
+    manual_status VARCHAR NOT NULL DEFAULT 'COMPLIANT', -- 'COMPLIANT' or 'VIOLATION_DETECTED'
+    pending_audit BOOLEAN NOT NULL DEFAULT TRUE,
     manual_fields VARCHAR NOT NULL DEFAULT '{}', -- JSON string containing manual metadata fields
     justification TEXT
 );
@@ -59,4 +60,10 @@ CREATE TABLE IF NOT EXISTS compliance_violations (
     message TEXT NOT NULL,
     checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     origin VARCHAR DEFAULT 'automatic' -- 'automatic' or 'manual'
+);
+
+-- 7. Track system metadata (e.g. config hashes, indexing state)
+CREATE TABLE IF NOT EXISTS system_metadata (
+    key VARCHAR PRIMARY KEY,
+    value VARCHAR NOT NULL
 );

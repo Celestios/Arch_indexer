@@ -13,6 +13,12 @@ except ImportError:
     # Fallback to absolute import path if needed
     from src.engines import scip_pb2
 
+# Add src to path to import change_tracker
+src_dir = Path(__file__).resolve().parent.parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+from change_tracker.tracker import ChangeTracker
+
 class ScipWrapper:
     """
     Wrapper for SCIP/LSIF code graph generators and parsers.
@@ -262,7 +268,7 @@ class ScipWrapper:
         return parsed_data
 
     @staticmethod
-    def ingest_index(repository: Any, parsed_data: Dict[str, Any], embedder: Optional[Any] = None):
+    def ingest_index(repository: Any, parsed_data: Dict[str, Any], embedder: Optional[Any] = None, project_root: Optional[Path] = None):
         """
         Ingests the parsed symbols, occurrences, and edges into the database.
         Optionally uses an embedder to compute vector representations for symbol docstrings.
@@ -276,11 +282,23 @@ class ScipWrapper:
             if sym["filepath"]:
                 files_to_register.add(sym["filepath"])
 
-        # Register files in bulk
-        files_to_ingest = [
-            {"filepath": fp, "sha256": "initial_hash", "language": "rust"}
-            for fp in files_to_register
-        ]
+        # Clean old symbols, occurrences, and edges for these files to prevent stale entries
+        file_list = list(files_to_register)
+        repository.files.clean_files_symbols_and_relations(file_list)
+
+        # Register files in bulk with actual SHA-256 hashes
+        files_to_ingest = []
+        for fp in file_list:
+            sha256_val = "initial_hash"
+            if project_root:
+                abs_path = project_root / fp
+                sha256_val = ChangeTracker.calculate_sha256(abs_path)
+            
+            # Detect language based on extension
+            ext = Path(fp).suffix.lower()
+            lang = "rust" if ext == ".rs" else ("dart" if ext == ".dart" else "unknown")
+            files_to_ingest.append({"filepath": fp, "sha256": sha256_val, "language": lang})
+
         repository.files.upsert_files_bulk(files_to_ingest)
 
         # 2. Ingest symbols

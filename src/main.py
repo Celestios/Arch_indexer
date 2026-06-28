@@ -148,7 +148,7 @@ def cmd_init(args):
             if index_path:
                 print(f"  [{lang}] Index generated at {index_path}")
                 parsed = ScipWrapper.parse_index(index_path)
-                ScipWrapper.ingest_index(repository, parsed, embedder)
+                ScipWrapper.ingest_index(repository, parsed, embedder, project_root)
                 print(f"  [{lang}] {len(parsed['symbols'])} symbols ingested.")
                 indexed_any = True
             else:
@@ -274,8 +274,8 @@ def cmd_set_status(args):
     repository = Repository(db_conn)
 
     status = args.status.upper()
-    if status not in ("COMPLIANT", "VIOLATION_DETECTED", "PENDING_AUDIT"):
-        print(f"Error: Invalid manual compliance status choice: {args.status}. Allowed: COMPLIANT, VIOLATION_DETECTED, PENDING_AUDIT.", file=sys.stderr)
+    if status not in ("COMPLIANT", "VIOLATION_DETECTED"):
+        print(f"Error: Invalid manual compliance status choice: {args.status}. Allowed: COMPLIANT, VIOLATION_DETECTED.", file=sys.stderr)
         sys.exit(1)
 
     if status == "VIOLATION_DETECTED" and not args.justification:
@@ -388,6 +388,29 @@ def cmd_set_fields(args):
         sys.exit(1)
     finally:
         db_conn.close()
+def cmd_clear_pending(args):
+    """Clears all pending audit flags in the database."""
+    project_root = Path(args.project_root).resolve()
+    arch_dir = project_root / ".arch"
+    if not arch_dir.exists():
+        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    db_conn = DbConnection(arch_dir / "arch.db")
+    repository = Repository(db_conn)
+
+    try:
+        repository.files.clear_all_pending_audits(args.justification)
+        # Run audit to update violations
+        auditor = Auditor(repository, project_root)
+        auditor.run_audit()
+        print("Successfully cleared pending audit status for all files.")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        db_conn.close()
+
 
 
 def main():
@@ -417,7 +440,7 @@ def main():
     # set-status
     set_status_parser = subparsers.add_parser("set-status", help="Set manual AI logical compliance status for a file")
     set_status_parser.add_argument("filepath", help="Filepath to the target file")
-    set_status_parser.add_argument("status", choices=["COMPLIANT", "VIOLATION_DETECTED", "PENDING_AUDIT"], help="Manual logical compliance status")
+    set_status_parser.add_argument("status", choices=["COMPLIANT", "VIOLATION_DETECTED"], help="Manual logical compliance status")
     set_status_parser.add_argument("justification", nargs="?", default=None, help="Justification comment (required for VIOLATION_DETECTED)")
     set_status_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
     set_status_parser.set_defaults(func=cmd_set_status)
@@ -429,6 +452,12 @@ def main():
     set_fields_parser.add_argument("justification", nargs="?", default=None, help="Optional update justification")
     set_fields_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
     set_fields_parser.set_defaults(func=cmd_set_fields)
+
+    # clear-pending
+    clear_pending_parser = subparsers.add_parser("clear-pending", help="Clear all pending audit flags")
+    clear_pending_parser.add_argument("justification", help="Justification comment for clearing all pending audits")
+    clear_pending_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    clear_pending_parser.set_defaults(func=cmd_clear_pending)
 
     args = parser.parse_args()
 

@@ -462,21 +462,21 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert manual_violations[0]["message"] == "Needs refactoring"
 
     # 3. Test set_file_fields
-    out_fields = mcp_server.set_file_fields("lib/ui/widget.dart", {"pattern": "Widget", "tier": 1}, "Set annotations")
+    out_fields = mcp_server.set_file_fields("lib/ui/widget.dart", {"pattern": "Controller", "tier": 1}, "Set annotations")
     assert "Successfully updated manual fields" in out_fields
-    assert "Widget" in out_fields
+    assert "Controller" in out_fields
 
     # Check database
     file_info_updated = repository.files.get_file("lib/ui/widget.dart")
     import json
     m_fields = json.loads(file_info_updated["manual_fields"])
-    assert m_fields["pattern"] == "Widget"
+    assert m_fields["pattern"] == "Controller"
     assert m_fields["tier"] == 1
 
     # 4. Test get_file_details
     out_details = mcp_server.get_file_details("lib/ui/widget.dart")
     assert "File Details:" in out_details
-    assert "Widget" in out_details
+    assert "Controller" in out_details
     assert "VIOLATION_DETECTED" in out_details
 
     db_conn.close()

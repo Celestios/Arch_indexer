@@ -319,8 +319,8 @@ def test_auditor_manual_status_logical_flag(tmp_path):
     # Insert files and symbols
     with db_conn.session() as conn:
         conn.execute("""
-            INSERT INTO files (filepath, sha256, language, status, manual_status)
-            VALUES ('lib/ui/widget.dart', 'hash123', 'dart', 'COMPLIANT', 'PENDING_AUDIT')
+            INSERT INTO files (filepath, sha256, language, status, manual_status, pending_audit)
+            VALUES ('lib/ui/widget.dart', 'hash123', 'dart', 'COMPLIANT', 'COMPLIANT', false)
         """)
         conn.execute("""
             INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
@@ -375,27 +375,123 @@ def test_auditor_manual_status_logical_flag(tmp_path):
 def test_auditor_change_triggered_pending_audit(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
-    # 1. Insert new file -> should start as PENDING_AUDIT
+    # 1. Insert new file -> should start as pending_audit = True
     repository.files.upsert_file('lib/ui/widget.dart', 'hash111', 'dart')
     
     file_info = repository.files.get_file('lib/ui/widget.dart')
-    assert file_info['manual_status'] == 'PENDING_AUDIT'
+    assert file_info['pending_audit'] is True
+    assert file_info['manual_status'] == 'COMPLIANT'
 
-    # 2. AI audits and sets to COMPLIANT
+    # 2. AI audits and sets to COMPLIANT -> should clear pending_audit
     repository.files.update_file_manual_status('lib/ui/widget.dart', 'COMPLIANT', 'Audited and verified')
     file_info_audited = repository.files.get_file('lib/ui/widget.dart')
+    assert file_info_audited['pending_audit'] is False
     assert file_info_audited['manual_status'] == 'COMPLIANT'
 
-    # 3. File re-indexed with same hash -> manual_status remains COMPLIANT
+    # 3. File re-indexed with same hash -> pending_audit remains False
     repository.files.upsert_file('lib/ui/widget.dart', 'hash111', 'dart')
     file_info_same = repository.files.get_file('lib/ui/widget.dart')
-    assert file_info_same['manual_status'] == 'COMPLIANT'
+    assert file_info_same['pending_audit'] is False
 
-    # 4. File re-indexed with different hash -> manual_status reset to PENDING_AUDIT!
+    # 4. File re-indexed with different hash -> pending_audit reset to True, manual_status stays COMPLIANT
     repository.files.upsert_file('lib/ui/widget.dart', 'hash222', 'dart')
     file_info_changed = repository.files.get_file('lib/ui/widget.dart')
-    assert file_info_changed['manual_status'] == 'PENDING_AUDIT'
+    assert file_info_changed['pending_audit'] is True
+    assert file_info_changed['manual_status'] == 'COMPLIANT'
     assert 'File modified' in file_info_changed['justification']
+
+    db_conn.close()
+
+
+def test_change_triggered_audit_flags_reset_on_change(tmp_path):
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    # Write a config with reset_on_change manual field
+    config_path = root / ".arch" / "config.json"
+    config_data = {
+        "lib": {
+            "manual_fields": {
+                "ai_summary": {
+                    "default": "No summary yet",
+                    "reset_on_change": True
+                },
+                "stability": {
+                    "default": "stable",
+                    "reset_on_change": False
+                }
+            }
+        }
+    }
+    config_path.write_text(json.dumps(config_data, indent=2))
+
+    # Insert file with manual fields populated
+    manual_fields_str = json.dumps({"ai_summary": "Initial summary content", "stability": "experimental"})
+    with db_conn.session() as conn:
+        conn.execute(
+            """
+            INSERT INTO files (filepath, sha256, language, status, manual_status, pending_audit, manual_fields, justification)
+            VALUES ('lib/ui/widget.dart', 'hash111', 'dart', 'COMPLIANT', 'COMPLIANT', false, ?, 'approved')
+            """,
+            (manual_fields_str,)
+        )
+
+    # Force a hash change update
+    repository.files.upsert_file('lib/ui/widget.dart', 'hash222', 'dart')
+
+    auditor = Auditor(repository, root)
+    violations = auditor.run_audit()
+
+    # Verify that:
+    # 1. ai_summary reset to default
+    # 2. stability remains experimental
+    # 3. pending_audit violation generated
+    file_info = repository.files.get_file('lib/ui/widget.dart')
+    m_fields = json.loads(file_info['manual_fields'])
+    assert m_fields['ai_summary'] == 'No summary yet'
+    assert m_fields['stability'] == 'experimental'
+    assert file_info['pending_audit'] is True
+    
+    assert any(v['rule_id'] == 'pending_audit' and v['filepath'] == 'lib/ui/widget.dart' for v in violations)
+
+    db_conn.close()
+
+
+def test_change_triggered_audit_flags_invalid_value(tmp_path):
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    # Write config defining restricted values
+    config_path = root / ".arch" / "config.json"
+    config_data = {
+        "lib": {
+            "manual_fields": {
+                "pattern": {
+                    "values": ["Controller", "Service", "None"],
+                    "default": "None"
+                }
+            }
+        }
+    }
+    config_path.write_text(json.dumps(config_data, indent=2))
+
+    # Insert file with invalid manual field value
+    manual_fields_str = json.dumps({"pattern": "InvalidValue"})
+    with db_conn.session() as conn:
+        conn.execute(
+            """
+            INSERT INTO files (filepath, sha256, language, status, manual_status, pending_audit, manual_fields, justification)
+            VALUES ('lib/ui/widget.dart', 'hash111', 'dart', 'COMPLIANT', 'COMPLIANT', false, ?, 'approved')
+            """,
+            (manual_fields_str,)
+        )
+
+    # Run audit and verify it resets the invalid value and marks pending_audit = True
+    auditor = Auditor(repository, root)
+    violations = auditor.run_audit()
+
+    file_info = repository.files.get_file('lib/ui/widget.dart')
+    m_fields = json.loads(file_info['manual_fields'])
+    assert m_fields['pattern'] == 'None'
+    assert file_info['pending_audit'] is True
 
     db_conn.close()
 
@@ -433,11 +529,11 @@ def test_auditor_manual_fields_override_automatic_and_propagate(tmp_path):
 
     with db_conn.session() as conn:
         conn.execute("""
-            INSERT INTO files (filepath, sha256, language, status, manual_fields)
+            INSERT INTO files (filepath, sha256, language, status, pending_audit, manual_fields)
             VALUES 
-                ('lib/ui/widget.dart', 'h1', 'dart', 'PENDING_AUDIT', '{}'),
-                ('lib/core/helper.dart', 'h2', 'dart', 'PENDING_AUDIT', '{"layer": "Infrastructure"}'),
-                ('lib/infra/client.dart', 'h3', 'dart', 'PENDING_AUDIT', '{}')
+                ('lib/ui/widget.dart', 'h1', 'dart', 'COMPLIANT', false, '{}'),
+                ('lib/core/helper.dart', 'h2', 'dart', 'COMPLIANT', false, '{"layer": "Infrastructure"}'),
+                ('lib/infra/client.dart', 'h3', 'dart', 'COMPLIANT', false, '{}')
         """)
         conn.execute("""
             INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)

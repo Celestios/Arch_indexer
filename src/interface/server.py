@@ -389,15 +389,15 @@ def set_file_status(filepath: str, status: str, justification: Optional[str] = N
     Sets the manual compliance status flag (logical audit) for a file component.
     Parameters:
       filepath: Path to the target file.
-      status: Compliance status ('PENDING_AUDIT', 'COMPLIANT', or 'VIOLATION_DETECTED').
+      status: Compliance status ('COMPLIANT' or 'VIOLATION_DETECTED').
       justification: Explanatory comment for the status (required if status is 'VIOLATION_DETECTED').
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
 
     status = status.upper()
-    if status not in ("COMPLIANT", "VIOLATION_DETECTED", "PENDING_AUDIT"):
-        return f"Error: Invalid compliance status choice: {status}. Allowed values: COMPLIANT, VIOLATION_DETECTED, PENDING_AUDIT."
+    if status not in ("COMPLIANT", "VIOLATION_DETECTED"):
+        return f"Error: Invalid compliance status choice: {status}. Allowed values: COMPLIANT, VIOLATION_DETECTED."
 
     if status == "VIOLATION_DETECTED" and not justification:
         return "Error: Justification must be provided when flagging a file as VIOLATION_DETECTED."
@@ -510,6 +510,30 @@ def set_file_fields(filepath: str, fields: dict, justification: Optional[str] = 
 
 
 @mcp.tool()
+def clear_pending_audits(justification: str) -> str:
+    """
+    Clears the pending audit flags for all files in the database.
+    Use this after large refactors or git checkout operations when you know the changes are compliant.
+    """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
+    db_conn = DbConnection(DB_PATH)
+    repository = Repository(db_conn)
+
+    try:
+        repository.files.clear_all_pending_audits(justification)
+        # Run audit to clean up all pending_audit violations
+        auditor = Auditor(repository, PROJECT_ROOT)
+        auditor.run_audit()
+        return "Successfully cleared pending audit status for all files."
+    except Exception as e:
+        return f"Error clearing pending audits: {e}"
+    finally:
+        db_conn.close()
+
+
+@mcp.tool()
 def get_file_details(filepath: str) -> str:
     """
     Retrieves full indexing, compliance status, manual status, and metadata fields for a specific file.
@@ -551,6 +575,7 @@ def get_file_details(filepath: str) -> str:
             f"- **Last Indexed**: `{file_info['last_indexed']}`",
             f"- **Automatically Computed Status**: `{file_info['status']}`",
             f"- **Manual AI Audit Status**: `{file_info['manual_status']}`",
+            f"- **Pending Audit**: `{file_info['pending_audit']}`",
             f"- **Justification Comment**: *{file_info['justification'] or 'None'}*",
             f"- **Manual Fields/Annotations**: `{m_fields}`"
         ]

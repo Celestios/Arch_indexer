@@ -78,6 +78,79 @@ class Auditor:
             else:
                 conn.execute("DELETE FROM compliance_violations WHERE origin = 'automatic'")
 
+        # Check config hash and reset fields if modified or if manual field value is invalid
+        from change_tracker.tracker import ChangeTracker
+        config_changed = ChangeTracker.check_config_changed(self.project_root, self.repository)
+        
+        file_metadata = self.repository.files.get_all_files_metadata()
+        db_updated = False
+
+        for filepath, meta in file_metadata.items():
+            prefix_conf = self.get_applicable_config(filepath, config)
+            if not prefix_conf:
+                continue
+
+            manual_cfg = prefix_conf.get("manual_fields", {})
+            current_manual_fields = meta.get("manual_fields") or {}
+            
+            updated_fields = dict(current_manual_fields)
+            fields_to_reset = []
+            
+            justification = meta.get("justification") or ""
+            is_modified = (meta.get("pending_audit") and justification == "File modified, pending re-audit")
+            
+            fields_changed = False
+            
+            for field_name, field_conf in manual_cfg.items():
+                default_val = field_conf.get("default")
+                allowed_values = field_conf.get("values")
+                reset_on_change = field_conf.get("reset_on_change", False)
+                
+                curr_val = current_manual_fields.get(field_name)
+                
+                # Check if current value is no longer allowed by configuration
+                if curr_val is not None and allowed_values is not None and curr_val not in allowed_values:
+                    print(
+                        f"warning: value '{curr_val}' for manual field '{field_name}' in '{filepath}' is no longer allowed. "
+                        f"Resetting to default '{default_val}' and marking for audit.",
+                        file=sys.stderr
+                    )
+                    updated_fields[field_name] = default_val
+                    fields_changed = True
+                    with self.repository.db_conn.session() as conn:
+                        conn.execute(
+                            """
+                            UPDATE files
+                            SET pending_audit = TRUE,
+                                justification = ?
+                            WHERE filepath = ?
+                            """,
+                            (f"Manual field '{field_name}' value '{curr_val}' not allowed by config, reset to default.", filepath)
+                        )
+                    db_updated = True
+                
+                # Reset on file change/modification
+                elif is_modified and reset_on_change:
+                    if curr_val != default_val:
+                        updated_fields[field_name] = default_val
+                        fields_changed = True
+                        fields_to_reset.append(field_name)
+
+            if fields_changed:
+                if is_modified and fields_to_reset:
+                    reset_msg = ", ".join(fields_to_reset)
+                    new_justification = f"File modified, pending re-audit (fields reset: {reset_msg})"
+                    self.repository.files.update_file_manual_fields(filepath, updated_fields, new_justification)
+                else:
+                    self.repository.files.update_file_manual_fields(filepath, updated_fields, justification)
+                db_updated = True
+
+        if db_updated:
+            file_metadata = self.repository.files.get_all_files_metadata()
+
+        if config_changed:
+            ChangeTracker.update_config_hash(self.project_root, self.repository)
+
         # 1. Fetch all symbols from the database
         all_symbols = []
         with self.repository.db_conn.session() as conn:
@@ -370,6 +443,34 @@ class Auditor:
                             }
                             violations.append(violation_data)
                             self.repository.compliance.add_violation(**violation_data)
+
+        # 5c. Check for files pending manual compliance audit
+        for f_path, meta in file_metadata.items():
+            if meta.get("pending_audit"):
+                # Filter by filepath prefix if requested
+                if filepath_filter:
+                    norm_source_fp = f_path.replace("\\", "/")
+                    norm_filter = filepath_filter.replace("\\", "/")
+                    if not norm_source_fp.startswith(norm_filter):
+                        continue
+
+                violation_text = f"pending_audit_{f_path}"
+                violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
+                
+                justification_msg = meta.get("justification") or "pending initial audit"
+                msg = f"Component '{f_path}' requires manual compliance audit (justification: {justification_msg})."
+                
+                violation_data = {
+                    "violation_id": violation_id,
+                    "rule_id": "pending_audit",
+                    "symbol": None,
+                    "filepath": f_path,
+                    "line": 1,
+                    "message": msg,
+                    "origin": "automatic"
+                }
+                violations.append(violation_data)
+                self.repository.compliance.add_violation(**violation_data)
 
         # Re-compute automated status for all files based on active automatic violations
         violations_by_file = {}
