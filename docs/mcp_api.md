@@ -6,12 +6,12 @@ This guide documents the command-line interface (CLI) and Model Context Protocol
 
 ## 1. CLI Reference
 
-The CLI tool `arch` is simplified to contain two main commands: one for humans (setup/indexing) and one for automated workflows (compliance checks).
+The CLI tool `arch` is simplified to contain two main commands: one for humans (setup/indexing/integration) and one for automated workflows (compliance checks).
 
 ### Commands
 
 #### `arch init`
-*   **Purpose**: The primary interactive CLI entry point. Initializes the workspace, scans source files, downloads the local ONNX embedding models, and automatically indexes all codebase declarations.
+*   **Purpose**: The primary interactive CLI entry point. Initializes the workspace, scans source files, downloads the local ONNX embedding models, bootstraps the CodeQL CLI binary, builds indexing databases, and registers the server automatically with Claude Desktop.
 *   **Syntax**:
     ```bash
     arch init [project_root]
@@ -25,8 +25,11 @@ The CLI tool `arch` is simplified to contain two main commands: one for humans (
         *   `[2]` `bge-small-en-v1.5` (~130MB download, 384 dimensions)
         *   `[3]` `all-mpnet-base-v2` (~430MB download, 768 dimensions)
         *   `[4]` Skip model download (disables semantic search)
-    3.  **Real-Time Progress Bar**: Downloads the model files, displaying a real-time progress bar.
-    4.  **Auto-Indexing**: Automatically executes toolchain indexers (Dart/Rust) and ingests all AST symbols and edge relationships into the DuckDB database.
+    3.  **CodeQL CLI prompt**: Prompts the user to download the CodeQL CLI binary (~200MB download). Needed for tracing data flows in compiled code (e.g. Rust).
+    4.  **Real-Time Progress Bar**: Downloads the embedder model and CodeQL zip files, displaying a real-time progress bar.
+    5.  **Auto-Indexing**: Automatically executes toolchain indexers (Dart/Rust) and ingests all AST symbols and edge relationships into the DuckDB database.
+    6.  **CodeQL Database Creation**: If CodeQL CLI is ready and Rust is detected, prompts to build a CodeQL database of the project (`.arch/codeql_db`) to enable tracer queries.
+    7.  **Automated MCP Registration**: Prompts to automatically register the server configuration (virtual environment python interpreter, script arguments, and project paths) inside your Claude Desktop settings (`claude_desktop_config.json`).
 
 #### `arch audit`
 *   **Purpose**: Runs architectural boundary audits. Ideal for developers to integrate directly into Git pre-commit hooks or CI/CD pipelines to block commits that violate layer boundaries.
@@ -134,7 +137,7 @@ The FastMCP server exposes six tools returning clean, token-efficient Markdown s
         * `lib.ui.widget.MyWidget.draw` (Connections: 24)
         * `lib.ui.theme.DarkTheme` (Connections: 12)
 
-    #### Community: `src/db/` (45 symbol(s))
+    #### Community: `src/db//` (45 symbol(s))
       - **Key Hub Symbols**:
         * `db.repository.Repository` (Connections: 45)
         * `db.connection.DbConnection` (Connections: 15)

@@ -1,3 +1,4 @@
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -22,8 +23,55 @@ def make_progress_callback(filename: str):
     return callback
 
 
+def register_claude_desktop_mcp(project_root: Path):
+    """Automatically registers this project's Arch MCP server in Claude Desktop config."""
+    import json
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        print("\n[MCP Setup] Error: APPDATA environment variable not found. Skipping automatic registration.")
+        return
+        
+    claude_dir = Path(appdata) / "Claude"
+    claude_config_file = claude_dir / "claude_desktop_config.json"
+    
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    
+    config = {}
+    if claude_config_file.exists():
+        try:
+            with open(claude_config_file, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except Exception as e:
+            print(f"\n[MCP Setup] Warning: Failed to parse existing Claude Desktop config: {e}")
+            
+    if "mcpServers" not in config:
+        config["mcpServers"] = {}
+        
+    python_exe = sys.executable
+    venv_python = project_root / ".venv" / "Scripts" / "python.exe"
+    if venv_python.exists():
+        python_exe = str(venv_python)
+        
+    server_path = project_root / "src" / "interface" / "server.py"
+    
+    config["mcpServers"]["arch"] = {
+        "command": python_exe,
+        "args": [str(server_path)],
+        "env": {
+            "ARCH_PROJECT_ROOT": str(project_root)
+        }
+    }
+    
+    try:
+        with open(claude_config_file, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        print(f"\n[MCP Setup] Registered Arch in Claude Desktop: {claude_config_file}")
+    except Exception as e:
+        print(f"\n[MCP Setup] Warning: Failed to write Claude Desktop configuration ({e})")
+
+
 def cmd_init(args):
-    """Unified setup command: initialize workspace, prompt for ONNX embedder, and build code index."""
+    """Unified setup command: initialize workspace, download models, set up CodeQL, and index symbols."""
     project_root = Path(args.project_root).resolve()
     print("====================================================")
     print("      Arch: Code Intelligence & Compliance Setup     ")
@@ -68,9 +116,40 @@ def cmd_init(args):
         print("\nNon-interactive session. Defaulting to option [1].")
         choice = "1"
 
+    # 2b. CodeQL setup choice
+    print("\n--- CodeQL CLI Options ---")
+    print("Arch can use CodeQL to trace data flow paths (e.g. from source endpoint to database sink).")
+    print("This requires downloading the CodeQL CLI binary (~200MB download, extracting to ~500MB).")
+    
+    setup_cql = True
+    if sys.stdin.isatty():
+        try:
+            cql_ans = input("\nSetup CodeQL CLI? [Y/n]: ").strip().lower()
+            setup_cql = cql_ans not in ("n", "no")
+        except (KeyboardInterrupt, EOFError):
+            print("\nDefaulting to option [Y] due to user interruption.")
+            setup_cql = True
+    else:
+        print("\nNon-interactive session. Skipping CodeQL CLI setup.")
+        setup_cql = False
+
     # 3. Initialize workspace structure & DB
     arch_dir = initialize_workspace(project_root)
     print(f"\nWorkspace folder initialized at {arch_dir}")
+    
+    bin_dir = Path(__file__).resolve().parent.parent / "bin"
+    target_models_dir = bin_dir / "models"
+
+    # 3b. Setup CodeQL if requested
+    cql_ready = False
+    if setup_cql:
+        print("\n--- Bootstrapping CodeQL CLI ---")
+        try:
+            from setup.indexers import bootstrap_codeql
+            bootstrap_codeql(bin_dir, progress_callback=make_progress_callback("codeql.zip"))
+            cql_ready = True
+        except Exception as e:
+            print(f"\nWarning: CodeQL setup failed ({e}). Tracer tool will not be available.")
 
     # 4. Bootstrap ONNX model if requested
     embedder = None
@@ -78,8 +157,6 @@ def cmd_init(args):
         print("\n--- Downloading ONNX Model Assets ---")
         try:
             from setup.embedder_bootstrap import bootstrap_onnx_model, EMBEDDING_MODELS
-            bin_dir = Path(__file__).resolve().parent.parent / "bin"
-            target_models_dir = bin_dir / "models"
             
             model_info = EMBEDDING_MODELS.get(choice, EMBEDDING_MODELS["1"])
             model_path = target_models_dir / "model.onnx"
@@ -129,6 +206,52 @@ def cmd_init(args):
             print("\nIndexing failed. Setup complete, but no symbols were ingested.")
     else:
         print("\nNo supported toolchains detected. Setup complete, but index could not be built.")
+
+    # 5b. CodeQL Database Creation
+    if cql_ready and "rust" in languages:
+        build_cql = True
+        if sys.stdin.isatty():
+            try:
+                cql_db_ans = input("\nBuild CodeQL database for Rust? (Requires cargo compiler setup) [Y/n]: ").strip().lower()
+                build_cql = cql_db_ans not in ("n", "no")
+            except (KeyboardInterrupt, EOFError):
+                build_cql = True
+        else:
+            build_cql = False
+
+        if build_cql:
+            print("\n--- Running CodeQL Database Generator ---")
+            try:
+                from engines.codeql_wrapper import CodeQlWrapper
+                codeql = CodeQlWrapper(bin_dir)
+                db_output_dir = arch_dir / "codeql_db"
+                success = codeql.create_database(
+                    source_root=project_root,
+                    db_output_dir=db_output_dir,
+                    language="rust"
+                )
+                if success:
+                    print("CodeQL database built successfully.")
+                else:
+                    print("Warning: CodeQL database build failed. Verify build environments.")
+            except Exception as e:
+                print(f"Error creating CodeQL database: {e}")
+
+    # 6. Automate MCP configuration in Claude Desktop
+    print("\n--- Claude Desktop MCP Configuration ---")
+    print("Arch can automatically register itself in your Claude Desktop configuration.")
+    register_mcp = True
+    if sys.stdin.isatty():
+        try:
+            mcp_ans = input("Automatically register in Claude Desktop? [Y/n]: ").strip().lower()
+            register_mcp = mcp_ans not in ("n", "no")
+        except (KeyboardInterrupt, EOFError):
+            register_mcp = True
+    else:
+        register_mcp = False
+
+    if register_mcp:
+        register_claude_desktop_mcp(project_root)
 
     print("\n====================================================")
     print(" Arch setup is complete! Ready to start MCP Server. ")

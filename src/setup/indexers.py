@@ -14,7 +14,7 @@ def make_progress_callback(filename: str):
         sys.stdout.flush()
     return callback
 
-def bootstrap_codeql(bin_dir: Path) -> Path:
+def bootstrap_codeql(bin_dir: Path, progress_callback = None) -> Path:
     """Downloads and extracts the CodeQL CLI binary for Windows, caching the download in the archive directory."""
     codeql_dir = bin_dir / "codeql"
     codeql_exe = codeql_dir / "codeql.exe"
@@ -61,7 +61,8 @@ def bootstrap_codeql(bin_dir: Path) -> Path:
 
     if not use_cached:
         try:
-            download_file(CODEQL_URL, zip_path, progress_callback=make_progress_callback("codeql.zip"))
+            cb = progress_callback if progress_callback else make_progress_callback("codeql.zip")
+            download_file(CODEQL_URL, zip_path, progress_callback=cb)
         except Exception as e:
             raise RuntimeError(f"Failed to download CodeQL CLI: {e}")
 

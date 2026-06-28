@@ -18,9 +18,16 @@ def test_main_no_args(capsys):
 
 def test_cmd_init_creates_workspace(tmp_path, monkeypatch, capsys):
     """cmd_init creates .arch/ directory, scans languages, and handles skip model choice."""
-    # Mock interactive choice to '4' (Skip model download) to prevent downloading during tests
+    # Mock interactive prompts
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda prompt="": "4")
+    
+    def mock_input(prompt=""):
+        p = prompt.lower()
+        if "option" in p:
+            return "4"
+        return "n"
+        
+    monkeypatch.setattr("builtins.input", mock_input)
 
     args = type("Args", (), {"project_root": str(tmp_path)})()
     cmd_init(args)
