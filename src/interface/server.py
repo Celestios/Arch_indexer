@@ -433,6 +433,30 @@ def trace(source: str, sink: str) -> str:
     return "\n".join(md)
 
 
+@mcp.tool()
+def report(name: str, format: str = "markdown") -> str:
+    """
+    Generates a structured workspace report.
+    Parameters:
+      name: The name of the report ('overview' or 'compliance').
+      format: The output format ('markdown' or 'json', default: 'markdown').
+    """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
+    db_conn = DbConnection(DB_PATH)
+    repository = Repository(db_conn)
+
+    try:
+        from reporter.generator import Reporter
+        reporter = Reporter(repository)
+        return reporter.generate_report(name, format)
+    except Exception as e:
+        return f"Error generating report: {e}"
+    finally:
+        db_conn.close()
+
+
 if __name__ == "__main__":
     # Start the FastMCP server (standard stdin/stdout communication)
     mcp.run()

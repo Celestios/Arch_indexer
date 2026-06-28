@@ -368,6 +368,7 @@ def test_mcp_tools_database_missing(tmp_path, monkeypatch):
     assert "database not found" in mcp_server.audit()
     assert "database not found" in mcp_server.map()
     assert "database not found" in mcp_server.trace("src", "sink")
+    assert "database not found" in mcp_server.report("overview")
 
 
 def test_map_tool_empty_database(tmp_path, monkeypatch):
@@ -399,4 +400,32 @@ def test_context_tool_empty_file(tmp_path, monkeypatch):
     assert "No indexed symbols found in file" in out
 
     db_conn.close()
+
+
+def test_mcp_tools_report(tmp_path, monkeypatch):
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    import src.interface.server as mcp_server
+    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
+    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
+    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
+
+    # Add a mock violation
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO compliance_rules (rule_id, description, severity)
+            VALUES ('test_rule', 'desc', 'CRITICAL')
+        """)
+        conn.execute("""
+            INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message)
+            VALUES ('v_id', 'test_rule', 'sym_a', 'src/db.py', 10, 'error message')
+        """)
+
+    # Test report tool
+    out = mcp_server.report("compliance")
+    assert "Compliance Violations Report" in out
+    assert "sym_a" in out
+
+    db_conn.close()
+
 

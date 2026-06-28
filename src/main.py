@@ -238,6 +238,30 @@ def cmd_audit(args):
     db_conn.close()
 
 
+def cmd_report(args):
+    """Generates a codebase report."""
+    project_root = Path(args.project_root).resolve()
+    arch_dir = project_root / ".arch"
+
+    if not arch_dir.exists():
+        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    from reporter.generator import Reporter
+    db_conn = DbConnection(arch_dir / "arch.db")
+    repository = Repository(db_conn)
+
+    reporter = Reporter(repository)
+    try:
+        report_text = reporter.generate_report(args.name, args.format)
+        print(report_text)
+    except KeyError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        db_conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="arch",
@@ -254,6 +278,13 @@ def main():
     audit_parser = subparsers.add_parser("audit", help="Run compliance audit")
     audit_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
     audit_parser.set_defaults(func=cmd_audit)
+
+    # report
+    report_parser = subparsers.add_parser("report", help="Generate workspace data reports")
+    report_parser.add_argument("name", choices=["overview", "compliance"], help="Report name")
+    report_parser.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format")
+    report_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    report_parser.set_defaults(func=cmd_report)
 
     args = parser.parse_args()
 

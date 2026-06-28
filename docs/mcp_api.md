@@ -40,11 +40,22 @@ The CLI tool `arch` is simplified to contain two main commands: one for humans (
 *   **Arguments**:
     *   `project_root` (optional, default: `.`): Path to the target project directory.
 
+#### `arch report`
+*   **Purpose**: Generates high-level summaries or compliance reports of the workspace code graph.
+*   **Syntax**:
+    ```bash
+    arch report [name] [--format json|markdown] [project_root]
+    ```
+*   **Arguments**:
+    *   `name` (required): The name of the report to run (`overview` or `compliance`).
+    *   `--format` (optional, default: `markdown`): Output format format (`markdown` or `json`).
+    *   `project_root` (optional, default: `.`): Path to the target project directory.
+
 ---
 
 ## 2. MCP Tools Reference
 
-The FastMCP server exposes six tools returning clean, token-efficient Markdown strings optimized for LLM consumption.
+The FastMCP server exposes seven tools returning clean, token-efficient Markdown strings optimized for LLM consumption.
 
 ### `query`
 *   **Purpose**: Semantic similarity search over code docstrings. Supports searching for multiple queries in a single call to minimize roundtrips.
@@ -137,7 +148,7 @@ The FastMCP server exposes six tools returning clean, token-efficient Markdown s
         * `lib.ui.widget.MyWidget.draw` (Connections: 24)
         * `lib.ui.theme.DarkTheme` (Connections: 12)
 
-    #### Community: `src/db//` (45 symbol(s))
+    #### Community: `src/db/` (45 symbol(s))
       - **Key Hub Symbols**:
         * `db.repository.Repository` (Connections: 45)
         * `db.connection.DbConnection` (Connections: 15)
@@ -157,4 +168,20 @@ The FastMCP server exposes six tools returning clean, token-efficient Markdown s
 
     1. `src.web.handler.UserHandler.post` (`src/web/handler.py:L23`)
     2. `db.repository.Repository.upsert_symbol` (`src/db/repository.py:L71`)
+    ```
+
+### `report`
+*   **Purpose**: Generates a structured overview or compliance violation report of the workspace.
+*   **Parameters**:
+    *   `name` (string, required): Name of the report (`overview` or `compliance`).
+    *   `format` (string, optional, default: `markdown`): Format of the output (`markdown` or `json`).
+*   **Output Format (Markdown)**:
+    ```markdown
+    # Workspace Overview Report
+
+    ## Repository Totals
+    - **Files Indexed**: 12
+    - **Symbols Registered**: 154
+    - **Dependencies (Call Graph Edges)**: 450
+    - **Active Architectural Violations**: 0
     ```
