@@ -262,6 +262,167 @@ def cmd_report(args):
         db_conn.close()
 
 
+def cmd_set_status(args):
+    """Sets manual override status for a file."""
+    project_root = Path(args.project_root).resolve()
+    arch_dir = project_root / ".arch"
+    if not arch_dir.exists():
+        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    db_conn = DbConnection(arch_dir / "arch.db")
+    repository = Repository(db_conn)
+
+    try:
+        filepath = args.filepath
+        file_info = repository.get_file(filepath)
+        if not file_info:
+            all_files = repository.get_all_files_metadata()
+            matched = None
+            for fp in all_files.keys():
+                if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
+                    matched = fp
+                    break
+            if matched:
+                filepath = matched
+                file_info = repository.get_file(filepath)
+                
+        if not file_info:
+            print(f"Error: File '{args.filepath}' is not registered in the database.", file=sys.stderr)
+            sys.exit(1)
+
+        status = args.status
+        if status.lower() == "none":
+            status = None
+        else:
+            status = status.upper()
+
+        repository.update_file_override_status(filepath, status, args.justification)
+        
+        auditor = Auditor(repository, project_root)
+        auditor.run_audit(filepath_filter=filepath)
+        
+        status_msg = f"manual status set to '{status}'" if status else "manual status override cleared"
+        print(f"Successfully updated '{filepath}': {status_msg}.")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        db_conn.close()
+
+
+def cmd_set_fields(args):
+    """Sets manual fields for a file."""
+    project_root = Path(args.project_root).resolve()
+    arch_dir = project_root / ".arch"
+    if not arch_dir.exists():
+        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    db_conn = DbConnection(arch_dir / "arch.db")
+    repository = Repository(db_conn)
+
+    import json
+    try:
+        fields = json.loads(args.fields_json)
+    except Exception as e:
+        print(f"Error: Invalid JSON fields payload: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        filepath = args.filepath
+        file_info = repository.get_file(filepath)
+        if not file_info:
+            all_files = repository.get_all_files_metadata()
+            matched = None
+            for fp in all_files.keys():
+                if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
+                    matched = fp
+                    break
+            if matched:
+                filepath = matched
+                file_info = repository.get_file(filepath)
+                
+        if not file_info:
+            print(f"Error: File '{args.filepath}' is not registered in the database.", file=sys.stderr)
+            sys.exit(1)
+
+        current_fields = {}
+        if file_info.get("manual_fields"):
+            try:
+                current_fields = json.loads(file_info["manual_fields"])
+            except Exception:
+                pass
+
+        for k, v in fields.items():
+            if v is None:
+                current_fields.pop(k, None)
+            else:
+                current_fields[k] = v
+
+        repository.update_file_manual_fields(filepath, current_fields, args.justification)
+        
+        auditor = Auditor(repository, project_root)
+        auditor.run_audit()
+        
+        print(f"Successfully updated manual fields for '{filepath}' to: {current_fields}.")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        db_conn.close()
+
+
+def cmd_override_violation(args):
+    """Overrides a compliance violation by ID."""
+    project_root = Path(args.project_root).resolve()
+    arch_dir = project_root / ".arch"
+    if not arch_dir.exists():
+        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    db_conn = DbConnection(arch_dir / "arch.db")
+    repository = Repository(db_conn)
+
+    try:
+        repository.add_violation_override(args.violation_id, args.justification)
+        
+        auditor = Auditor(repository, project_root)
+        auditor.run_audit()
+        
+        print(f"Violation '{args.violation_id}' overridden successfully.")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        db_conn.close()
+
+
+def cmd_remove_override(args):
+    """Removes a violation override by ID."""
+    project_root = Path(args.project_root).resolve()
+    arch_dir = project_root / ".arch"
+    if not arch_dir.exists():
+        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    db_conn = DbConnection(arch_dir / "arch.db")
+    repository = Repository(db_conn)
+
+    try:
+        repository.remove_violation_override(args.violation_id)
+        
+        auditor = Auditor(repository, project_root)
+        auditor.run_audit()
+        
+        print(f"Removed override for violation '{args.violation_id}' successfully.")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        db_conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="arch",
@@ -285,6 +446,35 @@ def main():
     report_parser.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format")
     report_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
     report_parser.set_defaults(func=cmd_report)
+
+    # set-status
+    set_status_parser = subparsers.add_parser("set-status", help="Set manual compliance status for a file")
+    set_status_parser.add_argument("filepath", help="Filepath to the target file")
+    set_status_parser.add_argument("status", choices=["COMPLIANT", "EXEMPT", "VIOLATION_DETECTED", "PENDING_AUDIT", "none", "None"], help="Manual compliance status (use 'none' to clear)")
+    set_status_parser.add_argument("justification", nargs="?", default=None, help="Optional override justification")
+    set_status_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    set_status_parser.set_defaults(func=cmd_set_status)
+
+    # set-fields
+    set_fields_parser = subparsers.add_parser("set-fields", help="Set manual metadata fields for a file")
+    set_fields_parser.add_argument("filepath", help="Filepath to the target file")
+    set_fields_parser.add_argument("fields_json", help="JSON string of fields to update")
+    set_fields_parser.add_argument("justification", nargs="?", default=None, help="Optional update justification")
+    set_fields_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    set_fields_parser.set_defaults(func=cmd_set_fields)
+
+    # override-violation
+    override_parser = subparsers.add_parser("override-violation", help="Override a specific violation by ID")
+    override_parser.add_argument("violation_id", help="Hexadecimal violation ID to override")
+    override_parser.add_argument("justification", help="Justification comment")
+    override_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    override_parser.set_defaults(func=cmd_override_violation)
+
+    # remove-override
+    remove_parser = subparsers.add_parser("remove-override", help="Remove override for a specific violation")
+    remove_parser.add_argument("violation_id", help="Hexadecimal violation ID to restore")
+    remove_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    remove_parser.set_defaults(func=cmd_remove_override)
 
     args = parser.parse_args()
 

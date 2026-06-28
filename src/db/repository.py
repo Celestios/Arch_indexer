@@ -54,7 +54,7 @@ class Repository:
         """Retrieves indexing metadata for a specific file."""
         with self.db_conn.session() as conn:
             res = conn.execute(
-                "SELECT filepath, sha256, language, last_indexed FROM files WHERE filepath = ?",
+                "SELECT filepath, sha256, language, last_indexed, status, manual_status, manual_fields, justification FROM files WHERE filepath = ?",
                 (filepath,)
             ).fetchone()
             if res:
@@ -62,7 +62,11 @@ class Repository:
                     "filepath": res[0],
                     "sha256": res[1],
                     "language": res[2],
-                    "last_indexed": res[3]
+                    "last_indexed": res[3],
+                    "status": res[4],
+                    "manual_status": res[5],
+                    "manual_fields": res[6],
+                    "justification": res[7]
                 }
         return None
 
@@ -214,22 +218,26 @@ class Repository:
         symbol: Optional[str],
         filepath: str,
         line: int,
-        message: str
+        message: str,
+        status: str = "ACTIVE",
+        justification: Optional[str] = None
     ):
         """Registers an architectural boundary violation."""
         with self.db_conn.session() as conn:
             conn.execute(
                 """
-                INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message, status, justification)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (violation_id) DO UPDATE SET
                     rule_id = excluded.rule_id,
                     symbol = excluded.symbol,
                     filepath = excluded.filepath,
                     line = excluded.line,
-                    message = excluded.message
+                    message = excluded.message,
+                    status = excluded.status,
+                    justification = excluded.justification
                 """,
-                (violation_id, rule_id, symbol, filepath, line, message)
+                (violation_id, rule_id, symbol, filepath, line, message, status, justification)
             )
 
     def get_violations(self) -> List[Dict[str, Any]]:
@@ -237,7 +245,7 @@ class Repository:
         with self.db_conn.session() as conn:
             res = conn.execute(
                 """
-                SELECT v.violation_id, v.rule_id, r.description, v.symbol, v.filepath, v.line, v.message, r.severity, v.checked_at
+                SELECT v.violation_id, v.rule_id, r.description, v.symbol, v.filepath, v.line, v.message, r.severity, v.checked_at, v.status, v.justification
                 FROM compliance_violations v
                 JOIN compliance_rules r ON v.rule_id = r.rule_id
                 ORDER BY r.severity DESC, v.filepath ASC
@@ -253,7 +261,9 @@ class Repository:
                     "line": r[5],
                     "message": r[6],
                     "severity": r[7],
-                    "checked_at": r[8]
+                    "checked_at": r[8],
+                    "status": r[9],
+                    "justification": r[10]
                 }
                 for r in res
             ]
@@ -511,5 +521,93 @@ class Repository:
                     prefix = "./"
                 prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
         return prefix_counts
+
+    def update_file_override_status(self, filepath: str, manual_status: Optional[str], justification: Optional[str] = None):
+        """Sets or clears the manual override compliance status for a file."""
+        with self.db_conn.session() as conn:
+            conn.execute(
+                """
+                UPDATE files
+                SET manual_status = ?,
+                    justification = ?
+                WHERE filepath = ?
+                """,
+                (manual_status, justification, filepath)
+            )
+
+    def update_file_manual_fields(self, filepath: str, manual_fields: dict, justification: Optional[str] = None):
+        """Sets or updates the manual metadata fields (JSON format) for a file."""
+        import json
+        fields_str = json.dumps(manual_fields)
+        with self.db_conn.session() as conn:
+            conn.execute(
+                """
+                UPDATE files
+                SET manual_fields = ?,
+                    justification = ?
+                WHERE filepath = ?
+                """,
+                (fields_str, justification, filepath)
+            )
+
+    def update_file_status(self, filepath: str, status: str):
+        """Updates the automatically evaluated compliance status for a file."""
+        with self.db_conn.session() as conn:
+            conn.execute(
+                """
+                UPDATE files
+                SET status = ?
+                WHERE filepath = ?
+                """,
+                (status, filepath)
+            )
+
+    def get_all_files_metadata(self) -> Dict[str, Dict[str, Any]]:
+        """Retrieves all files' status, manual status, manual fields and justification."""
+        import json
+        with self.db_conn.session() as conn:
+            rows = conn.execute(
+                "SELECT filepath, status, manual_status, manual_fields, justification FROM files"
+            ).fetchall()
+            metadata = {}
+            for r in rows:
+                try:
+                    manual_fields = json.loads(r[3]) if r[3] else {}
+                except Exception:
+                    manual_fields = {}
+                metadata[r[0]] = {
+                    "filepath": r[0],
+                    "status": r[1],
+                    "manual_status": r[2],
+                    "manual_fields": manual_fields,
+                    "justification": r[4]
+                }
+            return metadata
+
+    def add_violation_override(self, violation_id: str, justification: str):
+        """Registers an override for a specific violation ID."""
+        with self.db_conn.session() as conn:
+            conn.execute(
+                """
+                INSERT INTO violation_overrides (violation_id, justification, overridden_at)
+                VALUES (?, ?, now())
+                ON CONFLICT (violation_id) DO UPDATE SET
+                    justification = excluded.justification,
+                    overridden_at = now()
+                """,
+                (violation_id, justification)
+            )
+
+    def remove_violation_override(self, violation_id: str):
+        """Removes an override for a specific violation ID."""
+        with self.db_conn.session() as conn:
+            conn.execute("DELETE FROM violation_overrides WHERE violation_id = ?", (violation_id,))
+
+    def get_violation_overrides(self) -> Dict[str, str]:
+        """Returns all persistent violation overrides mapping violation_id -> justification."""
+        with self.db_conn.session() as conn:
+            rows = conn.execute("SELECT violation_id, justification FROM violation_overrides").fetchall()
+            return {r[0]: r[1] for r in rows}
+
 
 

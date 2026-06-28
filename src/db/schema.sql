@@ -5,7 +5,11 @@ CREATE TABLE IF NOT EXISTS files (
     filepath VARCHAR PRIMARY KEY,
     sha256 VARCHAR NOT NULL,
     language VARCHAR NOT NULL,
-    last_indexed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    last_indexed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR NOT NULL DEFAULT 'PENDING_AUDIT',
+    manual_status VARCHAR, -- 'COMPLIANT', 'EXEMPT', or NULL
+    manual_fields VARCHAR NOT NULL DEFAULT '{}', -- JSON string containing manual metadata fields
+    justification TEXT
 );
 
 -- 2. Track symbols (classes, functions, methods, structs)
@@ -45,7 +49,6 @@ CREATE TABLE IF NOT EXISTS compliance_rules (
     severity VARCHAR NOT NULL -- e.g., 'Error', 'Warning', 'Info'
 );
 
--- 6. Track violations discovered during compliance audits
 CREATE TABLE IF NOT EXISTS compliance_violations (
     violation_id VARCHAR PRIMARY KEY,
     rule_id VARCHAR,
@@ -53,5 +56,14 @@ CREATE TABLE IF NOT EXISTS compliance_violations (
     filepath VARCHAR NOT NULL,
     line INTEGER NOT NULL,
     message TEXT NOT NULL,
-    checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR DEFAULT 'ACTIVE',
+    justification TEXT
+);
+
+-- 7. Track persistent overrides for individual compliance violations
+CREATE TABLE IF NOT EXISTS violation_overrides (
+    violation_id VARCHAR PRIMARY KEY,
+    justification TEXT NOT NULL,
+    overridden_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

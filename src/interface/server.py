@@ -322,16 +322,33 @@ def audit(filepath: Optional[str] = None) -> str:
     finally:
         db_conn.close()
 
-    if not violations:
-        scope = f"for `{filepath}`" if filepath else "project-wide"
-        return f"## Compliance Audit\n\n**No boundary rule violations found** {scope}."
+    active_violations = [v for v in violations if v.get("status", "ACTIVE") == "ACTIVE"]
+    overridden_violations = [v for v in violations if v.get("status") == "OVERRIDDEN"]
 
-    md = [f"## Compliance Audit: {len(violations)} violation(s) found\n"]
-    for i, v in enumerate(violations, 1):
-        md.append(f"{i}. **[{v['rule_id']}]** (File: `{v['filepath']}:L{v['line']}`)")
-        md.append(f"   - **Caller Symbol**: `{v['symbol']}`")
-        md.append(f"   - **Violation**: {v['message']}")
-        md.append("")
+    md = ["## Compliance Audit Report\n"]
+    
+    scope = f"for `{filepath}`" if filepath else "project-wide"
+    md.append(f"Scope: {scope}\n")
+    
+    md.append(f"### Active Violations ({len(active_violations)})")
+    if not active_violations:
+        md.append("*No active architectural violations found.*\n")
+    else:
+        for i, v in enumerate(active_violations, 1):
+            md.append(f"{i}. **[{v['rule_id']}]** (File: `{v['filepath']}:L{v['line']}`)")
+            md.append(f"   - **Symbol**: `{v['symbol']}`")
+            md.append(f"   - **Violation**: {v['message']}")
+            md.append("")
+
+    if overridden_violations:
+        md.append(f"### Overridden Exceptions ({len(overridden_violations)})")
+        for i, v in enumerate(overridden_violations, 1):
+            md.append(f"{i}. **[{v['rule_id']}]** (File: `{v['filepath']}:L{v['line']}`)")
+            md.append(f"   - **Symbol**: `{v['symbol']}`")
+            md.append(f"   - **Violation**: {v['message']}")
+            md.append(f"   - **Justification**: *{v.get('justification') or 'No justification provided'}*")
+            md.append("")
+            
     return "\n".join(md)
 
 
@@ -453,6 +470,215 @@ def report(name: str, format: str = "markdown") -> str:
         return reporter.generate_report(name, format)
     except Exception as e:
         return f"Error generating report: {e}"
+    finally:
+        db_conn.close()
+
+
+@mcp.tool()
+def set_file_status(filepath: str, status: Optional[str] = None, justification: Optional[str] = None) -> str:
+    """
+    Sets or clears a manual compliance status override for a file component.
+    Parameters:
+      filepath: Path to the target file.
+      status: Compliance status ('COMPLIANT', 'EXEMPT', or None to clear override).
+      justification: Optional explanation or sign-off comment for the override.
+    """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
+    if status not in (None, "COMPLIANT", "EXEMPT", "VIOLATION_DETECTED", "PENDING_AUDIT"):
+        return f"Error: Invalid compliance status choice: {status}. Allowed values: COMPLIANT, EXEMPT, or null."
+
+    db_conn = DbConnection(DB_PATH)
+    repository = Repository(db_conn)
+
+    try:
+        # Check if the file is registered in the database
+        file_info = repository.get_file(filepath)
+        if not file_info:
+            # Try to resolve relative path matching
+            all_files = repository.get_all_files_metadata()
+            matched = None
+            for fp in all_files.keys():
+                if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
+                    matched = fp
+                    break
+            if matched:
+                filepath = matched
+            else:
+                return f"Error: File '{filepath}' is not registered in the database. Please index it first."
+
+        repository.update_file_override_status(filepath, status, justification)
+        status_msg = f"manual status set to '{status}'" if status else "manual status override cleared"
+        
+        # Trigger an audit run immediately to update violation statuses and files table status
+        auditor = Auditor(repository, PROJECT_ROOT)
+        auditor.run_audit(filepath_filter=filepath)
+        
+        return f"Successfully updated compliance status for '{filepath}': {status_msg}."
+    except Exception as e:
+        return f"Error setting file status: {e}"
+    finally:
+        db_conn.close()
+
+
+@mcp.tool()
+def set_file_fields(filepath: str, fields: dict, justification: Optional[str] = None) -> str:
+    """
+    Attaches arbitrary manual metadata fields to a file component.
+    Parameters:
+      filepath: Path to the target file.
+      fields: Dict containing metadata key-value annotations (e.g. {"pattern": "Controller"}).
+      justification: Optional explanation of the metadata update.
+    """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
+    db_conn = DbConnection(DB_PATH)
+    repository = Repository(db_conn)
+
+    try:
+        file_info = repository.get_file(filepath)
+        if not file_info:
+            # Try resolving path
+            all_files = repository.get_all_files_metadata()
+            matched = None
+            for fp in all_files.keys():
+                if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
+                    matched = fp
+                    break
+            if matched:
+                filepath = matched
+            else:
+                return f"Error: File '{filepath}' is not registered in the database. Please index it first."
+
+        # Fetch current manual fields to merge updates
+        current_fields = {}
+        if file_info.get("manual_fields"):
+            import json
+            try:
+                current_fields = json.loads(file_info["manual_fields"])
+            except Exception:
+                pass
+        
+        # Update/Merge fields
+        for k, v in fields.items():
+            if v is None:
+                current_fields.pop(k, None)
+            else:
+                current_fields[k] = v
+
+        repository.update_file_manual_fields(filepath, current_fields, justification)
+        
+        # Run audit to propagate metadata changes
+        auditor = Auditor(repository, PROJECT_ROOT)
+        auditor.run_audit()
+        
+        return f"Successfully updated manual fields for '{filepath}' to: {current_fields}."
+    except Exception as e:
+        return f"Error setting file fields: {e}"
+    finally:
+        db_conn.close()
+
+
+@mcp.tool()
+def set_violation_override(violation_id: str, justification: str) -> str:
+    """
+    Overrides a specific compliance violation by its ID hash with a justification comment.
+    """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
+    db_conn = DbConnection(DB_PATH)
+    repository = Repository(db_conn)
+
+    try:
+        repository.add_violation_override(violation_id, justification)
+        
+        # Run audit to re-evaluate and mark overrides in the violations table
+        auditor = Auditor(repository, PROJECT_ROOT)
+        auditor.run_audit()
+        
+        return f"Violation '{violation_id}' overridden successfully with justification: '{justification}'."
+    except Exception as e:
+        return f"Error overriding violation: {e}"
+    finally:
+        db_conn.close()
+
+
+@mcp.tool()
+def remove_violation_override(violation_id: str) -> str:
+    """
+    Removes a persistent override for a specific compliance violation ID.
+    """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
+    db_conn = DbConnection(DB_PATH)
+    repository = Repository(db_conn)
+
+    try:
+        repository.remove_violation_override(violation_id)
+        
+        # Run audit to re-evaluate violations
+        auditor = Auditor(repository, PROJECT_ROOT)
+        auditor.run_audit()
+        
+        return f"Successfully removed override for violation '{violation_id}'."
+    except Exception as e:
+        return f"Error removing override: {e}"
+    finally:
+        db_conn.close()
+
+
+@mcp.tool()
+def get_file_details(filepath: str) -> str:
+    """
+    Retrieves full indexing, compliance, status, and manual override metadata for a specific file.
+    """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
+    db_conn = DbConnection(DB_PATH)
+    repository = Repository(db_conn)
+
+    try:
+        file_info = repository.get_file(filepath)
+        if not file_info:
+            all_files = repository.get_all_files_metadata()
+            matched = None
+            for fp in all_files.keys():
+                if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
+                    matched = fp
+                    break
+            if matched:
+                filepath = matched
+                file_info = repository.get_file(filepath)
+            
+        if not file_info:
+            return f"Error: File '{filepath}' is not registered in the database."
+
+        import json
+        m_fields = {}
+        if file_info.get("manual_fields"):
+            try:
+                m_fields = json.loads(file_info["manual_fields"])
+            except Exception:
+                pass
+
+        md = [
+            f"## File Details: `{file_info['filepath']}`\n",
+            f"- **Language**: `{file_info['language']}`",
+            f"- **SHA-256 Hash**: `{file_info['sha256']}`",
+            f"- **Last Indexed**: `{file_info['last_indexed']}`",
+            f"- **Automatically Computed Status**: `{file_info['status']}`",
+            f"- **Manual Status Override**: `{file_info['manual_status'] or 'None'}`",
+            f"- **Justification Comment**: *{file_info['justification'] or 'None'}*",
+            f"- **Manual Fields/Annotations**: `{m_fields}`"
+        ]
+        return "\n".join(md)
+    except Exception as e:
+        return f"Error retrieving file details: {e}"
     finally:
         db_conn.close()
 

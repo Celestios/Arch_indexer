@@ -311,3 +311,145 @@ def test_auditor_naming_conventions(tmp_path):
     assert "All Presentation components must be suffixed with 'Widget'" in violations[0]["message"]
 
     db_conn.close()
+
+
+def test_auditor_manual_status_file_level_override(tmp_path):
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    # Insert file with manual override status
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO files (filepath, sha256, language, status, manual_status, justification)
+            VALUES ('lib/ui/widget.dart', 'hash123', 'dart', 'PENDING_AUDIT', 'COMPLIANT', 'Intentional exception')
+        """)
+        conn.execute("""
+            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
+            VALUES
+                ('presentation_sym', 'lib/ui/widget.dart', 'Method', null, null, null),
+                ('infra_sym', 'lib/infra/client.dart', 'Method', null, null, null)
+        """)
+        conn.execute("""
+            INSERT INTO edges (source, target, relation)
+            VALUES ('presentation_sym', 'infra_sym', 'Calls')
+        """)
+
+    auditor = Auditor(repository, root)
+    violations = auditor.run_audit()
+
+    # The violation is detected but marked as OVERRIDDEN
+    assert len(violations) == 1
+    assert violations[0]["status"] == "OVERRIDDEN"
+    assert "Intentional exception" in violations[0]["justification"]
+
+    # Verify that the files table status is set to COMPLIANT because all violations in it are overridden
+    file_metadata = repository.get_all_files_metadata()
+    assert file_metadata["lib/ui/widget.dart"]["status"] == "COMPLIANT"
+
+    db_conn.close()
+
+
+def test_auditor_violation_level_override(tmp_path):
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    # Insert file and symbols that violate rule
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO files (filepath, sha256, language, status)
+            VALUES ('lib/ui/widget.dart', 'hash123', 'dart', 'PENDING_AUDIT')
+        """)
+        conn.execute("""
+            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
+            VALUES
+                ('presentation_sym', 'lib/ui/widget.dart', 'Method', null, null, null),
+                ('infra_sym', 'lib/infra/client.dart', 'Method', null, null, null)
+        """)
+        conn.execute("""
+            INSERT INTO edges (source, target, relation)
+            VALUES ('presentation_sym', 'infra_sym', 'Calls')
+        """)
+
+    # Run audit first to generate violation
+    auditor = Auditor(repository, root)
+    violations = auditor.run_audit()
+    assert len(violations) == 1
+    v_id = violations[0]["violation_id"]
+
+    # Add override for this specific violation ID
+    repository.add_violation_override(v_id, "Specifically approved data access")
+
+    # Run audit again
+    violations_run2 = auditor.run_audit()
+    assert len(violations_run2) == 1
+    assert violations_run2[0]["status"] == "OVERRIDDEN"
+    assert violations_run2[0]["justification"] == "Specifically approved data access"
+
+    # Verify that removing the override restores active status
+    repository.remove_violation_override(v_id)
+    violations_run3 = auditor.run_audit()
+    assert len(violations_run3) == 1
+    assert violations_run3[0]["status"] == "ACTIVE"
+
+    db_conn.close()
+
+
+def test_auditor_manual_fields_override_automatic_and_propagate(tmp_path):
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    # Set up config.json with a propagation handler for 'layer'
+    config_path = root / ".arch" / "config.json"
+    config_data = {
+        "lib": {
+            "automatic_fields": {
+                "layer": {
+                    "values": ["Presentation", "Domain", "Infrastructure"],
+                    "default": "Domain",
+                    "assignment_rules": [
+                        {"value": "Presentation", "conditions": {"path_prefix": "lib/ui"}},
+                        {"value": "Infrastructure", "conditions": {"path_prefix": "lib/infra"}}
+                    ],
+                    "handler": "propagation",
+                    "propagation_direction": "upstream",
+                    "weights": {
+                        "Presentation": 1,
+                        "Domain": 2,
+                        "Infrastructure": 3
+                    },
+                    "rules": [
+                        {"source": "Presentation", "target": "Infrastructure", "message": "Violation Presentation calling Infrastructure"}
+                    ]
+                }
+            }
+        }
+    }
+    config_path.write_text(json.dumps(config_data, indent=2))
+
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO files (filepath, sha256, language, status, manual_fields)
+            VALUES 
+                ('lib/ui/widget.dart', 'h1', 'dart', 'PENDING_AUDIT', '{}'),
+                ('lib/core/helper.dart', 'h2', 'dart', 'PENDING_AUDIT', '{"layer": "Infrastructure"}'),
+                ('lib/infra/client.dart', 'h3', 'dart', 'PENDING_AUDIT', '{}')
+        """)
+        conn.execute("""
+            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
+            VALUES
+                ('presentation_sym', 'lib/ui/widget.dart', 'Method', null, null, null),
+                ('core_sym', 'lib/core/helper.dart', 'Method', null, null, null),
+                ('infra_sym', 'lib/infra/client.dart', 'Method', null, null, null)
+        """)
+        conn.execute("""
+            INSERT INTO edges (source, target, relation)
+            VALUES 
+                ('presentation_sym', 'core_sym', 'Calls'),
+                ('core_sym', 'infra_sym', 'Calls')
+        """)
+
+    auditor = Auditor(repository, root)
+    violations = auditor.run_audit()
+
+    assert len(violations) == 1
+    assert "Violation Presentation calling Infrastructure" in violations[0]["message"]
+
+    db_conn.close()
+
