@@ -456,21 +456,19 @@ def report(name: str, format: str = "markdown") -> str:
 
 @mcp.tool()
 def set_fields(
-    filepath: Optional[str] = None,
-    field: Optional[str] = None,
-    value: Optional[Any] = None,
-    justification: Optional[str] = None,
-    json_filepath: Optional[str] = None
+    target: str,
+    update: Optional[str] = None,
+    justification: Optional[str] = None
 ) -> str:
     """
     Updates manual compliance status or manual metadata fields for files.
     Enforces the configuration ontology strictly from config.json.
     
-    You must provide EITHER:
-      1. 'filepath', 'field', 'value', and 'justification' (optional) to set a single field on a file.
-         To set status, use field='status' and value='COMPLIANT' or 'VIOLATION'.
-      2. 'json_filepath' pointing to a JSON file containing a mapping of filepaths to fields and values.
-         Example: {"lib/widget.dart": {"status": "VIOLATION", "pattern": "Controller"}}
+    Parameters:
+      target: Either a JSON filepath (for batch updates) or a source filepath.
+      update: Optional. Combined field and value string in the format "field:value".
+              Example: "status:VIOLATION" or "pattern:Controller".
+      justification: Optional. Explanatory comment for the status update (required if status is VIOLATION).
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -584,8 +582,9 @@ def set_fields(
 
     try:
         updates_map = {}
-        if json_filepath:
-            path_obj = Path(json_filepath)
+        if update is None:
+            # Batch update from JSON file
+            path_obj = Path(target)
             if not path_obj.is_absolute():
                 path_obj = PROJECT_ROOT / path_obj
             if not path_obj.exists():
@@ -596,9 +595,20 @@ def set_fields(
                 return "Error: JSON file must contain a top-level object mapping filepaths to fields."
             updates_map = raw_json
         else:
-            if not filepath or not field:
-                return "Error: You must provide either 'json_filepath' or both 'filepath' and 'field'."
-            updates_map = {filepath: {field: value}}
+            # Single field update
+            if ":" not in update:
+                return "Error: Update parameter must be in the format 'field:value'."
+            field, val = update.split(":", 1)
+            field = field.strip()
+            val = val.strip()
+            if val.lower() == "true":
+                val = True
+            elif val.lower() == "false":
+                val = False
+            elif val.lower() == "null":
+                val = None
+            
+            updates_map = {target: {field: val}}
 
         # Resolve paths and validate first (atomic validations)
         resolved_updates = {}
@@ -653,198 +663,154 @@ def clear_pending_audits() -> str:
 
 
 @mcp.tool()
-def index(table: str, key: Optional[str] = None, limit: int = 50) -> str:
+def index(target: str) -> str:
     """
-    Retrieves metadata, properties, and relationships from the database index tables.
-    Supported tables:
-      - 'files': Lists/details files in the project index. key = filepath or suffix.
-      - 'symbols' (or 'nodes'): Lists/details code symbols. key = symbol name.
-      - 'occurrences': Lists coordinates/line numbers of symbol definitions/references. key = symbol name.
-      - 'edges': Lists call-graph dependencies. key = symbol name (matches either caller/source or callee/target).
-      - 'violations': Lists architectural compliance violations. key = filepath or rule_id.
+    Looks up details, metadata, and relationships for a file module or code symbol.
+    The tool automatically detects whether the target is a file path (e.g. 'auditor.analyzer' 
+    or 'src/auditor/analyzer.py') or a code symbol (e.g. 'auditor.analyzer.Auditor.run_audit').
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
 
     db_conn = DbConnection(DB_PATH)
-    
-    table_lower = table.lower().strip()
-    if table_lower in ("nodes", "node"):
-        table_name = "symbols"
-    elif table_lower in ("violations", "violation"):
-        table_name = "compliance_violations"
-    elif table_lower in ("edges", "edge", "dependencies", "dependency"):
-        table_name = "edges"
-    elif table_lower in ("occurrences", "occurrence"):
-        table_name = "occurrences"
-    elif table_lower in ("files", "file"):
-        table_name = "files"
-    else:
-        db_conn.close()
-        return f"Error: Unsupported table '{table}'. Supported tables: files, symbols (nodes), occurrences, edges, violations."
 
-    md = [f"## Database Index: `{table_name}`\n"]
+    # Normalize target for file matching (replace dots with slashes)
+    target_normalized = target.strip()
+    target_slashes = target_normalized.replace(".", "/")
+
+    exact_symbol = None
+    matching_symbols = []
+    exact_file = None
+    matching_files = []
 
     try:
         with db_conn.session() as conn:
-            if not key:
-                # Listing mode
-                if table_name == "files":
-                    rows = conn.execute(
-                        "SELECT filepath, language, status, manual_status, pending_audit FROM files LIMIT ?",
-                        (limit,)
-                    ).fetchall()
-                    md.append("| Filepath | Language | Status | Manual Status | Pending Audit |")
-                    md.append("| :--- | :--- | :--- | :--- | :--- |")
-                    for r in rows:
-                        md.append(f"| `{r[0]}` | `{r[1]}` | `{r[2]}` | `{r[3]}` | `{r[4]}` |")
-
-                elif table_name == "symbols":
-                    rows = conn.execute(
-                        "SELECT symbol, filepath, kind, signature, docstring FROM symbols LIMIT ?",
-                        (limit,)
-                    ).fetchall()
-                    md.append("| Symbol | Filepath | Kind | Signature | Docstring |")
-                    md.append("| :--- | :--- | :--- | :--- | :--- |")
-                    for r in rows:
-                        doc = r[4].strip().split("\n")[0] if r[4] else ""
-                        md.append(f"| `{r[0]}` | `{r[1] or ''}` | `{r[2]}` | `{r[3] or ''}` | {doc} |")
-
-                elif table_name == "occurrences":
-                    rows = conn.execute(
-                        "SELECT symbol, filepath, start_line, end_line, role FROM occurrences LIMIT ?",
-                        (limit,)
-                    ).fetchall()
-                    md.append("| Symbol | Filepath | Line Range | Role |")
-                    md.append("| :--- | :--- | :--- | :--- |")
-                    for r in rows:
-                        md.append(f"| `{r[0]}` | `{r[1]}` | L{r[2]}-{r[3]} | {r[4]} |")
-
-                elif table_name == "edges":
-                    rows = conn.execute(
-                        "SELECT source, target, relation FROM edges LIMIT ?",
-                        (limit,)
-                    ).fetchall()
-                    md.append("| Source (Caller) | Target (Callee) | Relation |")
-                    md.append("| :--- | :--- | :--- |")
-                    for r in rows:
-                        md.append(f"| `{r[0]}` | `{r[1]}` | `{r[2]}` |")
-
-                elif table_name == "compliance_violations":
-                    rows = conn.execute(
-                        "SELECT violation_id, rule_id, symbol, filepath, line, message, origin FROM compliance_violations LIMIT ?",
-                        (limit,)
-                    ).fetchall()
-                    md.append("| Violation ID | Rule ID | Symbol | Filepath:Line | Message | Origin |")
-                    md.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
-                    for r in rows:
-                        md.append(f"| `{r[0]}` | `{r[1]}` | `{r[2] or ''}` | `{r[3]}:{r[4]}` | {r[5]} | `{r[6]}` |")
-
-                md.append(f"\n*Showing up to {limit} rows (no key specified).*")
-
+            # A. Search symbols table
+            sym_row = conn.execute(
+                "SELECT symbol, filepath, kind, signature, docstring, body_hash FROM symbols WHERE symbol = ?",
+                (target_normalized,)
+            ).fetchone()
+            if sym_row:
+                exact_symbol = sym_row
             else:
-                # Key details mode
-                key_wildcard = f"%{key}%"
-                if table_name == "files":
-                    rows = conn.execute(
-                        """
-                        SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification 
-                        FROM files 
-                        WHERE filepath = ? OR filepath LIKE ?
-                        """,
-                        (key, f"%{key.replace('\\', '/')}%")
-                    ).fetchall()
-                    if not rows:
-                        md.append(f"*No matching files found for key '{key}'.*")
-                    for r in rows:
-                        md.append(f"### File: `{r[0]}`")
-                        md.append(f"- **Language**: `{r[2]}`")
-                        md.append(f"- **SHA-256 Hash**: `{r[1]}`")
-                        md.append(f"- **Last Indexed**: `{r[3]}`")
-                        md.append(f"- **Computed Status**: `{r[4]}`")
-                        md.append(f"- **Manual Status**: `{r[5]}`")
-                        md.append(f"- **Pending Audit**: `{r[6]}`")
-                        md.append(f"- **Justification Comment**: *{r[8] or 'None'}*")
-                        md.append(f"- **Manual Fields**: `{r[7]}`")
-                        md.append("")
+                # Substring search
+                sym_rows = conn.execute(
+                    "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE symbol LIKE ? LIMIT 10",
+                    (f"%{target_normalized}%",)
+                ).fetchall()
+                matching_symbols = sym_rows
 
-                elif table_name == "symbols":
-                    rows = conn.execute(
-                        """
-                        SELECT symbol, filepath, kind, signature, docstring, body_hash 
-                        FROM symbols 
-                        WHERE symbol = ? OR symbol LIKE ?
-                        """,
-                        (key, key_wildcard)
-                    ).fetchall()
-                    if not rows:
-                        md.append(f"*No matching symbols found for key '{key}'.*")
-                    for r in rows:
-                        md.append(f"### Symbol: `{r[0]}`")
-                        md.append(f"- **Filepath**: `{r[1] or 'External'}`")
-                        md.append(f"- **Kind**: `{r[2]}`")
-                        md.append(f"- **Signature**: `{r[3] or 'None'}`")
-                        md.append(f"- **Body AST Hash**: `{r[5] or 'None'}`")
-                        doc = r[4].strip() if r[4] else "None"
-                        md.append(f"- **Docstring**:\n  {doc.replace('\n', '\n  ')}")
-                        md.append("")
-
-                elif table_name == "occurrences":
-                    rows = conn.execute(
-                        """
-                        SELECT symbol, filepath, start_line, start_col, end_line, end_col, role 
-                        FROM occurrences 
-                        WHERE symbol = ? OR symbol LIKE ?
-                        """,
-                        (key, key_wildcard)
-                    ).fetchall()
-                    if not rows:
-                        md.append(f"*No matching occurrences found for key '{key}'.*")
+            # B. Search files table
+            file_row = conn.execute(
+                """
+                SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification 
+                FROM files 
+                WHERE filepath = ? OR replace(filepath, '\\', '/') = ?
+                """,
+                (target_normalized, target_normalized.replace("\\", "/"))
+            ).fetchone()
+            
+            if file_row:
+                exact_file = file_row
+            else:
+                file_rows = conn.execute(
+                    """
+                    SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification 
+                    FROM files 
+                    WHERE replace(filepath, '\\', '/') LIKE ? OR replace(filepath, '\\', '/') = ?
+                    """,
+                    (f"%{target_slashes}%", target_slashes)
+                ).fetchall()
+                if file_rows:
+                    if len(file_rows) == 1:
+                        exact_file = file_rows[0]
                     else:
-                        md.append("| Symbol | Filepath | Line Range | Cols | Role |")
-                        md.append("| :--- | :--- | :--- | :--- | :--- |")
-                        for r in rows:
-                            md.append(f"| `{r[0]}` | `{r[1]}` | L{r[2]}-{r[4]} | C{r[3]}-{r[5]} | {r[6]} |")
+                        matching_files = file_rows
 
-                elif table_name == "edges":
-                    rows = conn.execute(
-                        """
-                        SELECT source, target, relation 
-                        FROM edges 
-                        WHERE source = ? OR target = ? OR source LIKE ? OR target LIKE ?
-                        """,
-                        (key, key, key_wildcard, key_wildcard)
-                    ).fetchall()
-                    if not rows:
-                        md.append(f"*No matching edges found for key '{key}'.*")
-                    else:
-                        md.append("| Source (Caller) | Target (Callee) | Relation |")
-                        md.append("| :--- | :--- | :--- |")
-                        for r in rows:
-                            md.append(f"| `{r[0]}` | `{r[1]}` | `{r[2]}` |")
+        # Generate markdown output
+        md = []
+        
+        # 1. Exact Symbol Details
+        if exact_symbol:
+            md.append(f"## Code Symbol: `{exact_symbol[0]}`\n")
+            md.append(f"- **Filepath**: `{exact_symbol[1] or 'External / Third-party'}`")
+            md.append(f"- **Kind**: `{exact_symbol[2]}`")
+            md.append(f"- **Signature**: `{exact_symbol[3] or 'None'}`")
+            doc = exact_symbol[4].strip() if exact_symbol[4] else "No docstring available."
+            md.append(f"- **Docstring**:\n  {doc.replace('\n', '\n  ')}\n")
 
-                elif table_name == "compliance_violations":
-                    rows = conn.execute(
-                        """
-                        SELECT violation_id, rule_id, symbol, filepath, line, message, checked_at, origin 
-                        FROM compliance_violations 
-                        WHERE filepath LIKE ? OR rule_id = ? OR symbol = ?
-                        """,
-                        (f"%{key}%", key, key)
-                    ).fetchall()
-                    if not rows:
-                        md.append(f"*No matching compliance violations found for key '{key}'.*")
-                    else:
-                        md.append("| Violation ID | Rule ID | Symbol | Filepath:Line | Message | Checked At | Origin |")
-                        md.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
-                        for r in rows:
-                            md.append(f"| `{r[0]}` | `{r[1]}` | `{r[2] or ''}` | `{r[3]}:{r[4]}` | {r[5]} | `{r[6]}` | `{r[7]}` |")
-    except Exception as e:
-        return f"Error executing index query: {e}"
-    finally:
+            with db_conn.session() as conn:
+                occs = conn.execute(
+                    "SELECT filepath, start_line, end_line, role FROM occurrences WHERE symbol = ?",
+                    (exact_symbol[0],)
+                ).fetchall()
+                edges = conn.execute(
+                    "SELECT source, target, relation FROM edges WHERE source = ? OR target = ?",
+                    (exact_symbol[0], exact_symbol[0])
+                ).fetchall()
+
+            if occs:
+                md.append("### Symbol Occurrences")
+                md.append("| Filepath | Line Range | Role (Definition=1, Ref=2) |")
+                md.append("| :--- | :--- | :--- |")
+                for o in occs:
+                    md.append(f"| `{o[0]}` | L{o[1]}-{o[2]} | {o[3]} |")
+                md.append("")
+
+            if edges:
+                md.append("### Call Graph Relationships")
+                md.append("| Source (Caller) | Target (Callee) | Relation |")
+                md.append("| :--- | :--- | :--- |")
+                for e in edges:
+                    md.append(f"| `{e[0]}` | `{e[1]}` | `{e[2]}` |")
+                md.append("")
+
+        # 2. Exact File Details
+        if exact_file:
+            md.append(f"## File Module: `{exact_file[0]}`\n")
+            md.append(f"- **Language**: `{exact_file[2]}`")
+            md.append(f"- **Computed Status**: `{exact_file[4]}`")
+            md.append(f"- **Manual status**: `{exact_file[5]}`")
+            md.append(f"- **Pending Audit**: `{exact_file[6]}`")
+            md.append(f"- **Justification**: *{exact_file[8] or 'None'}*")
+            md.append(f"- **Manual Fields**: `{exact_file[7]}`\n")
+
+            with db_conn.session() as conn:
+                file_syms = conn.execute(
+                    "SELECT symbol, kind, signature FROM symbols WHERE filepath = ?",
+                    (exact_file[0],)
+                ).fetchall()
+            
+            if file_syms:
+                md.append("### Symbols Declared in File")
+                md.append("| Symbol | Kind | Signature |")
+                md.append("| :--- | :--- | :--- |")
+                for s in file_syms:
+                    md.append(f"| `{s[0]}` | `{s[1]}` | `{s[2] or ''}` |")
+                md.append("")
+
+        # 3. Substring listing
+        if not exact_symbol and not exact_file:
+            if matching_files:
+                md.append("### Matching File Modules Found")
+                for f in matching_files:
+                    md.append(f"- **{f[0]}** (Language: `{f[2]}`, Status: `{f[4]}`)")
+                md.append("")
+
+            if matching_symbols:
+                md.append("### Matching Code Symbols Found")
+                for s in matching_symbols:
+                    md.append(f"- **{s[0]}** (`{s[2]}` in `{s[1] or 'External'}`)")
+                md.append("")
+
+            if not matching_files and not matching_symbols:
+                md.append(f"*No files or symbols matched target query: '{target}'*")
+
         db_conn.close()
-
-    return "\n".join(md)
+        return "\n".join(md)
+    except Exception as e:
+        db_conn.close()
+        return f"Error executing index search: {e}"
 
 
 @mcp.tool()

@@ -441,7 +441,7 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     repository.files.upsert_file("lib/ui/widget.dart", "sha123", "dart")
 
     # 1. Test set_fields status (COMPLIANT)
-    out_status = mcp_server.set_fields(filepath="lib/ui/widget.dart", field="status", value="COMPLIANT", justification="Approved legacy module")
+    out_status = mcp_server.set_fields(target="lib/ui/widget.dart", update="status:COMPLIANT", justification="Approved legacy module")
     assert "Successfully updated manual fields" in out_status
 
     # Check database
@@ -450,7 +450,7 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert file_info["justification"] == "Approved legacy module"
 
     # 2. Test set_fields status (VIOLATION)
-    out_violation = mcp_server.set_fields(filepath="lib/ui/widget.dart", field="status", value="VIOLATION", justification="Needs refactoring")
+    out_violation = mcp_server.set_fields(target="lib/ui/widget.dart", update="status:VIOLATION", justification="Needs refactoring")
     assert "Successfully updated manual fields" in out_violation
 
     # Check manual violation is inserted
@@ -460,7 +460,7 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert manual_violations[0]["message"] == "Needs refactoring"
 
     # 3. Test set_fields manual field
-    out_fields = mcp_server.set_fields(filepath="lib/ui/widget.dart", field="pattern", value="Controller", justification="Set annotations")
+    out_fields = mcp_server.set_fields(target="lib/ui/widget.dart", update="pattern:Controller", justification="Set annotations")
     assert "Successfully updated manual fields" in out_fields
 
     # Check database
@@ -470,12 +470,12 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert m_fields["pattern"] == "Controller"
 
     # Test ontology validation failure
-    out_auto = mcp_server.set_fields(filepath="lib/ui/widget.dart", field="layer", value="Presentation")
+    out_auto = mcp_server.set_fields(target="lib/ui/widget.dart", update="layer:Presentation")
     assert "Ontology Validation Error" in out_auto
 
     # 4. Test index (details mode)
-    out_details = mcp_server.index(table="files", key="lib/ui/widget.dart")
-    assert "File:" in out_details
+    out_details = mcp_server.index(target="lib/ui/widget.dart")
+    assert "File Module:" in out_details
     assert "Controller" in out_details
     assert "VIOLATION_DETECTED" in out_details
 
