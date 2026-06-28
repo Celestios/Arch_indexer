@@ -53,37 +53,41 @@ The CLI tool `arch` is simplified to contain two main commands: one for humans (
 
 ---
 
-## 2. MCP Tools Reference
+### 2. MCP Tools Reference
 
-The FastMCP server exposes seven tools returning clean, token-efficient Markdown strings optimized for LLM consumption.
+The FastMCP server exposes tools returning clean, token-efficient Markdown strings optimized for LLM consumption.
 
 ### `query`
-*   **Purpose**: Semantic similarity search over code docstrings. Supports searching for multiple queries in a single call to minimize roundtrips.
+*   **Purpose**: Multi-source code search. Runs both keyword searches (on symbol names and file paths) and semantic similarity searches (on symbol docstrings) in parallel, dividing results into distinct sections.
 *   **Parameters**:
     *   `text` (Union[list[str], str], required): A single query string or a list of search terms.
     *   `limit` (integer, optional, default: 5): Max search matches per query.
 *   **Output Format (Markdown)**:
     ```markdown
-    ## Semantic Search Results for: "database connection"
+    ## Search Results for: "database"
 
-    1. **db.connection.DbConnection** (Similarity: 0.89)
+    ### 1. Symbol Name Matches (Keyword Search)
+    1. **db.connection.DbConnection**
        - **File**: `src/db/connection.py`
        - **Kind**: `Class`
        - **Signature**: `class DbConnection`
-       - **Doc**: Manages connection lifecycle to DuckDB database...
 
-    ## Semantic Search Results for: "boundary check"
+    ### 2. Semantic Docstring Matches
+    1. **db.repository.Repository** (Similarity: 0.89)
+       - **File**: `src/db/repository.py`
+       - **Kind**: `Class`
+       - **Doc**: DAO class for indexing operations...
 
-    1. **auditor.analyzer.Auditor.run_audit** (Similarity: 0.82)
-       - **File**: `src/auditor/analyzer.py`
-       - **Kind**: `Method`
-       - **Signature**: `def run_audit(self, filepath_filter: Optional[str] = None)`
+    ### 3. Filepath Matches
+    1. **src/db/schema.sql**
+       - **Language**: `sql`
+       - **Audit Status**: `COMPLIANT`
     ```
 
 ### `context`
-*   **Purpose**: Lightweight file Table of Contents (TOC) with line ranges, letting agents target narrow, line-range reads using their file viewer.
+*   **Purpose**: Lightweight file Table of Contents (TOC) with line ranges, letting agents target narrow, line-range reads using their file viewer. Accepts multiple files.
 *   **Parameters**:
-    *   `filepath` (string, required): Path to the file.
+    *   `filepaths` (Union[list[str], str], required): A single filepath, a comma-separated string, or a list of file paths.
 *   **Output Format (Markdown)**:
     ```markdown
     ## File Index: `src/db/repository.py`
@@ -102,7 +106,7 @@ The FastMCP server exposes seven tools returning clean, token-efficient Markdown
 *   **Purpose**: Blast-radius computation. Traces call chains upstream (callers) and downstream (callees) transitively.
 *   **Parameters**:
     *   `symbol` (string, required): Fully qualified symbol name.
-    *   `max_depth` (integer, optional, default: 3): BFS traversal depth limit.
+    *   `max_depth` (integer, optional, default: 3): Traversal depth limit.
 *   **Output Format (Markdown)**:
     ```markdown
     ## Blast Radius for: `db.repository.Repository.get_symbol`
@@ -116,72 +120,55 @@ The FastMCP server exposes seven tools returning clean, token-efficient Markdown
       * Path: `Repository.get_symbol` ──> `DbConnection.session`
     ```
 
-### `audit`
-*   **Purpose**: Runs the boundary audit. Can be restricted to a specific subtree.
+### `compile_context`
+*   **Purpose**: BFS-traverses the call graph neighborhood of a focal symbol, dynamically extracting raw source code blocks directly from the filesystem using line coordinates, and returns a unified markdown context report.
 *   **Parameters**:
-    *   `filepath` (string, optional): Restricts evaluation to code calling from matching file path prefixes.
+    *   `symbol` (string, required): Focal symbol name.
+    *   `radius` (integer, optional, default: 2): Traversals hops.
+    *   `direction` (string, optional, default: 'downstream'): Traversal direction (`downstream`, `upstream`, or `both`).
+    *   `resolution` (string, optional, default: 'full'): Resolution profile for neighbors (`full` to include complete source bodies, `signature` to suppress bodies and keep headers/docstrings only).
+    *   `out_filepath` (string, optional): Relative path to write the markdown context to.
+
+### `audit`
+*   **Purpose**: Runs the project-wide boundary audit check.
+*   **Parameters**: None
 *   **Output Format (Markdown)**:
     ```markdown
-    ## Compliance Audit: 1 violation(s) found
+    ## Compliance Audit Report: 1 violation(s) found
 
     1. **[presentation_cannot_directly_call_infrastructure]** (File: `lib/ui/widget.dart:L42`)
-       - **Caller Symbol**: `lib.ui.widget.MyWidget.draw`
+       - **Symbol**: `lib.ui.widget.MyWidget.draw`
        - **Violation**: Presentation layer cannot directly call Infrastructure layer
     ```
 
 ### `map`
 *   **Purpose**: Provides a bird's-eye modular map of code structure using Label Propagation (LPA) community detection, listing key hub entry points and inter-module dependencies.
 *   **Parameters**: None
-*   **Output Format (Markdown)**:
-    ```markdown
-    ## Repository Architectural Blueprint Map
-
-    ### Project Totals
-    - **Files Indexed**: 45
-    - **Symbols Registered**: 412
-    - **Dependencies (Call Graph Edges)**: 1,289
-    - **Active Architectural Violations**: 1
-
-    ### Detected Architectural Communities
-    #### Community: `lib/ui/` (85 symbol(s))
-      - **Key Hub Symbols**:
-        * `lib.ui.widget.MyWidget.draw` (Connections: 24)
-        * `lib.ui.theme.DarkTheme` (Connections: 12)
-
-    #### Community: `src/db/` (45 symbol(s))
-      - **Key Hub Symbols**:
-        * `db.repository.Repository` (Connections: 45)
-        * `db.connection.DbConnection` (Connections: 15)
-
-    ### Inter-Community Call Dependencies
-    - `lib/ui/` ──[12 call(s)]──> `src/db/`
-    ```
 
 ### `trace`
 *   **Purpose**: Uses CodeQL to trace a data flow path from a source symbol to a sink symbol.
 *   **Parameters**:
     *   `source` (string, required): Source symbol name.
     *   `sink` (string, required): Sink/destination symbol name.
-*   **Output Format (Markdown)**:
-    ```markdown
-    ## Data Flow Trace: Path Found (2 steps)
-
-    1. `src.web.handler.UserHandler.post` (`src/web/handler.py:L23`)
-    2. `db.repository.Repository.upsert_symbol` (`src/db/repository.py:L71`)
-    ```
 
 ### `report`
 *   **Purpose**: Generates a structured overview or compliance violation report of the workspace.
 *   **Parameters**:
     *   `name` (string, required): Name of the report (`overview` or `compliance`).
     *   `format` (string, optional, default: `markdown`): Format of the output (`markdown` or `json`).
-*   **Output Format (Markdown)**:
-    ```markdown
-    # Workspace Overview Report
 
-    ## Repository Totals
-    - **Files Indexed**: 12
-    - **Symbols Registered**: 154
-    - **Dependencies (Call Graph Edges)**: 450
-    - **Active Architectural Violations**: 0
-    ```
+### `set_fields`
+*   **Purpose**: Updates manual compliance status or metadata fields for files, strictly validating them against the project ontology (`config.json`).
+*   **Parameters**:
+    *   `target` (string, required): A JSON filepath (for batch overrides) or a source file path.
+    *   `update` (string, optional): Combined field-value update parameter in the format `"field:value"`. Example: `"status:VIOLATION"` or `"pattern:Controller"`.
+    *   `justification` (string, optional): Rationale comment explaining the status update (required if status is set to `VIOLATION`).
+
+### `index`
+*   **Purpose**: Generalized database lookup tool. Automatically detects if the search string is a file path (e.g. `auditor.analyzer` or `src/auditor/analyzer.py`) or a code symbol (e.g. `auditor.analyzer.Auditor.run_audit`) and returns details, declarations, occurrences, and relationships.
+*   **Parameters**:
+    *   `target` (string, required): The symbol name or file path search target.
+
+### `clear_pending_audits`
+*   **Purpose**: Clears the change-tracker pending audit flags for all files in the database.
+*   **Parameters**: None
