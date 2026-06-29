@@ -322,8 +322,10 @@ def test_mcp_tools_trace_mocked(tmp_path, monkeypatch):
     codeql_db_dir = root / ".arch" / "codeql_db"
     codeql_db_dir.mkdir(parents=True, exist_ok=True)
 
-    # Mock CodeQlWrapper
     class MockCodeQlWrapper:
+        def __init__(self, *args, **kwargs):
+            pass
+
         def trace_data_flow(self, db_dir, source, sink):
             if source == "source_sym" and sink == "sink_sym":
                 return [

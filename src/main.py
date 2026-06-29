@@ -93,7 +93,14 @@ def cmd_init(args):
     arch_dir = initialize_workspace(project_root)
     print(f"\nWorkspace folder initialized at {arch_dir}")
     
-    bin_dir = Path(__file__).resolve().parent.parent / "bin"
+    if getattr(sys, 'frozen', False):
+        exe_dir = Path(sys.executable).resolve().parent
+        if (exe_dir / "bin").exists():
+            bin_dir = exe_dir / "bin"
+        else:
+            bin_dir = exe_dir.parent / "bin"
+    else:
+        bin_dir = Path(__file__).resolve().parent.parent / "bin"
     target_models_dir = bin_dir / "models"
 
     # 3b. Setup CodeQL if requested

@@ -27,6 +27,14 @@ else:
 ARCH_DIR = PROJECT_ROOT / ".arch"
 DB_PATH = ARCH_DIR / "arch.db"
 
+def get_bin_dir() -> Path:
+    if getattr(sys, 'frozen', False):
+        exe_dir = Path(sys.executable).resolve().parent
+        if (exe_dir / "bin").exists():
+            return exe_dir / "bin"
+        return exe_dir.parent / "bin"
+    return src_dir.parent / "bin"
+
 # Initialize FastMCP Server
 mcp = FastMCP("arch")
 
@@ -52,7 +60,7 @@ def query(text: Union[List[str], str], limit: int = 5) -> str:
     embedder = None
 
     try:
-        bin_dir = src_dir.parent / "bin"
+        bin_dir = get_bin_dir()
         embedder = LocalEmbedder(bin_dir)
     except Exception as e:
         db_conn.close()
@@ -430,7 +438,8 @@ def trace(source: str, sink: str) -> str:
     db_conn = DbConnection(DB_PATH)
     try:
         from engines.codeql_wrapper import CodeQlWrapper
-        codeql = CodeQlWrapper()
+        bin_dir = get_bin_dir()
+        codeql = CodeQlWrapper(bin_dir)
     except Exception as e:
         db_conn.close()
         return f"Error importing CodeQL Wrapper: {e}"

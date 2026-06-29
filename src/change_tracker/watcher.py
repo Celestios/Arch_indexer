@@ -30,8 +30,14 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
         print(f"Error: Database not found at {db_path}. Please run 'arch init' first.", file=sys.stderr)
         return
 
-    # Try to load embedder
-    bin_dir = Path(__file__).resolve().parent.parent.parent / "bin"
+    if getattr(sys, 'frozen', False):
+        exe_dir = Path(sys.executable).resolve().parent
+        if (exe_dir / "bin").exists():
+            bin_dir = exe_dir / "bin"
+        else:
+            bin_dir = exe_dir.parent / "bin"
+    else:
+        bin_dir = Path(__file__).resolve().parent.parent.parent / "bin"
     embedder = None
     try:
         embedder = LocalEmbedder(bin_dir)
