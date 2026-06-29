@@ -1,11 +1,10 @@
-import sys
-import json
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from engines.codeql_wrapper import CodeQlWrapper
 
 
 @dataclass
@@ -20,19 +19,16 @@ class FfiExtractor:
     """
     Uses CodeQL to extract FFI entry points from source code.
     Language-agnostic: runs per-language CodeQL queries and normalizes results.
+    Composes CodeQlWrapper for all CodeQL CLI interaction.
     """
 
     QUERIES_DIR = Path(__file__).parent / "ffi_queries"
 
-    def __init__(self, codeql_exe: Optional[Path] = None):
-        if codeql_exe is None:
-            system_codeql = shutil.which("codeql")
-            self.codeql_exe = Path(system_codeql) if system_codeql else None
-        else:
-            self.codeql_exe = codeql_exe
+    def __init__(self, codeql_wrapper: Optional["CodeQlWrapper"] = None):
+        self.codeql = codeql_wrapper
 
     def extract_all(self, project_root: Path, languages: Optional[List[str]] = None) -> List[FfiSurface]:
-        if not self.codeql_exe or not self.codeql_exe.exists():
+        if not self.codeql or not self.codeql.is_available():
             print("[FFI Extract] CodeQL not available, skipping FFI extraction.")
             return []
 
@@ -72,38 +68,20 @@ class FfiExtractor:
             bqrs_file = temp_path / "ffi_results.bqrs"
             json_file = temp_path / "ffi_results.json"
 
-            cmd = [
-                str(self.codeql_exe),
-                "query",
-                "run",
-                str(ql_path),
-                f"--database={db_dir}",
-                f"--output={bqrs_file}"
-            ]
-
             try:
-                subprocess.run(cmd, capture_output=True, text=True, check=True, shell=(sys.platform == "win32"))
-            except subprocess.CalledProcessError as e:
-                print(f"[FFI Extract] CodeQL query failed for {language}: {e.stderr}")
+                if not self.codeql.run_query(db_dir, ql_path, bqrs_file):
+                    print(f"[FFI Extract] CodeQL query failed for {language}.")
+                    return []
+            except RuntimeError:
+                print(f"[FFI Extract] CodeQL not available for {language} query.")
                 return []
 
-            decode_cmd = [
-                str(self.codeql_exe),
-                "bqrs",
-                "decode",
-                str(bqrs_file),
-                "--format=json",
-                f"--output={json_file}"
-            ]
-
             try:
-                subprocess.run(decode_cmd, capture_output=True, text=True, check=True, shell=(sys.platform == "win32"))
-                if json_file.exists():
-                    with open(json_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    return self._parse_query_results(data.get("tuples", []), language)
-            except Exception as e:
-                print(f"[FFI Extract] Failed to decode BQRS for {language}: {e}")
+                data = self.codeql.decode_bqrs(bqrs_file, json_file)
+                if data and "tuples" in data:
+                    return self._parse_query_results(data["tuples"], language)
+            except RuntimeError:
+                print(f"[FFI Extract] CodeQL not available to decode BQRS for {language}.")
 
         return []
 
