@@ -28,7 +28,7 @@ class CodeQlWrapper:
         if not self.codeql_exe or not self.codeql_exe.exists():
             return False
         try:
-            res = subprocess.run([str(self.codeql_exe), "--version"], capture_output=True, text=True)
+            res = subprocess.run([str(self.codeql_exe), "--version"], capture_output=True, text=True, shell=(sys.platform == "win32"))
             return res.returncode == 0
         except Exception:
             return False
@@ -38,15 +38,23 @@ class CodeQlWrapper:
         source_root: Path,
         db_output_dir: Path,
         language: str,
-        build_command: Optional[str] = None
+        build_command: Optional[str] = None,
+        changed_files: Optional[List[str]] = None
     ) -> bool:
         """
         Creates a CodeQL database of the codebase at source_root.
+        If changed_files is provided and a base database exists, uses overlay mode.
         """
         if not self.is_available():
             raise RuntimeError("CodeQL CLI is not available. Please verify installation.")
 
-        # Ensure output directory doesn't already exist (CodeQL requires it to be empty/new)
+        base_db_dir = db_output_dir.parent / f"{db_output_dir.name}_base"
+        use_overlay = changed_files and base_db_dir.exists()
+
+        if use_overlay:
+            return self._create_overlay_database(source_root, db_output_dir, base_db_dir, language, changed_files)
+
+        # Full database creation
         if db_output_dir.exists():
             shutil.rmtree(db_output_dir)
 
@@ -59,20 +67,70 @@ class CodeQlWrapper:
             f"--source-root={source_root}"
         ]
 
-        # For compiled languages like Rust or C++, we must pass a build command
         if build_command:
             cmd.append(f"--command={build_command}")
         elif language == "rust":
-            cmd.append('--command=cargo build')
+            if (source_root / "Cargo.toml").exists():
+                cmd.append('--command=cargo build')
+            else:
+                cargo_files = [p for p in source_root.glob("**/Cargo.toml") if "target" not in p.parts and ".venv" not in p.parts and ".arch" not in p.parts]
+                if cargo_files:
+                    rel_path = cargo_files[0].relative_to(source_root)
+                    manifest_path = str(rel_path).replace("\\", "/")
+                    cmd.append(f'--command=cargo build --manifest-path {manifest_path}')
+                else:
+                    cmd.append('--command=cargo build')
 
         print(f"[CodeQL] Creating database at {db_output_dir} for {language}...")
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, shell=(sys.platform == "win32"))
+            # Save as base for future overlay runs
+            if base_db_dir.exists():
+                shutil.rmtree(base_db_dir)
+            shutil.copytree(str(db_output_dir), str(base_db_dir))
             print("[CodeQL] Database created successfully.")
             return True
         except subprocess.CalledProcessError as e:
             print(f"Error creating CodeQL database: {e.stderr}", file=sys.stderr)
             return False
+
+    def _create_overlay_database(
+        self,
+        source_root: Path,
+        db_output_dir: Path,
+        base_db_dir: Path,
+        language: str,
+        changed_files: List[str]
+    ) -> bool:
+        """Create an overlay database on top of the base, processing only changed files."""
+        print(f"[CodeQL] Creating overlay database for {len(changed_files)} changed files...")
+
+        # Write changed files list to temp file
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write('\n'.join(changed_files))
+            changes_file = f.name
+
+        try:
+            cmd = [
+                str(self.codeql_exe),
+                "database",
+                "init",
+                str(db_output_dir),
+                f"--overlay-base={base_db_dir}",
+                f"--overlay-changes={changes_file}",
+                f"--source-root={source_root}"
+            ]
+
+            subprocess.run(cmd, capture_output=True, text=True, check=True, shell=(sys.platform == "win32"))
+            print("[CodeQL] Overlay database created successfully.")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"[CodeQL] Overlay failed, falling back to full: {e.stderr}", file=sys.stderr)
+            return self.create_database(source_root, db_output_dir, language)
+        finally:
+            import os
+            os.unlink(changes_file)
 
     def run_query(self, db_dir: Path, ql_file: Path, bqrs_output: Path) -> bool:
         """
@@ -95,7 +153,7 @@ class CodeQlWrapper:
 
         print(f"[CodeQL] Running query {ql_file.name} against database...")
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, shell=(sys.platform == "win32"))
             return bqrs_output.exists()
         except subprocess.CalledProcessError as e:
             print(f"Error running CodeQL query: {e.stderr}", file=sys.stderr)
@@ -121,7 +179,7 @@ class CodeQlWrapper:
         ]
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, shell=(sys.platform == "win32"))
             if json_output.exists():
                 with open(json_output, "r", encoding="utf-8") as f:
                     return json.load(f)

@@ -574,8 +574,13 @@ class ScipWrapper:
                     changed_files.append(fp)
                 else:
                     unchanged_files.append(fp)
+
+            # 2b. Transitive invalidation: expand changed set to include dependents
             if changed_files:
-                print(f"[SCIP Ingest] Incremental: {len(changed_files)} changed, {len(unchanged_files)} unchanged")
+                from change_tracker.invalidation import TransitiveInvalidation
+                invalidator = TransitiveInvalidation(repository, max_depth=2)
+                changed_files = list(invalidator.expand_changed_files(changed_files))
+                print(f"[SCIP Ingest] Incremental: {len(changed_files)} to process (including dependents), {len(unchanged_files)} unchanged")
         else:
             changed_files = file_list
             unchanged_files = []
