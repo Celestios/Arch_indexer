@@ -7,6 +7,19 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 
+def print_progress(current: int, total: int, prefix: str = "", width: int = 30):
+    """Print a progress bar that updates in-place."""
+    if total == 0:
+        return
+    pct = current / total
+    filled = int(width * pct)
+    bar = "=" * filled + "-" * (width - filled)
+    sys.stdout.write(f"\r{prefix} [{bar}] {current}/{total} ({pct*100:.0f}%)")
+    sys.stdout.flush()
+    if current >= total:
+        sys.stdout.write("\n")
+
+
 def run_with_scroll(cmd: list, cwd: str, max_lines: int = 10, shell: bool = False) -> int:
     """
     Runs a subprocess and displays only the last `max_lines` of output.
@@ -561,16 +574,18 @@ class ScipWrapper:
         repository.files.upsert_files_bulk(files_to_ingest)
 
         # 2. Ingest symbols
-        print(f"[SCIP Ingest] Ingesting {len(parsed_data['symbols'])} symbols into database...")
+        total_symbols = len(parsed_data['symbols'])
+        print(f"[SCIP Ingest] Ingesting {total_symbols} symbols into database...")
         symbols_to_ingest = []
-        for sym_id, sym in parsed_data["symbols"].items():
+        for idx, (sym_id, sym) in enumerate(parsed_data["symbols"].items(), 1):
             embedding = None
             if embedder and sym["docstring"]:
                 try:
                     embedding = embedder.embed(sym["docstring"])
                 except Exception as e:
                     print(f"Warning: Failed to generate embedding for {sym_id}: {e}", file=sys.stderr)
-            
+            if idx % 500 == 0 or idx == total_symbols:
+                print_progress(idx, total_symbols, prefix="[SCIP Ingest] Symbols")
             symbols_to_ingest.append({
                 "symbol": sym["symbol"],
                 "filepath": sym["filepath"],
@@ -587,7 +602,8 @@ class ScipWrapper:
         repository.symbols.add_occurrences_bulk(parsed_data["occurrences"])
 
         # 4. Ingest call graph edges (with calculated weights)
-        print(f"[SCIP Ingest] Ingesting {len(parsed_data['edges'])} edges...")
+        total_edges = len(parsed_data['edges'])
+        print(f"[SCIP Ingest] Ingesting {total_edges} edges...")
         
         # Load config to calculate weights
         config = {}
@@ -602,7 +618,7 @@ class ScipWrapper:
                     pass
 
         edges_to_ingest = []
-        for edge in parsed_data["edges"]:
+        for idx, edge in enumerate(parsed_data["edges"], 1):
             # Find filepath for caller and callee to calculate edge weight
             caller_sym = edge["source"]
             callee_sym = edge["target"]
@@ -616,6 +632,8 @@ class ScipWrapper:
                 "relation": edge["relation"],
                 "weight": weight
             })
+            if idx % 1000 == 0 or idx == total_edges:
+                print_progress(idx, total_edges, prefix="[SCIP Ingest] Edges")
             
         repository.edges.add_edges_bulk(edges_to_ingest)
 
