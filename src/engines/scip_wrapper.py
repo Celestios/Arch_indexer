@@ -512,7 +512,10 @@ class ScipWrapper:
         """
         Ingests the parsed symbols, occurrences, and edges into the database.
         Optionally uses an embedder to compute vector representations for symbol docstrings.
+        Uses incremental ingestion: only processes files whose content has changed.
         """
+        from change_tracker.tracker import ChangeTracker
+
         # 1. Register files first
         files_to_register = set(parsed_data.get("files", []))
         for occ in parsed_data["occurrences"]:
@@ -559,35 +562,53 @@ class ScipWrapper:
                 if not exists_on_disk:
                     deleted_files.append(fp)
 
-        # Safety Check / Shrink Guard:
-        # Check node/symbol count of new index versus the database
-        new_symbols_count = len(parsed_data["symbols"])
-        existing_symbols_count = 0
-        langs_tuple = tuple(languages_in_index)
-        if langs_tuple:
-            with repository.db_conn.session() as conn:
-                if len(langs_tuple) == 1:
-                    res = conn.execute(
-                        "SELECT COUNT(*) FROM symbols WHERE filepath IN (SELECT filepath FROM files WHERE language = ?)",
-                        (langs_tuple[0],)
-                    ).fetchone()
+        # 2. Determine which files actually changed (incremental)
+        changed_files = []
+        unchanged_files = []
+        if project_root and not force:
+            for fp in file_list:
+                abs_path = project_root / fp
+                current_hash = ChangeTracker.calculate_sha256(abs_path)
+                db_hash = db_files.get(fp, {}).get("sha256", "")
+                if current_hash != db_hash:
+                    changed_files.append(fp)
                 else:
-                    placeholders = ",".join("?" for _ in langs_tuple)
-                    res = conn.execute(
-                        f"SELECT COUNT(*) FROM symbols WHERE filepath IN (SELECT filepath FROM files WHERE language IN ({placeholders}))",
-                        langs_tuple
-                    ).fetchone()
-                if res:
-                    existing_symbols_count = res[0]
+                    unchanged_files.append(fp)
+            if changed_files:
+                print(f"[SCIP Ingest] Incremental: {len(changed_files)} changed, {len(unchanged_files)} unchanged")
+        else:
+            changed_files = file_list
+            unchanged_files = []
 
-        if not force and len(deleted_files) == 0 and existing_symbols_count > 0 and new_symbols_count < existing_symbols_count:
-            raise ValueError(
-                f"Shrink Guard: New index has {new_symbols_count} symbols, but database has {existing_symbols_count} existing symbols for {languages_in_index}. "
-                "Refusing to overwrite. This might be due to a failed SCIP extraction. Pass force=True to override."
-            )
+        # Safety Check / Shrink Guard (skip for incremental)
+        if force or not unchanged_files:
+            new_symbols_count = len(parsed_data["symbols"])
+            existing_symbols_count = 0
+            langs_tuple = tuple(languages_in_index)
+            if langs_tuple:
+                with repository.db_conn.session() as conn:
+                    if len(langs_tuple) == 1:
+                        res = conn.execute(
+                            "SELECT COUNT(*) FROM symbols WHERE filepath IN (SELECT filepath FROM files WHERE language = ?)",
+                            (langs_tuple[0],)
+                        ).fetchone()
+                    else:
+                        placeholders = ",".join("?" for _ in langs_tuple)
+                        res = conn.execute(
+                            f"SELECT COUNT(*) FROM symbols WHERE filepath IN (SELECT filepath FROM files WHERE language IN ({placeholders}))",
+                            langs_tuple
+                        ).fetchone()
+                    if res:
+                        existing_symbols_count = res[0]
 
-        # Clean old symbols, occurrences, and edges for these files to prevent stale entries
-        repository.files.clean_files_symbols_and_relations(file_list)
+            if not force and len(deleted_files) == 0 and existing_symbols_count > 0 and new_symbols_count < existing_symbols_count:
+                raise ValueError(
+                    f"Shrink Guard: New index has {new_symbols_count} symbols, but database has {existing_symbols_count} existing symbols for {languages_in_index}. "
+                    "Refusing to overwrite. This might be due to a failed SCIP extraction. Pass force=True to override."
+                )
+
+        # Clean old symbols, occurrences, and edges only for CHANGED files
+        repository.files.clean_files_symbols_and_relations(changed_files)
 
         # Clean up deleted files
         for fp in deleted_files:
@@ -609,11 +630,14 @@ class ScipWrapper:
 
         repository.files.upsert_files_bulk(files_to_ingest)
 
-        # 2. Ingest symbols
-        total_symbols = len(parsed_data['symbols'])
-        print(f"[SCIP Ingest] Ingesting {total_symbols} symbols into database...")
+        # 2. Ingest symbols (only changed files)
+        changed_set = set(changed_files)
+        filtered_symbols = {k: v for k, v in parsed_data["symbols"].items()
+                          if not v["filepath"] or v["filepath"] in changed_set}
+        total_symbols = len(filtered_symbols)
+        print(f"[SCIP Ingest] Ingesting {total_symbols} symbols from {len(changed_files)} changed files...")
         symbols_to_ingest = []
-        items = list(parsed_data["symbols"].items())
+        items = list(filtered_symbols.items())
 
         def process_symbol(item):
             idx, (sym_id, sym) = item
@@ -647,15 +671,20 @@ class ScipWrapper:
 
         repository.symbols.upsert_symbols_bulk(symbols_to_ingest)
 
-        # 3. Ingest occurrences
-        total_occ = len(parsed_data['occurrences'])
+        # 3. Ingest occurrences (only changed files)
+        filtered_occurrences = [occ for occ in parsed_data["occurrences"]
+                               if not occ["filepath"] or occ["filepath"] in changed_set]
+        total_occ = len(filtered_occurrences)
         print(f"[SCIP Ingest] Ingesting {total_occ} occurrences...")
         print_progress(total_occ, total_occ, prefix="[SCIP Ingest] Occurrences")
-        repository.symbols.add_occurrences_bulk(parsed_data["occurrences"])
+        repository.symbols.add_occurrences_bulk(filtered_occurrences)
 
-        # 4. Ingest call graph edges (with calculated weights)
-        total_edges = len(parsed_data['edges'])
-        print(f"[SCIP Ingest] Ingesting {total_edges} edges...")
+        # 4. Ingest call graph edges (only changed files)
+        filtered_edges = [e for e in parsed_data["edges"]
+                         if filtered_symbols.get(e["source"], {}).get("filepath") in changed_set
+                         or filtered_symbols.get(e["target"], {}).get("filepath") in changed_set]
+        total_edges = len(filtered_edges)
+        print(f"[SCIP Ingest] Ingesting {total_edges} edges from changed files...")
         
         # Load config to calculate weights
         config = {}
@@ -670,7 +699,7 @@ class ScipWrapper:
                     pass
 
         edges_to_ingest = []
-        for idx, edge in enumerate(parsed_data["edges"], 1):
+        for idx, edge in enumerate(filtered_edges, 1):
             # Find filepath for caller and callee to calculate edge weight
             caller_sym = edge["source"]
             callee_sym = edge["target"]
