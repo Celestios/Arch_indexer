@@ -246,13 +246,7 @@ def cmd_init(args):
                 from engines.ffi_matcher import FfiMatcher
                 from engines.ffi_linker import FfiLinker
 
-                codeql_exe = bin_dir / "codeql" / "codeql.exe"
-                if not codeql_exe.exists():
-                    import shutil
-                    system_codeql = shutil.which("codeql")
-                    codeql_exe = Path(system_codeql) if system_codeql else None
-
-                extractor = FfiExtractor(codeql_exe=codeql_exe)
+                extractor = FfiExtractor()
                 surfaces = extractor.extract_all(project_root, languages=selected_languages)
 
                 if surfaces:

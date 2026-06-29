@@ -19,11 +19,23 @@ from engines.embedder import LocalEmbedder
 from engines.communities import detect_communities
 
 # Resolve the target project root (where the .arch/ database resides)
-if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-    PROJECT_ROOT = Path(sys.argv[1]).resolve()
-else:
-    PROJECT_ROOT = Path(os.environ.get("ARCH_PROJECT_ROOT", os.getcwd())).resolve()
+def _find_project_root() -> Path:
+    # 1. Explicit argument
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        return Path(sys.argv[1]).resolve()
+    # 2. Environment variable
+    env_root = os.environ.get("ARCH_PROJECT_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+    # 3. Search upward from CWD for .arch/ directory
+    current = Path(os.getcwd()).resolve()
+    for parent in [current] + list(current.parents):
+        if (parent / ".arch" / "arch.db").exists():
+            return parent
+    # 4. Fallback to CWD
+    return current
 
+PROJECT_ROOT = _find_project_root()
 ARCH_DIR = PROJECT_ROOT / ".arch"
 DB_PATH = ARCH_DIR / "arch.db"
 
