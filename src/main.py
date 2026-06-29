@@ -26,10 +26,18 @@ def make_progress_callback(filename: str):
 
 
 
+def get_project_root(args) -> Path:
+    import os
+    env_root = os.environ.get("ARCH_PROJECT_ROOT")
+    if env_root and (not hasattr(args, "project_root") or args.project_root == "."):
+        return Path(env_root).resolve()
+    return Path(args.project_root).resolve()
+
+
 def cmd_init(args):
     """Unified setup command: initialize workspace, download models, set up CodeQL, and index symbols."""
     import shutil
-    project_root = Path(args.project_root).resolve()
+    project_root = get_project_root(args)
     print("====================================================")
     print("      Arch: Code Intelligence & Compliance Setup     ")
     print("====================================================")
@@ -176,14 +184,7 @@ def cmd_init(args):
     arch_dir = initialize_workspace(project_root)
     print(f"\nWorkspace folder initialized at {arch_dir}")
 
-    # 3a. Register project in central registry
-    try:
-        from setup.registry import register_project
-        register_project(project_root)
-    except Exception:
-        pass
-
-    # 3b. Setup CodeQL if requested
+    # 3a. Setup CodeQL if requested
     if setup_cql:
         print("\n--- Bootstrapping CodeQL CLI ---")
         try:
@@ -245,42 +246,77 @@ def cmd_init(args):
             else:
                 print(f"  [{lang}] Indexing failed. Verify environment settings.", file=sys.stderr)
 
-        # 5c. FFI Cross-Language Linking
-        if len(selected_languages) > 1:
-            print("\n--- Running FFI Cross-Language Linker ---")
-            try:
-                from engines.ffi_extractor import FfiExtractor
-                from engines.ffi_matcher import FfiMatcher
-                from engines.ffi_linker import FfiLinker
-
-                extractor = FfiExtractor()
-                surfaces = extractor.extract_all(project_root, languages=selected_languages)
-
-                if surfaces:
-                    matcher = FfiMatcher()
-                    by_lang = {}
-                    for s in surfaces:
-                        by_lang.setdefault(s.language, []).append(s)
-
-                    all_matches = []
-                    lang_keys = list(by_lang.keys())
-                    for i in range(len(lang_keys)):
-                        for j in range(i + 1, len(lang_keys)):
-                            matches = matcher.match(by_lang[lang_keys[i]], by_lang[lang_keys[j]])
-                            all_matches.extend(matches)
-
-                    if all_matches:
-                        linker = FfiLinker(repository)
-                        edges_created = linker.link(all_matches)
-                        print(f"  FFI linking complete: {edges_created} cross-language edges created.")
-                    else:
-                        print("  No FFI matches found across languages.")
-                else:
-                    print("  No FFI surfaces detected.")
-            except Exception as e:
-                print(f"  Warning: FFI linking failed: {e}")
-
         db_conn.close()
+
+    # 5b. CodeQL Database Creation (must happen before FFI extraction)
+    if cql_ready and "rust" in selected_languages:
+        build_cql = True
+        if sys.stdin.isatty():
+            try:
+                cql_db_ans = input("\nBuild CodeQL database for Rust? (Requires cargo compiler setup) [Y/n]: ").strip().lower()
+                build_cql = cql_db_ans not in ("n", "no")
+            except (KeyboardInterrupt, EOFError):
+                build_cql = True
+        else:
+            build_cql = False
+
+        if build_cql:
+            print("\n--- Running CodeQL Database Generator ---")
+            try:
+                from engines.codeql_wrapper import CodeQlWrapper
+                codeql = CodeQlWrapper(bin_dir)
+                db_output_dir = arch_dir / "codeql_db"
+                success = codeql.create_database(
+                    source_root=project_root,
+                    db_output_dir=db_output_dir,
+                    language="rust"
+                )
+                if success:
+                    print("CodeQL database built successfully.")
+                else:
+                    print("Warning: CodeQL database build failed. Verify build environments.")
+            except Exception as e:
+                print(f"Error creating CodeQL database: {e}")
+
+    # 5c. FFI Cross-Language Linking (after CodeQL database is built)
+    if len(selected_languages) > 1:
+        print("\n--- Running FFI Cross-Language Linker ---")
+        try:
+            from engines.ffi_extractor import FfiExtractor
+            from engines.ffi_matcher import FfiMatcher
+            from engines.ffi_linker import FfiLinker
+
+            extractor = FfiExtractor()
+            surfaces = extractor.extract_all(project_root, languages=selected_languages)
+
+            if surfaces:
+                matcher = FfiMatcher()
+                by_lang = {}
+                for s in surfaces:
+                    by_lang.setdefault(s.language, []).append(s)
+
+                all_matches = []
+                lang_keys = list(by_lang.keys())
+                for i in range(len(lang_keys)):
+                    for j in range(i + 1, len(lang_keys)):
+                        matches = matcher.match(by_lang[lang_keys[i]], by_lang[lang_keys[j]])
+                        all_matches.extend(matches)
+
+                if all_matches:
+                    db_conn = DbConnection(arch_dir / "arch.db")
+                    repository = Repository(db_conn)
+                    linker = FfiLinker(repository)
+                    edges_created = linker.link(all_matches)
+                    db_conn.close()
+                    print(f"  FFI linking complete: {edges_created} cross-language edges created.")
+                else:
+                    print("  No FFI matches found across languages.")
+            else:
+                print("  No FFI surfaces detected.")
+        except Exception as e:
+            print(f"  Warning: FFI linking failed: {e}")
+
+    if selected_languages:
         if indexed_any:
             print("\nIndexing completed successfully!")
         else:
@@ -329,7 +365,7 @@ def cmd_init(args):
 
 def cmd_audit(args):
     """Run architectural compliance audit."""
-    project_root = Path(args.project_root).resolve()
+    project_root = get_project_root(args)
     arch_dir = project_root / ".arch"
 
     if not arch_dir.exists():
@@ -354,7 +390,7 @@ def cmd_audit(args):
 
 def cmd_report(args):
     """Generates a codebase report."""
-    project_root = Path(args.project_root).resolve()
+    project_root = get_project_root(args)
     arch_dir = project_root / ".arch"
 
     if not arch_dir.exists():
@@ -378,7 +414,7 @@ def cmd_report(args):
 
 def cmd_set_status(args):
     """Sets manual AI compliance status flag for a file."""
-    project_root = Path(args.project_root).resolve()
+    project_root = get_project_root(args)
     arch_dir = project_root / ".arch"
     if not arch_dir.exists():
         print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
@@ -444,7 +480,7 @@ def cmd_set_status(args):
 
 def cmd_set_fields(args):
     """Sets manual fields for a file."""
-    project_root = Path(args.project_root).resolve()
+    project_root = get_project_root(args)
     arch_dir = project_root / ".arch"
     if not arch_dir.exists():
         print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
@@ -504,7 +540,7 @@ def cmd_set_fields(args):
         db_conn.close()
 def cmd_clear_pending(args):
     """Clears all pending audit flags in the database."""
-    project_root = Path(args.project_root).resolve()
+    project_root = get_project_root(args)
     arch_dir = project_root / ".arch"
     if not arch_dir.exists():
         print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
@@ -528,7 +564,7 @@ def cmd_clear_pending(args):
 
 def cmd_watch(args):
     """Watches the project root for file changes and auto-indexes/audits."""
-    project_root = Path(args.project_root).resolve()
+    project_root = get_project_root(args)
     debounce = args.debounce
     try:
         start_watcher(project_root, debounce)
@@ -539,7 +575,7 @@ def cmd_watch(args):
 
 def cmd_analyze(args):
     """Validates the architectural configuration ontology (config.json) completeness and sanity."""
-    project_root = Path(args.project_root).resolve()
+    project_root = get_project_root(args)
     validator = ConfigValidator(project_root)
     res = validator.validate()
 
@@ -566,7 +602,7 @@ def cmd_analyze(args):
 
 def cmd_impact(args):
     """Performs blast radius analysis for a symbol by computing its transitive callers and callees."""
-    project_root = Path(args.project_root).resolve()
+    project_root = get_project_root(args)
     arch_dir = project_root / ".arch"
     db_path = arch_dir / "arch.db"
 
@@ -614,9 +650,10 @@ def cmd_impact(args):
 def cmd_mcp(args):
     """Starts the FastMCP server."""
     import os
-    project_root = Path(args.project_root).resolve()
+    project_root = get_project_root(args)
     os.environ["ARCH_PROJECT_ROOT"] = str(project_root)
-    
+
+
     # We must ensure that the path to src is in sys.path
     src_dir = Path(__file__).resolve().parent
     if str(src_dir) not in sys.path:
@@ -627,6 +664,7 @@ def cmd_mcp(args):
 
 
 def main():
+
     parser = argparse.ArgumentParser(
         prog="arch",
         description="Arch-mcp: Agent-Native Code Intelligence & Compliance Engine"

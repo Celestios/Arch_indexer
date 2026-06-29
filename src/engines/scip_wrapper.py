@@ -645,7 +645,7 @@ class ScipWrapper:
         items = list(filtered_symbols.items())
 
         def process_symbol(item):
-            idx, (sym_id, sym) = item
+            sym_id, sym = item
             embedding = None
             if embedder and sym["docstring"]:
                 try:
@@ -663,7 +663,7 @@ class ScipWrapper:
             }
 
         with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(process_symbol, item): item[0] for item in items}
+            futures = {executor.submit(process_symbol, item): idx for idx, item in enumerate(items)}
             completed = 0
             results = [None] * len(items)
             for future in as_completed(futures):
