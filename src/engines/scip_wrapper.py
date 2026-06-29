@@ -1,8 +1,57 @@
 import sys
+import os
 import shutil
 import subprocess
+from collections import deque
 from pathlib import Path
 from typing import Dict, List, Any, Optional
+
+
+def run_with_scroll(cmd: list, cwd: str, max_lines: int = 10, shell: bool = False) -> int:
+    """
+    Runs a subprocess and displays only the last `max_lines` of output.
+    Older lines are removed from the top as new ones appear.
+    Returns the process return code.
+    """
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        shell=shell,
+        bufsize=1
+    )
+
+    buffer = deque(maxlen=max_lines)
+    lines_printed = 0
+
+    try:
+        for line in iter(process.stdout.readline, ''):
+            if not line:
+                break
+            stripped = line.rstrip('\n\r')
+            if stripped:
+                buffer.append(stripped)
+                # Move cursor up and clear previous lines
+                if lines_printed > 0:
+                    sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
+                    for _ in range(min(lines_printed, max_lines)):
+                        sys.stdout.write('\033[2K\033[1A')
+                        sys.stdout.write('\033[2K')
+                    sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
+                # Print current buffer
+                for bline in buffer:
+                    sys.stdout.write(f'\033[2K{bline}\n')
+                lines_printed = len(buffer)
+                sys.stdout.flush()
+    except (KeyboardInterrupt, SystemExit):
+        process.kill()
+        raise
+    finally:
+        process.stdout.close()
+
+    return process.wait()
 
 try:
     from engines import scip_pb2
@@ -93,7 +142,8 @@ class ScipWrapper:
                     cwd=str(project_dir),
                     check=True,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL,
+                    shell=(sys.platform == "win32")
                 )
             except subprocess.CalledProcessError as e:
                 print(f"Warning: Failed to activate scip_dart: {e}", file=sys.stderr)
@@ -101,11 +151,13 @@ class ScipWrapper:
             # 3. Generate index
             try:
                 # Runs the indexer. It generates index.scip at project_dir root
-                subprocess.run(
+                rc = run_with_scroll(
                     ["dart", "pub", "global", "run", "scip_dart", "."],
                     cwd=str(project_dir),
-                    check=True
+                    shell=(sys.platform == "win32")
                 )
+                if rc != 0:
+                    raise subprocess.CalledProcessError(rc, "scip_dart")
                 index_path = project_dir / "index.scip"
                 if index_path.exists():
                     return index_path
@@ -124,7 +176,9 @@ class ScipWrapper:
                 
             # 2. Run rust-analyzer indexer
             try:
-                subprocess.run(ra_cmd, cwd=str(project_dir), check=True)
+                rc = run_with_scroll(ra_cmd, cwd=str(project_dir), shell=(sys.platform == "win32"))
+                if rc != 0:
+                    raise subprocess.CalledProcessError(rc, "rust-analyzer")
                 index_path = project_dir / "index.scip"
                 if index_path.exists():
                     return index_path
@@ -132,9 +186,11 @@ class ScipWrapper:
                 # If stable toolchain lacks rust-analyzer, try adding the component
                 print("Warning: rust-analyzer CLI was not found. Attempting to add it via rustup...")
                 try:
-                    subprocess.run(["rustup", "component", "add", "rust-analyzer"], check=True)
+                    subprocess.run(["rustup", "component", "add", "rust-analyzer"], check=True, shell=(sys.platform == "win32"))
                     # Try again with direct command
-                    subprocess.run(["rust-analyzer", "scip", "."], cwd=str(project_dir), check=True)
+                    rc = run_with_scroll(["rust-analyzer", "scip", "."], cwd=str(project_dir), shell=(sys.platform == "win32"))
+                    if rc != 0:
+                        raise subprocess.CalledProcessError(rc, "rust-analyzer")
                     index_path = project_dir / "index.scip"
                     if index_path.exists():
                         return index_path
@@ -150,7 +206,9 @@ class ScipWrapper:
                 print("Error: scip-go CLI is not on the system PATH.", file=sys.stderr)
                 return None
             try:
-                subprocess.run(["scip-go"], cwd=str(project_dir), check=True)
+                rc = run_with_scroll(["scip-go"], cwd=str(project_dir), shell=(sys.platform == "win32"))
+                if rc != 0:
+                    raise subprocess.CalledProcessError(rc, "scip-go")
                 index_path = project_dir / "index.scip"
                 if index_path.exists():
                     return index_path
@@ -164,7 +222,9 @@ class ScipWrapper:
                 print("Error: scip-typescript CLI is not on the system PATH.", file=sys.stderr)
                 return None
             try:
-                subprocess.run(["scip-typescript", "index"], cwd=str(project_dir), check=True)
+                rc = run_with_scroll(["scip-typescript", "index"], cwd=str(project_dir), shell=(sys.platform == "win32"))
+                if rc != 0:
+                    raise subprocess.CalledProcessError(rc, "scip-typescript")
                 index_path = project_dir / "index.scip"
                 if index_path.exists():
                     return index_path
@@ -178,7 +238,9 @@ class ScipWrapper:
                 print("Error: scip-java CLI is not on the system PATH.", file=sys.stderr)
                 return None
             try:
-                subprocess.run(["scip-java", "index"], cwd=str(project_dir), check=True)
+                rc = run_with_scroll(["scip-java", "index"], cwd=str(project_dir), shell=(sys.platform == "win32"))
+                if rc != 0:
+                    raise subprocess.CalledProcessError(rc, "scip-java")
                 index_path = project_dir / "index.scip"
                 if index_path.exists():
                     return index_path
@@ -192,7 +254,9 @@ class ScipWrapper:
                 print("Error: scip-python CLI is not on the system PATH.", file=sys.stderr)
                 return None
             try:
-                subprocess.run(["scip-python"], cwd=str(project_dir), check=True)
+                rc = run_with_scroll(["scip-python"], cwd=str(project_dir), shell=(sys.platform == "win32"))
+                if rc != 0:
+                    raise subprocess.CalledProcessError(rc, "scip-python")
                 index_path = project_dir / "index.scip"
                 if index_path.exists():
                     return index_path
