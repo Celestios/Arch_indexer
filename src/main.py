@@ -249,34 +249,49 @@ def cmd_init(args):
         db_conn.close()
 
     # 5b. CodeQL Database Creation (must happen before FFI extraction)
-    if cql_ready and "rust" in selected_languages:
-        build_cql = True
-        if sys.stdin.isatty():
-            try:
-                cql_db_ans = input("\nBuild CodeQL database for Rust? (Requires cargo compiler setup) [Y/n]: ").strip().lower()
-                build_cql = cql_db_ans not in ("n", "no")
-            except (KeyboardInterrupt, EOFError):
-                build_cql = True
-        else:
-            build_cql = False
+    if cql_ready and selected_languages:
+        # Map our language names to CodeQL language names
+        codeql_lang_map = {
+            "rust": "rust",
+            "go": "go",
+            "java": "java",
+            "python": "python",
+            "typescript": "javascript",  # CodeQL uses 'javascript' for both JS and TS
+            # Dart not supported by CodeQL
+        }
+        cql_langs = [codeql_lang_map[l] for l in selected_languages if l in codeql_lang_map]
 
-        if build_cql:
-            print("\n--- Running CodeQL Database Generator ---")
-            try:
-                from engines.codeql_wrapper import CodeQlWrapper
-                codeql = CodeQlWrapper(bin_dir)
-                db_output_dir = arch_dir / "codeql_db"
-                success = codeql.create_database(
-                    source_root=project_root,
-                    db_output_dir=db_output_dir,
-                    language="rust"
-                )
-                if success:
-                    print("CodeQL database built successfully.")
-                else:
-                    print("Warning: CodeQL database build failed. Verify build environments.")
-            except Exception as e:
-                print(f"Error creating CodeQL database: {e}")
+        if cql_langs:
+            build_cql = True
+            if sys.stdin.isatty():
+                try:
+                    lang_str = ", ".join(cql_langs)
+                    cql_db_ans = input(f"\nBuild CodeQL database for {lang_str}? [Y/n]: ").strip().lower()
+                    build_cql = cql_db_ans not in ("n", "no")
+                except (KeyboardInterrupt, EOFError):
+                    build_cql = True
+            else:
+                build_cql = False
+
+            if build_cql:
+                print("\n--- Running CodeQL Database Generator ---")
+                try:
+                    from engines.codeql_wrapper import CodeQlWrapper
+                    codeql = CodeQlWrapper(bin_dir)
+                    for lang in cql_langs:
+                        db_output_dir = arch_dir / f"codeql_db_{lang}"
+                        print(f"\n[CodeQL] Building database for {lang}...")
+                        success = codeql.create_database(
+                            source_root=project_root,
+                            db_output_dir=db_output_dir,
+                            language=lang
+                        )
+                        if success:
+                            print(f"  [{lang}] CodeQL database built successfully.")
+                        else:
+                            print(f"  [{lang}] Warning: CodeQL database build failed.")
+                except Exception as e:
+                    print(f"Error creating CodeQL database: {e}")
 
     # 5c. FFI Cross-Language Linking (after CodeQL database is built)
     if len(selected_languages) > 1:
