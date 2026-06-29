@@ -119,6 +119,31 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
                             print("[arch watch] Audit complete. No violations found.")
                     else:
                         print("[arch watch] Re-indexing failed.")
+
+                    # Re-run FFI linking if multiple languages present
+                    try:
+                        from engines.ffi_extractor import FfiExtractor
+                        from engines.ffi_matcher import FfiMatcher
+                        from engines.ffi_linker import FfiLinker
+
+                        extractor = FfiExtractor()
+                        surfaces = extractor.extract_all(project_root)
+                        if surfaces:
+                            matcher = FfiMatcher()
+                            by_lang = {}
+                            for s in surfaces:
+                                by_lang.setdefault(s.language, []).append(s)
+                            lang_keys = list(by_lang.keys())
+                            all_matches = []
+                            for i in range(len(lang_keys)):
+                                for j in range(i + 1, len(lang_keys)):
+                                    all_matches.extend(matcher.match(by_lang[lang_keys[i]], by_lang[lang_keys[j]]))
+                            if all_matches:
+                                linker = FfiLinker(repository)
+                                linker.link(all_matches)
+                                print("[Watcher] FFI cross-language edges updated.")
+                    except Exception as e:
+                        print(f"[Watcher] FFI re-linking skipped: {e}")
                 except Exception as ex:
                     print(f"[arch watch] Error during automatic update: {ex}", file=sys.stderr)
                 finally:
