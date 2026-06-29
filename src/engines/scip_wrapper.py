@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -172,8 +173,13 @@ class ScipWrapper:
                 if rc != 0:
                     raise subprocess.CalledProcessError(rc, "scip_dart")
                 index_path = project_dir / "index.scip"
+                arch_index = project_dir / ".arch" / "index.scip"
                 if index_path.exists():
-                    return index_path
+                    arch_index.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(index_path), str(arch_index))
+                    return arch_index
+                elif arch_index.exists():
+                    return arch_index
             except subprocess.CalledProcessError as e:
                 print(f"Error executing scip_dart indexer: {e}", file=sys.stderr)
                 return None
@@ -193,8 +199,13 @@ class ScipWrapper:
                 if rc != 0:
                     raise subprocess.CalledProcessError(rc, "rust-analyzer")
                 index_path = project_dir / "index.scip"
+                arch_index = project_dir / ".arch" / "index.scip"
                 if index_path.exists():
-                    return index_path
+                    arch_index.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(index_path), str(arch_index))
+                    return arch_index
+                elif arch_index.exists():
+                    return arch_index
             except subprocess.CalledProcessError:
                 # If stable toolchain lacks rust-analyzer, try adding the component
                 print("Warning: rust-analyzer CLI was not found. Attempting to add it via rustup...")
@@ -205,8 +216,13 @@ class ScipWrapper:
                     if rc != 0:
                         raise subprocess.CalledProcessError(rc, "rust-analyzer")
                     index_path = project_dir / "index.scip"
+                    arch_index = project_dir / ".arch" / "index.scip"
                     if index_path.exists():
-                        return index_path
+                        arch_index.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(index_path), str(arch_index))
+                        return arch_index
+                    elif arch_index.exists():
+                        return arch_index
                 except Exception as err:
                     print(f"Error: Failed to execute rust-analyzer scip: {err}", file=sys.stderr)
                     print("Notice: If you are using the rust-analyzer extension inside VS Code, the CLI component must still be installed globally.", file=sys.stderr)
@@ -223,8 +239,13 @@ class ScipWrapper:
                 if rc != 0:
                     raise subprocess.CalledProcessError(rc, "scip-go")
                 index_path = project_dir / "index.scip"
+                arch_index = project_dir / ".arch" / "index.scip"
                 if index_path.exists():
-                    return index_path
+                    arch_index.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(index_path), str(arch_index))
+                    return arch_index
+                elif arch_index.exists():
+                    return arch_index
             except subprocess.CalledProcessError as e:
                 print(f"Error executing scip-go: {e}", file=sys.stderr)
                 return None
@@ -239,8 +260,13 @@ class ScipWrapper:
                 if rc != 0:
                     raise subprocess.CalledProcessError(rc, "scip-typescript")
                 index_path = project_dir / "index.scip"
+                arch_index = project_dir / ".arch" / "index.scip"
                 if index_path.exists():
-                    return index_path
+                    arch_index.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(index_path), str(arch_index))
+                    return arch_index
+                elif arch_index.exists():
+                    return arch_index
             except subprocess.CalledProcessError as e:
                 print(f"Error executing scip-typescript: {e}", file=sys.stderr)
                 return None
@@ -255,8 +281,13 @@ class ScipWrapper:
                 if rc != 0:
                     raise subprocess.CalledProcessError(rc, "scip-java")
                 index_path = project_dir / "index.scip"
+                arch_index = project_dir / ".arch" / "index.scip"
                 if index_path.exists():
-                    return index_path
+                    arch_index.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(index_path), str(arch_index))
+                    return arch_index
+                elif arch_index.exists():
+                    return arch_index
             except subprocess.CalledProcessError as e:
                 print(f"Error executing scip-java: {e}", file=sys.stderr)
                 return None
@@ -271,8 +302,13 @@ class ScipWrapper:
                 if rc != 0:
                     raise subprocess.CalledProcessError(rc, "scip-python")
                 index_path = project_dir / "index.scip"
+                arch_index = project_dir / ".arch" / "index.scip"
                 if index_path.exists():
-                    return index_path
+                    arch_index.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(index_path), str(arch_index))
+                    return arch_index
+                elif arch_index.exists():
+                    return arch_index
             except subprocess.CalledProcessError as e:
                 print(f"Error executing scip-python: {e}", file=sys.stderr)
                 return None
@@ -577,16 +613,17 @@ class ScipWrapper:
         total_symbols = len(parsed_data['symbols'])
         print(f"[SCIP Ingest] Ingesting {total_symbols} symbols into database...")
         symbols_to_ingest = []
-        for idx, (sym_id, sym) in enumerate(parsed_data["symbols"].items(), 1):
+        items = list(parsed_data["symbols"].items())
+
+        def process_symbol(item):
+            idx, (sym_id, sym) = item
             embedding = None
             if embedder and sym["docstring"]:
                 try:
                     embedding = embedder.embed(sym["docstring"])
                 except Exception as e:
                     print(f"Warning: Failed to generate embedding for {sym_id}: {e}", file=sys.stderr)
-            if idx % 500 == 0 or idx == total_symbols:
-                print_progress(idx, total_symbols, prefix="[SCIP Ingest] Symbols")
-            symbols_to_ingest.append({
+            return {
                 "symbol": sym["symbol"],
                 "filepath": sym["filepath"],
                 "kind": sym["kind"],
@@ -594,11 +631,26 @@ class ScipWrapper:
                 "docstring": sym["docstring"],
                 "body_hash": sym["body_hash"],
                 "embedding": embedding
-            })
+            }
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(process_symbol, item): item[0] for item in items}
+            completed = 0
+            results = [None] * len(items)
+            for future in as_completed(futures):
+                original_idx = futures[future]
+                results[original_idx] = future.result()
+                completed += 1
+                if completed % 100 == 0 or completed == total_symbols:
+                    print_progress(completed, total_symbols, prefix="[SCIP Ingest] Symbols")
+            symbols_to_ingest = [r for r in results if r is not None]
+
         repository.symbols.upsert_symbols_bulk(symbols_to_ingest)
 
         # 3. Ingest occurrences
-        print(f"[SCIP Ingest] Ingesting {len(parsed_data['occurrences'])} occurrences...")
+        total_occ = len(parsed_data['occurrences'])
+        print(f"[SCIP Ingest] Ingesting {total_occ} occurrences...")
+        print_progress(total_occ, total_occ, prefix="[SCIP Ingest] Occurrences")
         repository.symbols.add_occurrences_bulk(parsed_data["occurrences"])
 
         # 4. Ingest call graph edges (with calculated weights)
@@ -632,7 +684,7 @@ class ScipWrapper:
                 "relation": edge["relation"],
                 "weight": weight
             })
-            if idx % 1000 == 0 or idx == total_edges:
+            if idx % 100 == 0 or idx == total_edges:
                 print_progress(idx, total_edges, prefix="[SCIP Ingest] Edges")
             
         repository.edges.add_edges_bulk(edges_to_ingest)
