@@ -135,26 +135,27 @@ class FilesRepository(BaseRepository):
             )
 
     def get_all_files_metadata(self) -> Dict[str, Dict[str, Any]]:
-        """Retrieves all files' status, manual status, pending_audit, manual fields and justification."""
+        """Retrieves all files' status, manual status, pending_audit, manual fields, justification, and sha256."""
         import json
         with self.db_conn.session() as conn:
             rows = conn.execute(
-                "SELECT filepath, status, manual_status, pending_audit, manual_fields, justification, language FROM files"
+                "SELECT filepath, sha256, status, manual_status, pending_audit, manual_fields, justification, language FROM files"
             ).fetchall()
             metadata = {}
             for r in rows:
                 try:
-                    manual_fields = json.loads(r[4]) if r[4] else {}
+                    manual_fields = json.loads(r[5]) if r[5] else {}
                 except Exception:
                     manual_fields = {}
                 metadata[r[0]] = {
                     "filepath": r[0],
-                    "status": r[1],
-                    "manual_status": r[2],
-                    "pending_audit": bool(r[3]),
+                    "sha256": r[1],
+                    "status": r[2],
+                    "manual_status": r[3],
+                    "pending_audit": bool(r[4]),
                     "manual_fields": manual_fields,
-                    "justification": r[5],
-                    "language": r[6]
+                    "justification": r[6],
+                    "language": r[7]
                 }
             return metadata
 
