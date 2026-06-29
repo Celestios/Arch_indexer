@@ -18,32 +18,14 @@ from auditor.validator import ConfigValidator
 from engines.embedder import LocalEmbedder
 from engines.communities import detect_communities
 
-# Resolve the target project root (where the .arch/ database resides)
-def _find_project_root() -> Path:
-    # 1. Explicit argument
-    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-        return Path(sys.argv[1]).resolve()
-    # 2. Environment variable
-    env_root = os.environ.get("ARCH_PROJECT_ROOT")
-    if env_root:
-        return Path(env_root).resolve()
-    # 3. Search registered projects
-    try:
-        from setup.registry import find_project_root
-        registered = find_project_root()
-        if registered:
-            return registered
-    except Exception:
-        pass
-    # 4. Search upward from CWD for .arch/ directory
-    current = Path(os.getcwd()).resolve()
-    for parent in [current] + list(current.parents):
-        if (parent / ".arch" / "arch.db").exists():
-            return parent
-    # 5. Fallback to CWD
-    return current
+# Resolve project root: explicit arg > env var > CWD
+if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+    PROJECT_ROOT = Path(sys.argv[1]).resolve()
+elif os.environ.get("ARCH_PROJECT_ROOT"):
+    PROJECT_ROOT = Path(os.environ["ARCH_PROJECT_ROOT"]).resolve()
+else:
+    PROJECT_ROOT = Path.cwd().resolve()
 
-PROJECT_ROOT = _find_project_root()
 ARCH_DIR = PROJECT_ROOT / ".arch"
 DB_PATH = ARCH_DIR / "arch.db"
 
