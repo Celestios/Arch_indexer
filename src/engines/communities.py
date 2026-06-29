@@ -8,21 +8,21 @@ def detect_communities(repository: Repository):
     # Fetch symbols and edges
     with repository.db_conn.session() as conn:
         symbols_res = conn.execute("SELECT symbol, filepath FROM symbols").fetchall()
-        edges_res = conn.execute("SELECT source, target FROM edges").fetchall()
+        edges_res = conn.execute("SELECT source, target, weight FROM edges").fetchall()
 
     symbols = {r[0]: r[1] for r in symbols_res}
-    edges = [(r[0], r[1]) for r in edges_res]
+    edges = [(r[0], r[1], r[2]) for r in edges_res]
 
-    # Build adjacency list (undirected for community propagation)
-    adj = {sym: set() for sym in symbols}
-    for src, tgt in edges:
+    # Build adjacency list with weights (undirected for community propagation)
+    adj = {sym: {} for sym in symbols}
+    for src, tgt, weight in edges:
         if src in adj and tgt in adj:
-            adj[src].add(tgt)
-            adj[tgt].add(src)
+            adj[src][tgt] = max(adj[src].get(tgt, 0.0), weight)
+            adj[tgt][src] = max(adj[tgt].get(src, 0.0), weight)
 
     # Calculate degree for each symbol (sum of incoming and outgoing edges)
     degrees = {sym: 0 for sym in symbols}
-    for src, tgt in edges:
+    for src, tgt, _ in edges:
         if src in degrees:
             degrees[src] += 1
         if tgt in degrees:
@@ -51,11 +51,11 @@ def detect_communities(repository: Repository):
             neighbors = adj[u]
             if not neighbors:
                 continue
-            # Count neighbor label frequencies
+            # Count neighbor label frequencies weighted by edge weights
             freq = {}
-            for v in neighbors:
+            for v, weight in neighbors.items():
                 lbl = labels[v]
-                freq[lbl] = freq.get(lbl, 0) + 1
+                freq[lbl] = freq.get(lbl, 0.0) + weight
             # Find maximum frequency label
             max_freq = max(freq.values())
             candidates = [lbl for lbl, count in freq.items() if count == max_freq]
@@ -71,10 +71,9 @@ def detect_communities(repository: Repository):
     for sym, lbl in labels.items():
         communities.setdefault(lbl, []).append(sym)
 
-    # Calculate inter-community connections
-    # connections[comm_a][comm_b] = weight
+    # Calculate inter-community connections (number of physical calls/edges)
     connections = {}
-    for src, tgt in edges:
+    for src, tgt, _ in edges:
         lbl_src = labels.get(src)
         lbl_tgt = labels.get(tgt)
         if lbl_src and lbl_tgt and lbl_src != lbl_tgt:

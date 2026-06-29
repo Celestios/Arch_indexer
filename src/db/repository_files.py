@@ -68,6 +68,8 @@ class FilesRepository(BaseRepository):
 
     def upsert_files_bulk(self, files_list: List[Dict[str, Any]]):
         """Bulk upserts a list of files in a single transaction. Sets pending_audit on change."""
+        if not files_list:
+            return
         data = [
             (
                 f["filepath"],
@@ -137,7 +139,7 @@ class FilesRepository(BaseRepository):
         import json
         with self.db_conn.session() as conn:
             rows = conn.execute(
-                "SELECT filepath, status, manual_status, pending_audit, manual_fields, justification FROM files"
+                "SELECT filepath, status, manual_status, pending_audit, manual_fields, justification, language FROM files"
             ).fetchall()
             metadata = {}
             for r in rows:
@@ -151,7 +153,8 @@ class FilesRepository(BaseRepository):
                     "manual_status": r[2],
                     "pending_audit": bool(r[3]),
                     "manual_fields": manual_fields,
-                    "justification": r[5]
+                    "justification": r[5],
+                    "language": r[6]
                 }
             return metadata
 

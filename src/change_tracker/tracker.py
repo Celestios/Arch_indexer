@@ -1,6 +1,6 @@
 import hashlib
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any
 
 class ChangeTracker:
     """

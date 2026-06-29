@@ -6,7 +6,7 @@ This guide documents the command-line interface (CLI) and Model Context Protocol
 
 ## 1. CLI Reference
 
-The CLI tool `arch` is simplified to contain two main commands: one for humans (setup/indexing/integration) and one for automated workflows (compliance checks).
+The CLI tool `arch` provides commands for workspace setup, indexing, auditing boundary rules, running reports, and performing manual metadata/compliance configurations.
 
 ### Commands
 
@@ -44,16 +44,80 @@ The CLI tool `arch` is simplified to contain two main commands: one for humans (
 *   **Purpose**: Generates high-level summaries or compliance reports of the workspace code graph.
 *   **Syntax**:
     ```bash
-    arch report [name] [--format json|markdown] [project_root]
+    arch report <name> [--format markdown|json] [project_root]
     ```
 *   **Arguments**:
-    *   `name` (required): The name of the report to run (`overview` or `compliance`).
-    *   `--format` (optional, default: `markdown`): Output format format (`markdown` or `json`).
+    *   `name` (required, choices: `overview`, `compliance`): The name of the report to run.
+    *   `--format` (optional, default: `markdown`): Output format (`markdown` or `json`).
+    *   `project_root` (optional, default: `.`): Path to the target project directory.
+
+#### `arch set-status`
+*   **Purpose**: Manually overrides or sets the logical compliance status flag of a file.
+*   **Syntax**:
+    ```bash
+    arch set-status <filepath> <status> [justification] [project_root]
+    ```
+*   **Arguments**:
+    *   `filepath` (required): Filepath to the target file.
+    *   `status` (required, choices: `COMPLIANT`, `VIOLATION_DETECTED`): Manual logical compliance status.
+    *   `justification` (optional): Explanation/reasoning comment (required if status is `VIOLATION_DETECTED`).
+    *   `project_root` (optional, default: `.`): Path to the target project directory.
+
+#### `arch set-fields`
+*   **Purpose**: Sets manual metadata fields for a file.
+*   **Syntax**:
+    ```bash
+    arch set-fields <filepath> <fields_json> [justification] [project_root]
+    ```
+*   **Arguments**:
+    *   `filepath` (required): Filepath to the target file.
+    *   `fields_json` (required): JSON-formatted string of field-value pairs to update.
+    *   `justification` (optional): Optional justification comment for the update.
+    *   `project_root` (optional, default: `.`): Path to the target project directory.
+
+#### `arch clear-pending`
+*   **Purpose**: Clears the pending audit flag on all files in the database.
+*   **Syntax**:
+    ```bash
+    arch clear-pending <justification> [project_root]
+    ```
+*   **Arguments**:
+    *   `justification` (required): Justification comment explaining why the pending audits are being cleared.
+    *   `project_root` (optional, default: `.`): Path to the target project directory.
+
+#### `arch watch`
+*   **Purpose**: Watches the project root for file changes, triggering automatic re-indexing and compliance auditing when edits are detected.
+*   **Syntax**:
+    ```bash
+    arch watch [--debounce <seconds>] [project_root]
+    ```
+*   **Arguments**:
+    *   `--debounce` (optional, default: `3.0`): Debounce delay in seconds before performing index/audit.
+    *   `project_root` (optional, default: `.`): Path to the target project directory.
+
+#### `arch analyze`
+*   **Purpose**: Validates the architectural configuration ontology (`config.json`) completeness and sanity. Checks syntax, structure, allowed values reachability, and dependency rules referential integrity.
+*   **Syntax**:
+    ```bash
+    arch analyze [project_root]
+    ```
+*   **Arguments**:
+    *   `project_root` (optional, default: `.`): Path to the target project directory.
+
+#### `arch impact`
+*   **Purpose**: Performs blast radius / transitive dependency analysis for a symbol by computing its transitive callers and callees.
+*   **Syntax**:
+    ```bash
+    arch impact <symbol> [--max-depth <depth>] [project_root]
+    ```
+*   **Arguments**:
+    *   `symbol` (required): Fully qualified target symbol name.
+    *   `--max-depth` (optional, default: `3`): Maximum depth of call chain traversal.
     *   `project_root` (optional, default: `.`): Path to the target project directory.
 
 ---
 
-### 2. MCP Tools Reference
+## 2. MCP Tools Reference
 
 The FastMCP server exposes tools returning clean, token-efficient Markdown strings optimized for LLM consumption.
 
@@ -171,4 +235,8 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
 
 ### `clear_pending_audits`
 *   **Purpose**: Clears the change-tracker pending audit flags for all files in the database.
+*   **Parameters**: None
+
+### `analyze`
+*   **Purpose**: Validates the architectural configuration ontology (`config.json`) completeness and sanity. Checks syntax, structure, allowed values reachability, and dependency rules referential integrity.
 *   **Parameters**: None

@@ -2,7 +2,7 @@ import os
 import sys
 import json
 from pathlib import Path
-from typing import Optional, Union, List, Any
+from typing import Optional, Union, List
 
 # Setup sys.path to resolve imports from src/
 src_dir = Path(__file__).resolve().parent.parent
@@ -14,6 +14,7 @@ from db.connection import DbConnection
 from db.repository import Repository
 from auditor.analyzer import Auditor
 from auditor.compiler import ContextCompiler
+from auditor.validator import ConfigValidator
 from engines.embedder import LocalEmbedder
 from engines.communities import detect_communities
 
@@ -35,6 +36,10 @@ def query(text: Union[List[str], str], limit: int = 5) -> str:
     """
     Runs keyword and semantic searches over symbols, docstrings, and files in the codebase.
     Accepts a single query string or a list of query strings, returning matches for each.
+    
+    Best Practice: Use multiple, focused search terms (e.g. as a list of strings) instead
+    of a single string combined with logical operators like "and" or "or". Use this tool to
+    discover target symbols or files before reading them.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -132,6 +137,12 @@ def context(filepaths: Union[List[str], str]) -> str:
     and functions declared in the specified file(s), along with their precise line ranges.
     Use this to locate specific definitions before reading the code.
     
+    Guidelines:
+      - Always call this tool before reading the contents of a file to locate definitions
+        and identify line ranges to check, especially for large files.
+      - Pass multiple file paths to this tool when scanning or locating paths that implement
+        a specific interface or package feature.
+        
     Accepts:
       - A single filepath string
       - A comma-separated filepath string (e.g. 'file1.dart, file2.dart')
@@ -251,6 +262,11 @@ def impact(symbol: str, max_depth: int = 3) -> str:
     Performs blast radius analysis for a symbol by computing the transitive closure
     of its upstream callers and downstream callees up to max_depth.
     Use this to see what will break if you modify this symbol's signature.
+    
+    Guidelines:
+      - Use when editing critical/central code, or before modifying interfaces/signatures
+        that control many downstream targets, to understand what components the change
+        might impact and prevent regressions.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -298,7 +314,11 @@ def impact(symbol: str, max_depth: int = 3) -> str:
 @mcp.tool()
 def audit() -> str:
     """
-    Runs the project-wide architectural boundary rules compliance audit.
+    Runs the project-wide architectural boundary rules compliance audit based on Layer/Tier rules in config.json.
+    
+    Guidelines:
+      - This tool operates on the architectural rules database. Run this tool only when explicitly
+        prompted/instructed by the user or other skills.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -338,6 +358,10 @@ def map() -> str:
     Provides a high-level architectural map of the repository, including total counts,
     automatically detected symbol communities (using Label Propagation), inter-module call weights,
     and the most connected hub symbols in each community.
+    
+    Guidelines:
+      - Use map at the start of a task when no information for the project is available.
+        It gives a bird's-eye view of the project and module dependencies.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -395,6 +419,10 @@ def trace(source: str, sink: str) -> str:
     """
     Traces the data flow path from a source symbol to a sink symbol using CodeQL analysis.
     Returns a Markdown representation of the flow path.
+    
+    Guidelines:
+      - This tool is especially useful when fixing bugs. Use it to trace data flows and understand
+        exactly where to place debugging print/log statements or checks.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -437,6 +465,10 @@ def report(name: str, format: str = "markdown") -> str:
     Parameters:
       name: The name of the report ('overview' or 'compliance').
       format: The output format ('markdown' or 'json', default: 'markdown').
+      
+    Guidelines:
+      - Similar to compile_context, but provides less direct control and a broader view of
+        the workspace across different aspects.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -469,6 +501,12 @@ def set_fields(
       update: Optional. Combined field and value string in the format "field:value".
               Example: "status:VIOLATION" or "pattern:Controller".
       justification: Optional. Explanatory comment for the status update (required if status is VIOLATION).
+      
+    Guidelines:
+      - This tool operates on config.json compliance flags and statuses. Run this tool only
+        when instructed by the user's prompt or other skills on how and where to use it.
+      - Negative Constraint: Do NOT modify the ontology config.json file directly without
+        first consulting the user.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -643,6 +681,10 @@ def clear_pending_audits() -> str:
     """
     Clears the pending audit flags for all files in the database.
     Use this after large refactors or git checkout operations when you know the changes are compliant.
+    
+    Guidelines:
+      - This tool operates on the database's compliance state. Run this tool only when instructed
+        by the user's prompt or other skills on how and where to use it.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -668,6 +710,10 @@ def index(target: str) -> str:
     Looks up details, metadata, and relationships for a file module or code symbol.
     The tool automatically detects whether the target is a file path (e.g. 'auditor.analyzer' 
     or 'src/auditor/analyzer.py') or a code symbol (e.g. 'auditor.analyzer.Auditor.run_audit').
+    
+    Guidelines:
+      - Use to retrieve symbol definitions, occurrences, and relationships for any target symbol
+        or file module before reading or modifying it.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -832,6 +878,12 @@ def compile_context(
       direction: Traversal direction: 'downstream' (callees), 'upstream' (callers), or 'both' (default: 'downstream').
       resolution: Neighbors detail level: 'full' (include complete code bodies) or 'signature' (signatures & docstrings only) (default: 'full').
       out_filepath: Optional path (relative to project root) to write the compiled context markdown to.
+      
+    Guidelines:
+      - Use in different kinds of scenarios, such as when you want to explain code logic,
+        generate a recap, or compile comprehensive context for code modifications.
+      - Negative Constraint: Do NOT run this tool with a radius > 2 or resolution='full' unless
+        necessary, as it rapidly consumes the token context window budget.
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
@@ -862,6 +914,83 @@ def compile_context(
         db_conn.close()
 
 
-if __name__ == "__main__":
+@mcp.tool()
+def analyze() -> str:
+    """
+    Validates the architectural configuration ontology (config.json) completeness and sanity.
+    Checks syntax, structure, allowed values reachability, dependency rules referential integrity,
+    and propagation barriers validation. Returns a Markdown report summarizing issues.
+    
+    Guidelines:
+      - Use this tool ONLY after modifying the ontology configuration file (config.json) to
+        validate its completeness and sanity.
+    """
+    validator = ConfigValidator(PROJECT_ROOT)
+    res = validator.validate()
+
+    md = ["# Configuration Ontology Validation Report\n"]
+
+    if res["success"]:
+        md.append("✅ **Ontology validation passed successfully.**\n")
+    else:
+        md.append("❌ **Ontology validation failed with errors.**\n")
+
+    if res["warnings"]:
+        md.append("### Warnings")
+        for warning in res["warnings"]:
+            md.append(f"- ⚠️ {warning}")
+        md.append("")
+
+    if res["errors"]:
+        md.append("### Errors")
+        for error in res["errors"]:
+            md.append(f"- 🛑 {error}")
+        md.append("")
+    else:
+        md.append("✅ Referential integrity validation passed.\n")
+
+    return "\n".join(md)
+
+
+def _filter_blank_stdin() -> None:
+    """Filter blank lines from stdin before MCP reads it.
+
+    Some MCP clients (Claude Desktop, etc.) send blank lines between JSON
+    messages. The MCP stdio transport tries to parse every line as a
+    JSONRPCMessage, so a bare newline triggers a Pydantic ValidationError.
+    This installs an OS-level pipe that relays stdin while dropping blanks.
+    """
+    import os
+    import threading
+
+    try:
+        r_fd, w_fd = os.pipe()
+        saved_fd = os.dup(sys.stdin.fileno())
+
+        def _relay() -> None:
+            try:
+                with open(saved_fd, "rb") as src, open(w_fd, "wb") as dst:
+                    for line in src:
+                        if line.strip():
+                            dst.write(line)
+                            dst.flush()
+            except Exception:
+                pass
+
+        threading.Thread(target=_relay, daemon=True).start()
+        os.dup2(r_fd, sys.stdin.fileno())
+        os.close(r_fd)
+        sys.stdin = open(0, "r", closefd=False)
+    except Exception:
+        pass
+
+
+def run_server():
+    # Filter blank stdin lines to prevent FastMCP crashes
+    _filter_blank_stdin()
     # Start the FastMCP server (standard stdin/stdout communication)
     mcp.run()
+
+
+if __name__ == "__main__":
+    run_server()

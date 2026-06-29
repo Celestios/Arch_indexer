@@ -1,5 +1,4 @@
 import pytest
-from pathlib import Path
 from db.repository import Repository
 from db.connection import DbConnection
 from setup.initializer import initialize_workspace
@@ -64,6 +63,8 @@ def test_overview_report_generation(tmp_path):
     assert "Symbols Registered" in out
     assert "Class" in out
     assert "src" in out or "db.py" in out
+    assert "Workspace Dependency Call-Flow" in out
+    assert "```mermaid" in out
 
     out_json = reporter.generate_report("overview", "json")
     assert '"symbols":' in out_json

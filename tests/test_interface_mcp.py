@@ -1,5 +1,3 @@
-import pytest
-from pathlib import Path
 from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
@@ -335,7 +333,6 @@ def test_mcp_tools_trace_mocked(tmp_path, monkeypatch):
             return []
 
     # Inject mock
-    import sys
     # Add a mock class to engines.codeql_wrapper
     import engines.codeql_wrapper
     monkeypatch.setattr(engines.codeql_wrapper, "CodeQlWrapper", MockCodeQlWrapper)

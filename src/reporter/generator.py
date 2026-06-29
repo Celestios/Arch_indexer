@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Any, Type, Optional
+from typing import Dict, List, Any, Type
 from db.repository import Repository
 
 class BaseReport:
@@ -38,16 +38,33 @@ class OverviewReport(BaseReport):
         totals = self.repository.metrics.get_repo_totals()
         kinds = self.repository.metrics.get_symbol_counts_by_kind()
         prefixes = self.repository.metrics.get_symbols_by_file_prefix()
+        
+        communities = {}
+        connections = {}
+        try:
+            from engines.communities import detect_communities
+            communities, connections, _ = detect_communities(self.repository)
+        except Exception:
+            pass
+
+        violations = self.repository.compliance.get_violations()
+
         return {
             "totals": totals,
             "kinds": kinds,
-            "prefixes": prefixes
+            "prefixes": prefixes,
+            "communities": communities,
+            "connections": connections,
+            "violations": violations
         }
 
     def to_markdown(self, data: Dict[str, Any]) -> str:
         totals = data.get("totals", {})
         kinds = data.get("kinds", {})
         prefixes = data.get("prefixes", {})
+        communities = data.get("communities", {})
+        connections = data.get("connections", {})
+        violations = data.get("violations", [])
 
         md = ["# Workspace Overview Report\n"]
         md.append("## Repository Totals")
@@ -56,6 +73,44 @@ class OverviewReport(BaseReport):
         md.append(f"- **Dependencies (Call Graph Edges)**: {totals.get('edges', 0)}")
         md.append(f"- **Active Architectural Violations**: {totals.get('violations', 0)}")
         md.append("")
+
+        md.append("## Workspace Dependency Call-Flow")
+        if not communities:
+            md.append("*No dependency connections to map.*\n")
+        else:
+            mermaid = ["```mermaid", "flowchart TD"]
+            
+            def sanitize_node_id(lbl: str) -> str:
+                safe = lbl.replace("/", "_").replace(".", "_").replace("-", "_").strip("_")
+                return safe if safe else "root"
+
+            # 1. Declare community nodes with sizes
+            for comm_name, syms in sorted(communities.items(), key=lambda x: len(x[1]), reverse=True):
+                safe_name = sanitize_node_id(comm_name)
+                mermaid.append(f"    {safe_name}[\"{comm_name} ({len(syms)} symbols)\"]")
+                
+            # 2. Map connection edges
+            for src_comm, tgts in sorted(connections.items()):
+                src_safe = sanitize_node_id(src_comm)
+                for tgt_comm, weight in sorted(tgts.items(), key=lambda x: x[1], reverse=True):
+                    tgt_safe = sanitize_node_id(tgt_comm)
+                    mermaid.append(f"    {src_safe} -->|\"{weight} call(s)\"| {tgt_safe}")
+            
+            # 3. Style violating nodes
+            violating_comms = set()
+            for v in violations:
+                fp = v.get("filepath")
+                if fp:
+                    fp_norm = fp.replace("\\", "/")
+                    parts = fp_norm.split("/")
+                    comm = "/".join(parts[:-1]) + "/" if len(parts) > 1 else "./"
+                    violating_comms.add(sanitize_node_id(comm))
+                    
+            for v_comm in sorted(violating_comms):
+                mermaid.append(f"    style {v_comm} fill:#fee2e2,stroke:#ef4444,stroke-width:2px")
+                
+            mermaid.append("```\n")
+            md.append("\n".join(mermaid))
 
         md.append("## Symbol Types Breakdown")
         if not kinds:

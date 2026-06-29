@@ -14,7 +14,8 @@ class SymbolsRepository(BaseRepository):
         signature: Optional[str],
         docstring: Optional[str],
         body_hash: Optional[str],
-        embedding: Optional[List[float]] = None
+        embedding: Optional[List[float]] = None,
+        connection_weight: int = 0
     ):
         """
         Inserts or replaces a code symbol declaration in the database.
@@ -23,24 +24,25 @@ class SymbolsRepository(BaseRepository):
         with self.db_conn.session() as conn:
             conn.execute(
                 """
-                INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, embedding)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, embedding, connection_weight)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (symbol) DO UPDATE SET
                     filepath = excluded.filepath,
                     kind = excluded.kind,
                     signature = excluded.signature,
                     docstring = excluded.docstring,
                     body_hash = excluded.body_hash,
-                    embedding = excluded.embedding
+                    embedding = excluded.embedding,
+                    connection_weight = excluded.connection_weight
                 """,
-                (symbol, filepath, kind, signature, docstring, body_hash, embedding)
+                (symbol, filepath, kind, signature, docstring, body_hash, embedding, connection_weight)
             )
 
     def get_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Retrieves details of a registered symbol declaration."""
         with self.db_conn.session() as conn:
             res = conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring, body_hash FROM symbols WHERE symbol = ?",
+                "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight FROM symbols WHERE symbol = ?",
                 (symbol,)
             ).fetchone()
             if res:
@@ -50,7 +52,8 @@ class SymbolsRepository(BaseRepository):
                     "kind": res[2],
                     "signature": res[3],
                     "docstring": res[4],
-                    "body_hash": res[5]
+                    "body_hash": res[5],
+                    "connection_weight": res[6]
                 }
         return None
 
@@ -97,6 +100,8 @@ class SymbolsRepository(BaseRepository):
 
     def upsert_symbols_bulk(self, symbols_list: List[Dict[str, Any]]):
         """Bulk upserts a list of symbols in a single transaction."""
+        if not symbols_list:
+            return
         data = [
             (
                 sym["symbol"],
@@ -105,28 +110,32 @@ class SymbolsRepository(BaseRepository):
                 sym["signature"],
                 sym["docstring"],
                 sym["body_hash"],
-                sym.get("embedding")
+                sym.get("embedding"),
+                sym.get("connection_weight", 0)
             )
             for sym in symbols_list
         ]
         with self.db_conn.session() as conn:
             conn.executemany(
                 """
-                INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, embedding)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, embedding, connection_weight)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (symbol) DO UPDATE SET
                     filepath = excluded.filepath,
                     kind = excluded.kind,
                     signature = excluded.signature,
                     docstring = excluded.docstring,
                     body_hash = excluded.body_hash,
-                    embedding = excluded.embedding
+                    embedding = excluded.embedding,
+                    connection_weight = excluded.connection_weight
                 """,
                 data
             )
 
     def add_occurrences_bulk(self, occurrences_list: List[Dict[str, Any]]):
         """Bulk inserts a list of occurrences in a single transaction."""
+        if not occurrences_list:
+            return
         data = [
             (
                 occ["symbol"],
@@ -253,4 +262,34 @@ class SymbolsRepository(BaseRepository):
                         "role": r[6]
                     }
         return result
+
+    def recalculate_connection_weights(self):
+        """
+        Recalculates connection weights (degree = incoming edges + outgoing edges) for all symbols in the database.
+        Updates connection_weight in the symbols table.
+        """
+        with self.db_conn.session() as conn:
+            conn.execute(
+                """
+                UPDATE symbols SET connection_weight = 0;
+                """
+            )
+            conn.execute(
+                """
+                WITH degree_counts AS (
+                    SELECT source AS sym, COUNT(*) AS cnt FROM edges GROUP BY source
+                    UNION ALL
+                    SELECT target AS sym, COUNT(*) AS cnt FROM edges GROUP BY target
+                ),
+                total_degrees AS (
+                    SELECT sym, SUM(cnt) AS total_cnt
+                    FROM degree_counts
+                    GROUP BY sym
+                )
+                UPDATE symbols
+                SET connection_weight = total_degrees.total_cnt
+                FROM total_degrees
+                WHERE symbols.symbol = total_degrees.sym
+                """
+            )
 

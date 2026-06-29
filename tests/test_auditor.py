@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository

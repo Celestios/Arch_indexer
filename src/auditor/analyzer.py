@@ -1,4 +1,3 @@
-import os
 import json
 import sys
 import hashlib
@@ -206,6 +205,56 @@ class Auditor:
 
         # 4. Run Graph-based Metadata Propagation
         propagation_sources = self.propagator.run_propagation(symbol_classifications, all_edges, config)
+
+        # 4b. Calculate and update dynamic edge weights based on layers, tiers, and barriers
+        all_barriers = set()
+        for prefix, prefix_conf in config.items():
+            auto_fields = prefix_conf.get("automatic_fields", {})
+            manual_fields = prefix_conf.get("manual_fields", {})
+            for field_name, field_conf in {**auto_fields, **manual_fields}.items():
+                if field_conf.get("handler") == "propagation":
+                    all_barriers.update(field_conf.get("barriers") or [])
+
+        updated_edges = []
+        for edge in all_edges:
+            src = edge["source"]
+            tgt = edge["target"]
+            rel = edge["relation"]
+            weight = 1.0
+            
+            src_data = symbol_classifications.get(src)
+            tgt_data = symbol_classifications.get(tgt)
+            
+            if src_data:
+                # 1. Same-layer check
+                src_layer = src_data["fields"].get("layer")
+                tgt_layer = tgt_data["fields"].get("layer") if tgt_data else None
+                if src_layer and tgt_layer and src_layer == tgt_layer:
+                    weight *= 1.5
+                    
+                # 2. Cross-tier check
+                src_tier = src_data["fields"].get("tier")
+                tgt_tier = tgt_data["fields"].get("tier") if tgt_data else None
+                if src_tier is not None and tgt_tier is not None:
+                    try:
+                        if int(src_tier) > int(tgt_tier):
+                            weight *= 0.5
+                    except ValueError:
+                        pass
+                        
+                # 3. Barrier crossing check
+                src_role = src_data["fields"].get("architectural_role") or src_data["fields"].get("role") or ""
+                if src_role in all_barriers:
+                    weight *= 0.3
+            
+            updated_edges.append((weight, src, tgt, rel))
+            
+        if updated_edges:
+            with self.repository.db_conn.session() as conn:
+                conn.executemany(
+                    "UPDATE edges SET weight = ? WHERE source = ? AND target = ? AND relation = ?",
+                    updated_edges
+                )
 
         # 5. Audit call graph edges for compliance violations
         violations = []

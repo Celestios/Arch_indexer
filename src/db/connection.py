@@ -1,4 +1,3 @@
-import os
 import sys
 import duckdb
 from pathlib import Path

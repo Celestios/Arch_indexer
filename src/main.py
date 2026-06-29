@@ -1,4 +1,3 @@
-import os
 import sys
 import argparse
 from pathlib import Path
@@ -9,6 +8,8 @@ from db.connection import DbConnection
 from db.repository import Repository
 from engines.scip_wrapper import ScipWrapper
 from auditor.analyzer import Auditor
+from change_tracker.watcher import start_watcher
+from auditor.validator import ConfigValidator
 
 
 def make_progress_callback(filename: str):
@@ -111,7 +112,7 @@ def cmd_init(args):
     if choice != "4":
         print("\n--- Downloading ONNX Model Assets ---")
         try:
-            from setup.embedder_bootstrap import bootstrap_onnx_model, EMBEDDING_MODELS
+            from setup.embedder_bootstrap import EMBEDDING_MODELS
             
             model_info = EMBEDDING_MODELS.get(choice, EMBEDDING_MODELS["1"])
             model_path = target_models_dir / "model.onnx"
@@ -412,6 +413,105 @@ def cmd_clear_pending(args):
         db_conn.close()
 
 
+def cmd_watch(args):
+    """Watches the project root for file changes and auto-indexes/audits."""
+    project_root = Path(args.project_root).resolve()
+    debounce = args.debounce
+    try:
+        start_watcher(project_root, debounce)
+    except Exception as e:
+        print(f"Watcher error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_analyze(args):
+    """Validates the architectural configuration ontology (config.json) completeness and sanity."""
+    project_root = Path(args.project_root).resolve()
+    validator = ConfigValidator(project_root)
+    res = validator.validate()
+
+    print("=== Configuration Sanity & Completeness Analysis ===")
+    
+    if res["warnings"]:
+        print(f"\n[WARNING] Reachability warnings ({len(res['warnings'])}):")
+        for warning in res["warnings"]:
+            print(f"  - {warning}")
+    else:
+        print("\n[OK] Value reachability check passed (no unreachable values).")
+
+    if res["errors"]:
+        print(f"\n[ERROR] Referential integrity failures ({len(res['errors'])}):")
+        for error in res["errors"]:
+            print(f"  - {error}")
+        print("\nValidation failed.", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print("[OK] Referential integrity validation passed.")
+        print("\nValidation succeeded.")
+        sys.exit(0)
+
+
+def cmd_impact(args):
+    """Performs blast radius analysis for a symbol by computing its transitive callers and callees."""
+    project_root = Path(args.project_root).resolve()
+    arch_dir = project_root / ".arch"
+    db_path = arch_dir / "arch.db"
+
+    if not db_path.exists():
+        print(f"Error: Arch database not found at {db_path}. Please run 'arch init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    db_conn = DbConnection(db_path)
+    repository = Repository(db_conn)
+
+    try:
+        closure = repository.edges.get_transitive_closure(args.symbol, max_depth=args.max_depth)
+    except Exception as e:
+        print(f"Error computing blast radius: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        db_conn.close()
+
+    upstream = closure.get("upstream", [])
+    downstream = closure.get("downstream", [])
+
+    print(f"=== Blast Radius for: {args.symbol} ===")
+    
+    print("\n--- Upstream Callers (Who calls this?) ---")
+    if not upstream:
+        print("*No transitive upstream callers found.*")
+    else:
+        upstream_sorted = sorted(upstream, key=lambda x: x["depth"])
+        for item in upstream_sorted:
+            path_str = " ──> ".join(f"{s.split('.')[-1]}" for s in item["path"])
+            print(f"- {item['symbol']} [Depth: {item['depth']}]")
+            print(f"  Path: {path_str}")
+
+    print("\n--- Downstream Callees (What does this call?) ---")
+    if not downstream:
+        print("*No transitive downstream callees found.*")
+    else:
+        downstream_sorted = sorted(downstream, key=lambda x: x["depth"])
+        for item in downstream_sorted:
+            path_str = " ──> ".join(f"{s.split('.')[-1]}" for s in item["path"])
+            print(f"- {item['symbol']} [Depth: {item['depth']}]")
+            print(f"  Path: {path_str}")
+
+
+def cmd_mcp(args):
+    """Starts the FastMCP server."""
+    import os
+    project_root = Path(args.project_root).resolve()
+    os.environ["ARCH_PROJECT_ROOT"] = str(project_root)
+    
+    # We must ensure that the path to src is in sys.path
+    src_dir = Path(__file__).resolve().parent
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+
+    from interface.server import run_server
+    run_server()
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -419,6 +519,11 @@ def main():
         description="Arch-mcp: Agent-Native Code Intelligence & Compliance Engine"
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # mcp
+    mcp_parser = subparsers.add_parser("mcp", help="Start the MCP server")
+    mcp_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    mcp_parser.set_defaults(func=cmd_mcp)
 
     # init (unified setup + indexer)
     init_parser = subparsers.add_parser("init", help="Initialize workspace, download models, and index symbols")
@@ -458,6 +563,24 @@ def main():
     clear_pending_parser.add_argument("justification", help="Justification comment for clearing all pending audits")
     clear_pending_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
     clear_pending_parser.set_defaults(func=cmd_clear_pending)
+
+    # watch
+    watch_parser = subparsers.add_parser("watch", help="Watch workspace and auto-index and audit on changes")
+    watch_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    watch_parser.add_argument("--debounce", type=float, default=3.0, help="Debounce delay in seconds")
+    watch_parser.set_defaults(func=cmd_watch)
+
+    # analyze
+    analyze_parser = subparsers.add_parser("analyze", help="Validate configuration completeness and sanity")
+    analyze_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    analyze_parser.set_defaults(func=cmd_analyze)
+
+    # impact
+    impact_parser = subparsers.add_parser("impact", help="Perform blast radius / transitive dependency analysis for a symbol")
+    impact_parser.add_argument("symbol", help="Target symbol name")
+    impact_parser.add_argument("--max-depth", type=int, default=3, help="Maximum traversal depth (default: 3)")
+    impact_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    impact_parser.set_defaults(func=cmd_impact)
 
     args = parser.parse_args()
 

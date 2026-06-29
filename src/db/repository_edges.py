@@ -6,16 +6,16 @@ class EdgesRepository(BaseRepository):
     Handles queries and updates to the 'edges' table.
     """
 
-    def add_edge(self, source: str, target: str, relation: str):
+    def add_edge(self, source: str, target: str, relation: str, weight: float = 1.0):
         """Registers a structural call or dependency link between two symbols."""
         with self.db_conn.session() as conn:
             conn.execute(
                 """
-                INSERT INTO edges (source, target, relation)
-                VALUES (?, ?, ?)
+                INSERT INTO edges (source, target, relation, weight)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT DO NOTHING
                 """,
-                (source, target, relation)
+                (source, target, relation, weight)
             )
 
     def get_outgoing_edges(self, symbol: str) -> List[Dict[str, str]]:
@@ -38,19 +38,22 @@ class EdgesRepository(BaseRepository):
 
     def add_edges_bulk(self, edges_list: List[Dict[str, Any]]):
         """Bulk inserts a list of edges in a single transaction."""
+        if not edges_list:
+            return
         data = [
             (
                 edge["source"],
                 edge["target"],
-                edge["relation"]
+                edge["relation"],
+                edge.get("weight", 1.0)
             )
             for edge in edges_list
         ]
         with self.db_conn.session() as conn:
             conn.executemany(
                 """
-                INSERT INTO edges (source, target, relation)
-                VALUES (?, ?, ?)
+                INSERT INTO edges (source, target, relation, weight)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT DO NOTHING
                 """,
                 data

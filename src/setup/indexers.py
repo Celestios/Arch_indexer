@@ -1,9 +1,6 @@
-import os
 import sys
 import shutil
 import zipfile
-import subprocess
-import tempfile
 from pathlib import Path
 from setup.downloader import download_file
 

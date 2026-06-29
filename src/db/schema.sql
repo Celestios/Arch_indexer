@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     signature TEXT,
     docstring TEXT,
     body_hash VARCHAR, -- AST body hash to skip vector/edge update if unchanged
-    embedding FLOAT[] -- Vector embeddings space for semantic lookup (flexible dimensions)
+    embedding FLOAT[], -- Vector embeddings space for semantic lookup (flexible dimensions)
+    connection_weight INTEGER DEFAULT 0
 );
 
 -- 3. Track physical locations where symbols are referenced/defined
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS edges (
     source VARCHAR,
     target VARCHAR,
     relation VARCHAR NOT NULL, -- e.g., 'Calls', 'Inherits', 'Implements'
+    weight FLOAT NOT NULL DEFAULT 1.0,
     PRIMARY KEY (source, target, relation)
 );
 
