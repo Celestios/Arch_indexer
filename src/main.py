@@ -176,6 +176,13 @@ def cmd_init(args):
     arch_dir = initialize_workspace(project_root)
     print(f"\nWorkspace folder initialized at {arch_dir}")
 
+    # 3a. Register project in central registry
+    try:
+        from setup.registry import register_project
+        register_project(project_root)
+    except Exception:
+        pass
+
     # 3b. Setup CodeQL if requested
     if setup_cql:
         print("\n--- Bootstrapping CodeQL CLI ---")

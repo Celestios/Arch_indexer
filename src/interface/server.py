@@ -27,12 +27,20 @@ def _find_project_root() -> Path:
     env_root = os.environ.get("ARCH_PROJECT_ROOT")
     if env_root:
         return Path(env_root).resolve()
-    # 3. Search upward from CWD for .arch/ directory
+    # 3. Search registered projects
+    try:
+        from setup.registry import find_project_root
+        registered = find_project_root()
+        if registered:
+            return registered
+    except Exception:
+        pass
+    # 4. Search upward from CWD for .arch/ directory
     current = Path(os.getcwd()).resolve()
     for parent in [current] + list(current.parents):
         if (parent / ".arch" / "arch.db").exists():
             return parent
-    # 4. Fallback to CWD
+    # 5. Fallback to CWD
     return current
 
 PROJECT_ROOT = _find_project_root()
