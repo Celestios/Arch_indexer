@@ -24,6 +24,7 @@ def print_progress(current: int, total: int, prefix: str = "", width: int = 30):
 def run_with_scroll(cmd: list, cwd: str, max_lines: int = 10, shell: bool = False) -> int:
     """
     Runs a subprocess and displays only the last `max_lines` of output.
+    Handles both \\n and \\r line endings (for tools like rust-analyzer that use \\r for progress).
     Older lines are removed from the top as new ones appear.
     Returns the process return code.
     """
@@ -39,26 +40,46 @@ def run_with_scroll(cmd: list, cwd: str, max_lines: int = 10, shell: bool = Fals
 
     buffer = deque(maxlen=max_lines)
     lines_printed = 0
+    partial_line = ""
 
     try:
-        for line in iter(process.stdout.readline, ''):
-            if not line:
+        while True:
+            char = process.stdout.read(1)
+            if not char:
                 break
-            stripped = line.rstrip('\n\r')
-            if stripped:
-                buffer.append(stripped)
-                # Move cursor up and clear previous lines
-                if lines_printed > 0:
-                    sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
-                    for _ in range(min(lines_printed, max_lines)):
-                        sys.stdout.write('\033[2K\033[1A')
-                        sys.stdout.write('\033[2K')
-                    sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
-                # Print current buffer
-                for bline in buffer:
-                    sys.stdout.write(f'\033[2K{bline}\n')
-                lines_printed = len(buffer)
-                sys.stdout.flush()
+
+            if char == '\r':
+                # Carriage return — rust-analyzer progress update, replace current partial
+                if partial_line.strip():
+                    buffer.append(partial_line.strip())
+                    if lines_printed > 0:
+                        sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
+                        for _ in range(min(lines_printed, max_lines)):
+                            sys.stdout.write('\033[2K\033[1A')
+                            sys.stdout.write('\033[2K')
+                        sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
+                    for bline in buffer:
+                        sys.stdout.write(f'\033[2K{bline}\n')
+                    lines_printed = len(buffer)
+                    sys.stdout.flush()
+                partial_line = ""
+            elif char == '\n':
+                # Newline — complete line
+                if partial_line.strip():
+                    buffer.append(partial_line.strip())
+                    if lines_printed > 0:
+                        sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
+                        for _ in range(min(lines_printed, max_lines)):
+                            sys.stdout.write('\033[2K\033[1A')
+                            sys.stdout.write('\033[2K')
+                        sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
+                    for bline in buffer:
+                        sys.stdout.write(f'\033[2K{bline}\n')
+                    lines_printed = len(buffer)
+                    sys.stdout.flush()
+                partial_line = ""
+            else:
+                partial_line += char
     except (KeyboardInterrupt, SystemExit):
         process.kill()
         raise
