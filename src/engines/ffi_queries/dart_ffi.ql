@@ -12,4 +12,9 @@ where
     e.getMethod().getName() = "lookupFunction" and
     e.getReceiver().getType().getName() = "DynamicLibrary"
   )
-e.toString(), e.getType().toString(), e.getLocation().getFile().getRelativePath()
+  or
+  (
+    e instanceof TypeAccessExpr and
+    e.getType().getName() = "NativeFunction"
+  )
+select e.toString(), e.getType().toString(), e.getLocation().getFile().getRelativePath()
