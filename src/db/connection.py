@@ -55,7 +55,12 @@ class DbConnection:
 
     def _initialize_schema(self, conn: duckdb.DuckDBPyConnection):
         """Reads schema.sql and applies it to the database connection."""
-        schema_path = Path(__file__).parent / "schema.sql"
+        if getattr(sys, 'frozen', False):
+            # Running as PyInstaller bundle
+            base_path = Path(sys._MEIPASS)
+            schema_path = base_path / "src" / "db" / "schema.sql"
+        else:
+            schema_path = Path(__file__).parent / "schema.sql"
         if not schema_path.exists():
             print(f"Warning: schema.sql not found at {schema_path}", file=sys.stderr)
             return

@@ -5,7 +5,10 @@ a = Analysis(
     ['src\\main.py'],
     pathex=['src'],
     binaries=[],
-    datas=[('src/db/schema.sql', 'src/db')],
+    datas=[
+        ('src/db/schema.sql', 'src/db'),
+        ('src/engines/ffi_queries/*', 'engines/ffi_queries'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +38,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:\\Users\\shahin\\antigravity\\Arch_indexer\\administrative-tools.ico'],
+    icon=['administrative-tools.ico'],
 )
