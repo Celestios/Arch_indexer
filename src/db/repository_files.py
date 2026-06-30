@@ -171,6 +171,14 @@ class FilesRepository(BaseRepository):
                 (justification,)
             )
 
+    def get_files_pending_audit_count(self) -> int:
+        """Returns the count of files with pending_audit = TRUE."""
+        with self.db_conn.session() as conn:
+            result = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE pending_audit = TRUE"
+            ).fetchone()
+            return result[0] if result else 0
+
     def clean_files_symbols_and_relations(self, filepaths: List[str]):
         """Cleans up occurrences, edges, and symbols for the given filepaths before re-ingesting."""
         if not filepaths:

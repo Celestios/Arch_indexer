@@ -349,7 +349,9 @@ def audit() -> str:
         db_conn.close()
 
     if not all_violations:
-        return "## Compliance Audit\n\n**No boundary rule violations found** project-wide."
+        pending_count = repository.files.get_files_pending_audit_count() if hasattr(repository.files, 'get_files_pending_audit_count') else 0
+        pending_msg = f"\n\n*{pending_count} file(s) pending deep audit.*" if pending_count > 0 else ""
+        return f"## Compliance Audit\n\n**No boundary rule violations found** project-wide.{pending_msg}"
 
     md = [f"## Compliance Audit Report: {len(all_violations)} violation(s) found\n"]
     for i, v in enumerate(all_violations, 1):
@@ -842,7 +844,10 @@ def index(target: str) -> str:
                 md.append("| Filepath | Line Range | Role (Definition=1, Ref=2) |")
                 md.append("| :--- | :--- | :--- |")
                 for o in occs:
-                    md.append(f"| `{o[0]}` | L{o[1]}-{o[2]} | {o[3]} |")
+                    role_map = {0: "Reference", 1: "Definition", 2: "Declaration"}
+                    role_label = role_map.get(o[3], f"Unknown ({o[3]})")
+                    line_str = f"L{o[1]}" if o[1] == o[2] else f"L{o[1]}-{o[2]}"
+                    md.append(f"| `{o[0]}` | {line_str} | {role_label} |")
                 md.append("")
 
             if edges:

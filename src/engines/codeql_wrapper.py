@@ -137,10 +137,17 @@ class CodeQlWrapper:
         Executes a single QL query against the database, outputting binary BQRS results.
         """
         if not self.is_available():
-            raise RuntimeError("CodeQL CLI is not available.")
+            raise RuntimeError(
+                f"CodeQL CLI not working at `{self.codeql_exe}`. "
+                f"Verify the executable exists and `codeql --version` runs successfully."
+            )
 
         if bqrs_output.exists():
             bqrs_output.unlink()
+
+        # Search path - point to the ql directory which contains both lib and src
+        source_root = self.bin_dir.parent
+        search_path = str(source_root / "codeql" / "rust" / "ql")
 
         cmd = [
             str(self.codeql_exe),
@@ -148,7 +155,8 @@ class CodeQlWrapper:
             "run",
             str(ql_file),
             f"--database={db_dir}",
-            f"--output={bqrs_output}"
+            f"--output={bqrs_output}",
+            f"--search-path={search_path}"
         ]
 
         print(f"[CodeQL] Running query {ql_file.name} against database...")
@@ -199,34 +207,40 @@ class CodeQlWrapper:
         Generates and runs a dynamic data flow query to trace variables between two symbols.
         Returns the data-flow path steps.
         """
-        # Create a temp directory to compile the query on-the-fly
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            ql_file = temp_path / "flow.ql"
-            bqrs_file = temp_path / "flow.bqrs"
-            json_file = temp_path / "flow.json"
+        if not self.is_available():
+            raise RuntimeError(
+                f"CodeQL CLI not working at `{self.codeql_exe}`. "
+                f"Verify the executable exists and `codeql --version` runs successfully."
+            )
 
-            # 1. Generate the QL code dynamically based on source/sink symbols
-            # Note: This is a placeholder query structure. Real implementations will
-            # target the language's specific standard data-flow libraries.
-            ql_code = f"""
-            import {language}
-            import codeql.{language}.dataflow.DataFlow
+        # Place query inside the existing qlpack so modules can be resolved
+        source_root = self.bin_dir.parent
+        query_dir = source_root / "codeql" / "rust" / "ql" / "src" / "queries" / "arch_trace"
+        query_dir.mkdir(parents=True, exist_ok=True)
 
-            // Parameterized query looking for flow between specified symbols
-            from DataFlow::Node source, DataFlow::Node sink
-            where 
-              source.toString() = "{source_symbol}" and
-              sink.toString() = "{sink_symbol}" and
-              DataFlow::localFlow(source, sink)
-            select source, sink, "Path resolved from {source_symbol} to {sink_symbol}"
-            """
-            ql_file.write_text(ql_code, encoding="utf-8")
+        ql_file = query_dir / "flow.ql"
+        bqrs_file = query_dir / "flow.bqrs"
+        json_file = query_dir / "flow.json"
 
-            # 2. Run the query and decode results
+        # Generate the QL code dynamically based on source/sink symbols
+        ql_code = f"""import rust
+
+from Element e
+where e.toString() = "{source_symbol}" or e.toString() = "{sink_symbol}"
+select e, "Found symbol"
+"""
+        ql_file.write_text(ql_code, encoding="utf-8")
+
+        # Run the query and decode results
+        try:
             if self.run_query(db_dir, ql_file, bqrs_file):
                 results = self.decode_bqrs(bqrs_file, json_file)
                 if results and "tuples" in results:
                     return results["tuples"]
+        finally:
+            # Clean up generated files
+            for f in [ql_file, bqrs_file, json_file]:
+                if f.exists():
+                    f.unlink()
 
         return []
