@@ -273,12 +273,33 @@ def cmd_init(args):
             else:
                 build_cql = False
 
+            # Create Dart analyzer database (lighter, no compiler needed)
+            dart_analyzer = None
+            if "dart" in selected_languages:
+                try:
+                    from engines.dart_analyzer import DartAnalyzerWrapper
+                    dart_analyzer = DartAnalyzerWrapper(arch_dir)
+                    if dart_analyzer.is_available():
+                        print("\n--- Running Dart Analyzer Database Generator ---")
+                        dart_analyzer.create_database(
+                            source_root=project_root,
+                            db_output_dir=arch_dir / "dart_analyzer_db",
+                            language="dart"
+                        )
+                    else:
+                        print("\n[DartAnalyzer] analyzer package not available, skipping.")
+                        dart_analyzer = None
+                except ImportError:
+                    print("\n[DartAnalyzer] Failed to import, skipping.")
+                    dart_analyzer = None
+
             if build_cql:
                 print("\n--- Running CodeQL Database Generator ---")
                 try:
                     from engines.codeql_wrapper import CodeQlWrapper
                     codeql = CodeQlWrapper(bin_dir)
-                    for lang in cql_langs:
+                    cql_langs_filtered = [l for l in cql_langs if l != "dart"]
+                    for lang in cql_langs_filtered:
                         db_output_dir = arch_dir / f"codeql_db_{lang}"
                         print(f"\n[CodeQL] Building database for {lang}...")
                         success = codeql.create_database(
@@ -293,7 +314,7 @@ def cmd_init(args):
                 except Exception as e:
                     print(f"Error creating CodeQL database: {e}")
 
-    # 5c. FFI Cross-Language Linking (after CodeQL database is built)
+    # 5c. FFI Cross-Language Linking (after databases are built)
     if len(selected_languages) > 1:
         print("\n--- Running FFI Cross-Language Linker ---")
         try:
@@ -301,7 +322,24 @@ def cmd_init(args):
             from engines.ffi_matcher import FfiMatcher
             from engines.ffi_linker import FfiLinker
 
-            extractor = FfiExtractor()
+            # Build CodeQL wrappers dict for each available language database
+            codeql_wrappers = {}
+            if cql_ready:
+                from engines.codeql_wrapper import CodeQlWrapper
+                try:
+                    codeql = CodeQlWrapper(bin_dir)
+                    if codeql.is_available():
+                        # Add wrapper for each language with a database
+                        for lang in selected_languages:
+                            if lang == "dart":
+                                continue  # Dart uses analyzer
+                            db_dir = arch_dir / f"codeql_db_{lang}"
+                            if db_dir.exists():
+                                codeql_wrappers[lang] = codeql
+                except Exception:
+                    pass
+
+            extractor = FfiExtractor(codeql_wrappers=codeql_wrappers, dart_analyzer=dart_analyzer)
             surfaces = extractor.extract_all(project_root, languages=selected_languages)
 
             if surfaces:

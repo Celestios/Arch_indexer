@@ -126,7 +126,32 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
                         from engines.ffi_matcher import FfiMatcher
                         from engines.ffi_linker import FfiLinker
 
-                        extractor = FfiExtractor()
+                        # Create backends for FFI extraction (language-agnostic)
+                        dart_wrapper = None
+                        codeql_wrappers = {}
+                        try:
+                            from engines.dart_analyzer import DartAnalyzerWrapper
+                            dart_wrapper = DartAnalyzerWrapper(arch_dir)
+                            if not dart_wrapper.is_available():
+                                dart_wrapper = None
+                        except ImportError:
+                            pass
+
+                        try:
+                            from engines.codeql_wrapper import CodeQlWrapper
+                            codeql = CodeQlWrapper(bin_dir)
+                            if codeql.is_available():
+                                # Add wrapper for each language with a database
+                                for db_entry in arch_dir.iterdir():
+                                    if db_entry.is_dir() and db_entry.name.startswith("codeql_db"):
+                                        lang = db_entry.name.replace("codeql_db_", "").replace("codeql_db", "")
+                                        if not lang:
+                                            lang = "generic"
+                                        codeql_wrappers[lang] = codeql
+                        except Exception:
+                            pass
+
+                        extractor = FfiExtractor(codeql_wrappers=codeql_wrappers, dart_analyzer=dart_wrapper)
                         surfaces = extractor.extract_all(project_root)
                         if surfaces:
                             matcher = FfiMatcher()

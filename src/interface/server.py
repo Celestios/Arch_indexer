@@ -427,32 +427,62 @@ def map() -> str:
 @mcp.tool()
 def trace(source: str, sink: str) -> str:
     """
-    Traces the data flow path from a source symbol to a sink symbol using CodeQL analysis.
+    Traces the data flow path from a source symbol to a sink symbol.
+    Combines Dart analyzer + CodeQL + FFI_Binds for cross-language tracing.
     Returns a Markdown representation of the flow path.
-    
+
     Guidelines:
       - This tool is especially useful when fixing bugs. Use it to trace data flows and understand
         exactly where to place debugging print/log statements or checks.
+      - Supports cross-language traces: any language -> FFI -> any other language
+      - Auto-detects languages from symbol names or file paths
     """
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
 
     db_conn = DbConnection(DB_PATH)
+    repository = Repository(db_conn)
+
     try:
+        from engines.dart_analyzer import CombinedDataflowTracer, DartAnalyzerDB
         from engines.codeql_wrapper import CodeQlWrapper
-        bin_dir = get_bin_dir()
-        codeql = CodeQlWrapper(bin_dir)
-    except Exception as e:
-        db_conn.close()
-        return f"Error importing CodeQL Wrapper: {e}"
 
-    db_dir = ARCH_DIR / "codeql_db"
-    if not db_dir.exists():
-        db_conn.close()
-        return f"Error: CodeQL database not found at {db_dir}. Please create it first."
+        # Initialize analyzer DB if it exists (for Dart)
+        analyzer_db = None
+        dart_db_path = ARCH_DIR / "dart_analyzer_db"
+        if dart_db_path.exists():
+            analyzer_db = DartAnalyzerDB(ARCH_DIR)
 
-    try:
-        steps = codeql.trace_data_flow(db_dir, source, sink)
+        # Initialize CodeQL wrappers for each available language database
+        codeql_wrappers = {}
+        try:
+            bin_dir = get_bin_dir()
+            # Check for language-specific and generic CodeQL databases
+            for db_entry in ARCH_DIR.iterdir():
+                if db_entry.is_dir() and db_entry.name.startswith("codeql_db"):
+                    # Extract language from dir name (e.g., "codeql_db_rust" -> "rust")
+                    lang = db_entry.name.replace("codeql_db_", "").replace("codeql_db", "")
+                    if not lang:
+                        lang = "generic"
+                    try:
+                        codeql = CodeQlWrapper(bin_dir)
+                        if codeql.is_available():
+                            codeql_wrappers[lang] = codeql
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Use combined tracer (language-agnostic: analyzer + CodeQL + FFI_Binds)
+        tracer = CombinedDataflowTracer(
+            project_root=ARCH_DIR.parent,
+            arch_dir=ARCH_DIR,
+            analyzer_db=analyzer_db,
+            codeql_wrappers=codeql_wrappers,
+            repository=repository
+        )
+        steps = tracer.trace(source, sink)
+
     except Exception as e:
         return f"Error running data flow trace: {e}"
     finally:
@@ -463,7 +493,8 @@ def trace(source: str, sink: str) -> str:
 
     md = [f"## Data Flow Trace: Path Found ({len(steps)} steps)\n"]
     for i, step in enumerate(steps, 1):
-        md.append(f"{i}. `{step['symbol']}` (`{step['filepath']}:L{step['line']}`)")
+        lang_tag = f" [{step.language}]" if step.language and step.language != "unknown" else ""
+        md.append(f"{i}. `{step.symbol}` (`{step.filepath}:L{step.line}`){lang_tag}")
     md.append("")
 
     return "\n".join(md)
