@@ -5,7 +5,9 @@ import subprocess
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
+
+from utils.exclusions import load_include_dirs, is_included
 
 
 def print_progress(current: int, total: int, prefix: str = "", width: int = 30):
@@ -34,6 +36,8 @@ def run_with_scroll(cmd: list, cwd: str, max_lines: int = 10, shell: bool = Fals
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding='utf-8',
+        errors='replace',
         shell=shell,
         bufsize=1
     )
@@ -42,41 +46,34 @@ def run_with_scroll(cmd: list, cwd: str, max_lines: int = 10, shell: bool = Fals
     lines_printed = 0
     partial_line = ""
 
+    def _redraw():
+        nonlocal lines_printed
+        # Move cursor up to overwrite previously printed lines
+        if lines_printed > 0:
+            sys.stdout.write(f'\033[{lines_printed}A')
+        # Clear and reprint each buffered line
+        for bline in buffer:
+            sys.stdout.write(f'\033[2K{bline}\n')
+        # If the buffer shrank, clear any leftover stale lines
+        leftover = lines_printed - len(buffer)
+        for _ in range(leftover):
+            sys.stdout.write('\033[2K\n')
+        if leftover > 0:
+            # Move cursor back up past the cleared leftover lines
+            sys.stdout.write(f'\033[{leftover}A')
+        lines_printed = len(buffer)
+        sys.stdout.flush()
+
     try:
         while True:
             char = process.stdout.read(1)
             if not char:
                 break
 
-            if char == '\r':
-                # Carriage return — rust-analyzer progress update, replace current partial
+            if char in ('\r', '\n'):
                 if partial_line.strip():
                     buffer.append(partial_line.strip())
-                    if lines_printed > 0:
-                        sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
-                        for _ in range(min(lines_printed, max_lines)):
-                            sys.stdout.write('\033[2K\033[1A')
-                            sys.stdout.write('\033[2K')
-                        sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
-                    for bline in buffer:
-                        sys.stdout.write(f'\033[2K{bline}\n')
-                    lines_printed = len(buffer)
-                    sys.stdout.flush()
-                partial_line = ""
-            elif char == '\n':
-                # Newline — complete line
-                if partial_line.strip():
-                    buffer.append(partial_line.strip())
-                    if lines_printed > 0:
-                        sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
-                        for _ in range(min(lines_printed, max_lines)):
-                            sys.stdout.write('\033[2K\033[1A')
-                            sys.stdout.write('\033[2K')
-                        sys.stdout.write(f'\033[{min(lines_printed, max_lines)}A')
-                    for bline in buffer:
-                        sys.stdout.write(f'\033[2K{bline}\n')
-                    lines_printed = len(buffer)
-                    sys.stdout.flush()
+                    _redraw()
                 partial_line = ""
             else:
                 partial_line += char
@@ -84,6 +81,10 @@ def run_with_scroll(cmd: list, cwd: str, max_lines: int = 10, shell: bool = Fals
         process.kill()
         raise
     finally:
+        # Flush any remaining partial line
+        if partial_line.strip():
+            buffer.append(partial_line.strip())
+            _redraw()
         process.stdout.close()
 
     return process.wait()
@@ -106,26 +107,46 @@ class ScipWrapper:
     """
 
     @staticmethod
+    def _move_index_to_arch(project_dir: Path, language: str) -> Optional[Path]:
+        """Move generated index.scip to .arch/index_{language}.scip."""
+        index_path = project_dir / "index.scip"
+        arch_index = project_dir / ".arch" / f"index_{language}.scip"
+        if index_path.exists():
+            arch_index.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(index_path), str(arch_index))
+            return arch_index
+        elif arch_index.exists():
+            return arch_index
+        return None
+
+    @staticmethod
     def detect_languages(project_dir: Path) -> List[str]:
         """Detects if the project contains Dart/Flutter, Rust, Go, TypeScript/JavaScript, Java, or Python source files."""
         languages = []
-        # Check for Dart
-        if (project_dir / "pubspec.yaml").exists() or any(project_dir.glob("**/pubspec.yaml")):
+
+        # Only check root-level project markers, not recursive subdirectories
+        if (project_dir / "pubspec.yaml").exists():
             languages.append("dart")
-        # Check for Rust
-        if (project_dir / "Cargo.toml").exists() or any(project_dir.glob("**/Cargo.toml")):
+        elif any(p.parent != project_dir for p in project_dir.rglob("pubspec.yaml")
+                 if ".dart_tool" not in str(p) and "dart_analyzer" not in str(p)):
+            languages.append("dart")
+        if (project_dir / "Cargo.toml").exists():
             languages.append("rust")
-        # Check for Go
-        if (project_dir / "go.mod").exists() or any(project_dir.glob("**/go.mod")):
+        if (project_dir / "go.mod").exists():
             languages.append("go")
-        # Check for TypeScript / JavaScript
-        if (project_dir / "package.json").exists() or any(project_dir.glob("**/package.json")):
+        if (project_dir / "package.json").exists():
             languages.append("typescript")
-        # Check for Java
-        if (project_dir / "pom.xml").exists() or (project_dir / "build.gradle").exists() or any(project_dir.glob("**/pom.xml")) or any(project_dir.glob("**/build.gradle")):
+        if (project_dir / "pom.xml").exists() or (project_dir / "build.gradle").exists():
             languages.append("java")
-        # Check for Python
-        if (project_dir / "requirements.txt").exists() or any(project_dir.glob("**/requirements.txt")) or any(project_dir.glob("**/*.py")):
+
+        # Python: check for .py files in src/ only
+        include_dirs = load_include_dirs(project_dir)
+        def _filtered_glob(pattern):
+            for p in project_dir.glob(pattern):
+                if include_dirs is None or is_included(str(p.relative_to(project_dir)), include_dirs):
+                    yield p
+
+        if any(_filtered_glob("**/requirements.txt")) or any(_filtered_glob("**/*.py")):
             languages.append("python")
         return languages
 
@@ -161,193 +182,152 @@ class ScipWrapper:
         """
         Executes the language-specific SCIP indexer and returns the path to the generated index.scip.
         """
-        if language == "dart":
-            print(f"[SCIP] Indexing Dart project under {project_dir}...")
-            
-            # 1. Check if dart is available
-            if not shutil.which("dart"):
-                print("Error: Dart SDK is not on the system PATH.", file=sys.stderr)
-                return None
-                
-            # 2. Activate scip_dart globally if not already present
-            # We run the activation command to ensure it's available
-            try:
-                subprocess.run(
-                    ["dart", "pub", "global", "activate", "scip_dart"],
-                    cwd=str(project_dir),
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    shell=(sys.platform == "win32")
-                )
-            except subprocess.CalledProcessError as e:
-                print(f"Warning: Failed to activate scip_dart: {e}", file=sys.stderr)
-
-            # 3. Generate index
-            try:
-                # Runs the indexer. It generates index.scip at project_dir root
-                rc = run_with_scroll(
-                    ["dart", "pub", "global", "run", "scip_dart", "."],
-                    cwd=str(project_dir),
-                    shell=(sys.platform == "win32")
-                )
-                if rc != 0:
-                    raise subprocess.CalledProcessError(rc, "scip_dart")
-                index_path = project_dir / "index.scip"
-                arch_index = project_dir / ".arch" / "index.scip"
-                if index_path.exists():
-                    arch_index.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(index_path), str(arch_index))
-                    return arch_index
-                elif arch_index.exists():
-                    return arch_index
-            except subprocess.CalledProcessError as e:
-                print(f"Error executing scip_dart indexer: {e}", file=sys.stderr)
-                return None
-
-        elif language == "rust":
-            print(f"[SCIP] Indexing Rust project under {project_dir}...")
-            
-            # 1. Determine the best way to call rust-analyzer
-            ra_cmd = ["rust-analyzer", "scip", "."]
-            if shutil.which("rustup"):
-                # Fallback to calling it through rustup if toolchain shims are failing
-                ra_cmd = ["rustup", "run", "stable", "rust-analyzer", "scip", "."]
-                
-            # 2. Run rust-analyzer indexer
-            try:
-                rc = run_with_scroll(ra_cmd, cwd=str(project_dir), shell=(sys.platform == "win32"))
-                if rc != 0:
-                    raise subprocess.CalledProcessError(rc, "rust-analyzer")
-                index_path = project_dir / "index.scip"
-                arch_index = project_dir / ".arch" / "index.scip"
-                if index_path.exists():
-                    arch_index.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(index_path), str(arch_index))
-                    return arch_index
-                elif arch_index.exists():
-                    return arch_index
-            except subprocess.CalledProcessError:
-                # If stable toolchain lacks rust-analyzer, try adding the component
-                print("Warning: rust-analyzer CLI was not found. Attempting to add it via rustup...")
-                try:
-                    subprocess.run(["rustup", "component", "add", "rust-analyzer"], check=True, shell=(sys.platform == "win32"))
-                    # Try again with direct command
-                    rc = run_with_scroll(["rust-analyzer", "scip", "."], cwd=str(project_dir), shell=(sys.platform == "win32"))
-                    if rc != 0:
-                        raise subprocess.CalledProcessError(rc, "rust-analyzer")
-                    index_path = project_dir / "index.scip"
-                    arch_index = project_dir / ".arch" / "index.scip"
-                    if index_path.exists():
-                        arch_index.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(index_path), str(arch_index))
-                        return arch_index
-                    elif arch_index.exists():
-                        return arch_index
-                except Exception as err:
-                    print(f"Error: Failed to execute rust-analyzer scip: {err}", file=sys.stderr)
-                    print("Notice: If you are using the rust-analyzer extension inside VS Code, the CLI component must still be installed globally.", file=sys.stderr)
-                    print("To enable Rust indexing on the command-line, run:\n    rustup component add rust-analyzer", file=sys.stderr)
-                    return None
-
-        elif language == "go":
-            print(f"[SCIP] Indexing Go project under {project_dir}...")
-            if not shutil.which("scip-go"):
-                print("Error: scip-go CLI is not on the system PATH.", file=sys.stderr)
-                return None
-            try:
-                rc = run_with_scroll(["scip-go"], cwd=str(project_dir), shell=(sys.platform == "win32"))
-                if rc != 0:
-                    raise subprocess.CalledProcessError(rc, "scip-go")
-                index_path = project_dir / "index.scip"
-                arch_index = project_dir / ".arch" / "index.scip"
-                if index_path.exists():
-                    arch_index.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(index_path), str(arch_index))
-                    return arch_index
-                elif arch_index.exists():
-                    return arch_index
-            except subprocess.CalledProcessError as e:
-                print(f"Error executing scip-go: {e}", file=sys.stderr)
-                return None
-
-        elif language == "typescript":
-            print(f"[SCIP] Indexing TypeScript/JavaScript project under {project_dir}...")
-            if not shutil.which("scip-typescript"):
-                print("Error: scip-typescript CLI is not on the system PATH.", file=sys.stderr)
-                return None
-            try:
-                rc = run_with_scroll(["scip-typescript", "index"], cwd=str(project_dir), shell=(sys.platform == "win32"))
-                if rc != 0:
-                    raise subprocess.CalledProcessError(rc, "scip-typescript")
-                index_path = project_dir / "index.scip"
-                arch_index = project_dir / ".arch" / "index.scip"
-                if index_path.exists():
-                    arch_index.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(index_path), str(arch_index))
-                    return arch_index
-                elif arch_index.exists():
-                    return arch_index
-            except subprocess.CalledProcessError as e:
-                print(f"Error executing scip-typescript: {e}", file=sys.stderr)
-                return None
-
-        elif language == "java":
-            print(f"[SCIP] Indexing Java project under {project_dir}...")
-            if not shutil.which("scip-java"):
-                print("Error: scip-java CLI is not on the system PATH.", file=sys.stderr)
-                return None
-            try:
-                rc = run_with_scroll(["scip-java", "index"], cwd=str(project_dir), shell=(sys.platform == "win32"))
-                if rc != 0:
-                    raise subprocess.CalledProcessError(rc, "scip-java")
-                index_path = project_dir / "index.scip"
-                arch_index = project_dir / ".arch" / "index.scip"
-                if index_path.exists():
-                    arch_index.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(index_path), str(arch_index))
-                    return arch_index
-                elif arch_index.exists():
-                    return arch_index
-            except subprocess.CalledProcessError as e:
-                print(f"Error executing scip-java: {e}", file=sys.stderr)
-                return None
-
-        elif language == "python":
-            print(f"[SCIP] Indexing Python project under {project_dir}...")
-            if not shutil.which("scip-python"):
-                print("Error: scip-python CLI is not on the system PATH.", file=sys.stderr)
-                return None
-            try:
-                rc = run_with_scroll(["scip-python"], cwd=str(project_dir), shell=(sys.platform == "win32"))
-                if rc != 0:
-                    raise subprocess.CalledProcessError(rc, "scip-python")
-                index_path = project_dir / "index.scip"
-                arch_index = project_dir / ".arch" / "index.scip"
-                if index_path.exists():
-                    arch_index.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(index_path), str(arch_index))
-                    return arch_index
-                elif arch_index.exists():
-                    return arch_index
-            except subprocess.CalledProcessError as e:
-                print(f"Error executing scip-python: {e}", file=sys.stderr)
-                return None
-                    
+        handlers = {
+            "dart": ScipWrapper._index_dart,
+            "rust": ScipWrapper._index_rust,
+            "go": ScipWrapper._index_generic,
+            "typescript": ScipWrapper._index_generic,
+            "java": ScipWrapper._index_generic,
+            "python": ScipWrapper._index_python,
+        }
+        handler = handlers.get(language)
+        if handler:
+            return handler(project_dir, language)
         return None
 
     @staticmethod
-    def parse_index(scip_file: Path) -> Dict[str, Any]:
+    def _index_dart(project_dir: Path, language: str) -> Optional[Path]:
+        print(f"[SCIP] Indexing Dart project under {project_dir}...")
+        if not shutil.which("dart"):
+            print("Error: Dart SDK is not on the system PATH.", file=sys.stderr)
+            return None
+
+        pubspec_dir = project_dir
+        if not (project_dir / "pubspec.yaml").exists():
+            pubspecs = [p for p in project_dir.rglob("pubspec.yaml")
+                        if ".dart_tool" not in str(p) and "dart_analyzer" not in str(p)]
+            if not pubspecs:
+                print("[SCIP] No pubspec.yaml found, skipping Dart indexing.")
+                return None
+            pubspec_dir = pubspecs[0].parent
+            print(f"[SCIP] Using pubspec at {pubspec_dir}")
+
+        try:
+            subprocess.run(
+                ["dart", "pub", "global", "activate", "scip_dart"],
+                cwd=str(pubspec_dir), check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                shell=(sys.platform == "win32")
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Failed to activate scip_dart: {e}", file=sys.stderr)
+
+        try:
+            rc = run_with_scroll(
+                ["dart", "pub", "global", "run", "scip_dart", "."],
+                cwd=str(pubspec_dir), shell=(sys.platform == "win32")
+            )
+            if rc != 0:
+                raise subprocess.CalledProcessError(rc, "scip_dart")
+            return ScipWrapper._move_index_to_arch(project_dir, language)
+        except subprocess.CalledProcessError as e:
+            print(f"Error executing scip_dart indexer: {e}", file=sys.stderr)
+            return None
+
+    @staticmethod
+    def _index_rust(project_dir: Path, language: str) -> Optional[Path]:
+        print(f"[SCIP] Indexing Rust project under {project_dir}...")
+        ra_cmd = ["rust-analyzer", "scip", "."]
+        if shutil.which("rustup"):
+            ra_cmd = ["rustup", "run", "stable", "rust-analyzer", "scip", "."]
+
+        try:
+            rc = run_with_scroll(ra_cmd, cwd=str(project_dir), shell=(sys.platform == "win32"))
+            if rc != 0:
+                raise subprocess.CalledProcessError(rc, "rust-analyzer")
+            return ScipWrapper._move_index_to_arch(project_dir, language)
+        except subprocess.CalledProcessError:
+            print("Warning: rust-analyzer CLI was not found. Attempting to add it via rustup...")
+            try:
+                subprocess.run(["rustup", "component", "add", "rust-analyzer"], check=True, shell=(sys.platform == "win32"))
+                rc = run_with_scroll(["rust-analyzer", "scip", "."], cwd=str(project_dir), shell=(sys.platform == "win32"))
+                if rc != 0:
+                    raise subprocess.CalledProcessError(rc, "rust-analyzer")
+                return ScipWrapper._move_index_to_arch(project_dir, language)
+            except Exception as err:
+                print(f"Error: Failed to execute rust-analyzer scip: {err}", file=sys.stderr)
+                print("Notice: If you are using the rust-analyzer extension inside VS Code, the CLI component must still be installed globally.", file=sys.stderr)
+                print("To enable Rust indexing on the command-line, run:\n    rustup component add rust-analyzer", file=sys.stderr)
+                return None
+
+    @staticmethod
+    def _index_generic(project_dir: Path, language: str) -> Optional[Path]:
+        """Indexer for languages with simple `tool [subcommand]` invocations."""
+        tool_map = {
+            "go": ("scip-go", []),
+            "typescript": ("scip-typescript", ["index"]),
+            "java": ("scip-java", ["index"]),
+        }
+        tool_name, extra_args = tool_map.get(language, (f"scip-{language}", []))
+        print(f"[SCIP] Indexing {language.capitalize()} project under {project_dir}...")
+        if not shutil.which(tool_name):
+            print(f"Error: {tool_name} CLI is not on the system PATH.", file=sys.stderr)
+            return None
+        try:
+            rc = run_with_scroll([tool_name] + extra_args, cwd=str(project_dir), shell=(sys.platform == "win32"))
+            if rc != 0:
+                raise subprocess.CalledProcessError(rc, tool_name)
+            return ScipWrapper._move_index_to_arch(project_dir, language)
+        except subprocess.CalledProcessError as e:
+            print(f"Error executing {tool_name}: {e}", file=sys.stderr)
+            return None
+
+    @staticmethod
+    def _index_python(project_dir: Path, language: str) -> Optional[Path]:
+        print(f"[SCIP] Indexing Python project under {project_dir}...")
+        if not shutil.which("scip-python"):
+            print("Error: scip-python CLI is not on the system PATH.", file=sys.stderr)
+            return None
+        try:
+            arch_index = project_dir / ".arch" / f"index_{language}.scip"
+            arch_index.parent.mkdir(parents=True, exist_ok=True)
+            rc = run_with_scroll(
+                ["scip-python", "index", "--project-name", str(project_dir.name),
+                 "--output", str(arch_index)],
+                cwd=str(project_dir), shell=(sys.platform == "win32")
+            )
+            if rc != 0:
+                raise subprocess.CalledProcessError(rc, "scip-python")
+            if arch_index.exists():
+                return arch_index
+        except subprocess.CalledProcessError as e:
+            print(f"Error executing scip-python: {e}", file=sys.stderr)
+            return None
+
+    @staticmethod
+    def parse_index(scip_file: Path, project_root: Optional[Path] = None) -> Dict[str, Any]:
         """
-        Parses a binary index.scip file and returns a normalized dictionary
+        Parses a binary index.scip file into a normalized dictionary
         of symbols, occurrences, and edges.
+        Filters by include_dirs from config.json if project_root is provided.
         """
         if not scip_file.exists():
             raise FileNotFoundError(f"SCIP index file not found at {scip_file}")
 
+        include_dirs = load_include_dirs(project_root) if project_root else None
+
         index = scip_pb2.Index()
         with open(scip_file, "rb") as f:
-            index.ParseFromString(f.read())
+            raw = f.read()
+
+        try:
+            index.ParseFromString(raw)
+        except Exception:
+            raw = raw.replace(b'\xed\xa0\x80', b'___')
+            raw = raw.replace(b'\xed\xa8\x80', b'___')
+            raw = raw.replace(b'\xed\xb0\x80', b'___')
+            raw = raw.replace(b'\xed\xbf\xbf', b'___')
+            index.ParseFromString(raw)
 
         parsed_data = {
             "metadata": {
@@ -379,6 +359,8 @@ class ScipWrapper:
         # 2. First pass: Extract local symbol definitions & hover/docstrings
         for document in index.documents:
             filepath = document.relative_path
+            if include_dirs and not is_included(filepath, include_dirs):
+                continue
             parsed_data["files"].append(filepath)
             
             # Map symbol metadata inside this file
@@ -608,7 +590,7 @@ class ScipWrapper:
 
         # Safety Check / Shrink Guard (skip for incremental)
         if force or not unchanged_files:
-            new_symbols_count = len(parsed_data["symbols"])
+            new_symbols_count = sum(1 for v in parsed_data["symbols"].values() if v["filepath"])
             existing_symbols_count = 0
             langs_tuple = tuple(languages_in_index)
             if langs_tuple:
@@ -656,10 +638,15 @@ class ScipWrapper:
 
         repository.files.upsert_files_bulk(files_to_ingest)
 
-        # 2. Ingest symbols (only changed files)
+        # Early exit: if nothing changed and nothing was deleted, skip ingestion
+        if not changed_files and not deleted_files:
+            print("[SCIP Ingest] No files changed. Skipping symbol/occurrence/edge ingestion.")
+            return
+
+        # 2. Ingest symbols (only changed files + all external symbols)
         changed_set = set(changed_files)
         filtered_symbols = {k: v for k, v in parsed_data["symbols"].items()
-                          if not v["filepath"] or v["filepath"] in changed_set}
+                          if v["filepath"] is None or v["filepath"] in changed_set}
         total_symbols = len(filtered_symbols)
         print(f"[SCIP Ingest] Ingesting {total_symbols} symbols from {len(changed_files)} changed files...")
         symbols_to_ingest = []
@@ -699,7 +686,7 @@ class ScipWrapper:
 
         # 3. Ingest occurrences (only changed files)
         filtered_occurrences = [occ for occ in parsed_data["occurrences"]
-                               if not occ["filepath"] or occ["filepath"] in changed_set]
+                               if occ["filepath"] and occ["filepath"] in changed_set]
         total_occ = len(filtered_occurrences)
         print(f"[SCIP Ingest] Ingesting {total_occ} occurrences...")
         print_progress(total_occ, total_occ, prefix="[SCIP Ingest] Occurrences")

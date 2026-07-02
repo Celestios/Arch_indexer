@@ -2,6 +2,7 @@ import sys
 import argparse
 from pathlib import Path
 from setup.downloader import download_file
+from utils.progress import make_progress_callback
 
 # Defined list of available models, their HuggingFace locations, and dimensions
 EMBEDDING_MODELS = {
@@ -21,13 +22,6 @@ EMBEDDING_MODELS = {
         "tokenizer_url": "https://huggingface.co/Xenova/all-mpnet-base-v2/resolve/main/tokenizer.json"
     }
 }
-
-def make_progress_callback(filename: str):
-    def callback(downloaded: int, total_size: int):
-        percent = (downloaded / total_size) * 100 if total_size else 0
-        print(f"[{filename}] Downloaded: {downloaded}/{total_size} ({percent:.2f}%)")
-        sys.stdout.flush()
-    return callback
 
 def bootstrap_onnx_model(target_dir: Path, model_choice: str = "1") -> tuple[Path, Path]:
     """Downloads the chosen ONNX embedding model assets to the target folder."""

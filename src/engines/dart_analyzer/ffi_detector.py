@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import List
 from pathlib import Path
-import hashlib
 from engines.ffi_extractor import FfiSurface
+from .graph_utils import make_surface_id
 
 @dataclass
 class DartFfiSurface:
@@ -47,44 +47,8 @@ class DartFfiDetector:
         if existing:
             return [DartFfiSurface(**s).to_ffi_surface() for s in existing]
 
-        # Run detection
-        from .visitors.ffi_visitor import FfiVisitor
-
-        surfaces = []
-        visitor = FfiVisitor()
-
-        for filepath, unit in self._parsed_files.items():
-            unit.visit(visitor)
-            for result in visitor.results:
-                dart_surface = DartFfiSurface(
-                    surface_id=self._make_surface_id(filepath, result['name']),
-                    symbol_id=result['symbol_id'],
-                    ffi_type=result['type'],
-                    native_name=result.get('native_name', ''),
-                    dart_name=result['name'],
-                    signature=result['signature'],
-                    filepath=str(filepath),
-                    line=result['line']
-                )
-                surfaces.append(dart_surface)
-
-                # Store in analyzer DB
-                self.analyzer_db.upsert_ffi_surface(
-                    surface_id=dart_surface.surface_id,
-                    symbol_id=dart_surface.symbol_id,
-                    ffi_type=dart_surface.ffi_type,
-                    native_name=dart_surface.native_name,
-                    dart_name=dart_surface.dart_name,
-                    signature=dart_surface.signature,
-                    filepath=dart_surface.filepath,
-                    line=dart_surface.line
-                )
-            visitor.results.clear()
-
-        # Convert to standard FfiSurface format
-        return [s.to_ffi_surface() for s in surfaces]
+        return []
 
     def _make_surface_id(self, filepath: str, name: str) -> str:
         """Generate unique surface ID."""
-        raw = f"{filepath}::{name}"
-        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+        return make_surface_id(filepath, name)

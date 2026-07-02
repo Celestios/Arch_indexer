@@ -1,15 +1,10 @@
 import sys
 import shutil
 import zipfile
+import tempfile
 from pathlib import Path
 from setup.downloader import download_file
-
-def make_progress_callback(filename: str):
-    def callback(downloaded: int, total_size: int):
-        percent = (downloaded / total_size) * 100 if total_size else 0
-        print(f"[{filename}] Downloaded: {downloaded}/{total_size} ({percent:.2f}%)")
-        sys.stdout.flush()
-    return callback
+from utils.progress import make_progress_callback
 
 def bootstrap_codeql(bin_dir: Path, progress_callback = None) -> Path:
     """Downloads and extracts the CodeQL CLI binary for Windows, caching the download in the archive directory."""
@@ -19,6 +14,55 @@ def bootstrap_codeql(bin_dir: Path, progress_callback = None) -> Path:
     if codeql_exe.exists():
         print("CodeQL CLI is already installed locally.")
         return codeql_exe
+
+
+CODEQL_PACK_MAP = {
+    "python": "codeql/python-all",
+    "rust": "codeql/rust-all",
+    "go": "codeql/go-all",
+    "java": "codeql/java-all",
+    "javascript": "codeql/javascript-all",
+    "csharp": "codeql/csharp-all",
+    "cpp": "codeql/cpp-all",
+}
+
+
+def download_codeql_packs(bin_dir: Path, languages: list) -> None:
+    """Download CodeQL language packs for the specified languages."""
+    codeql_exe = bin_dir / "codeql" / "codeql.exe"
+    if not codeql_exe.exists():
+        system_path = shutil.which("codeql")
+        if system_path:
+            codeql_exe = Path(system_path)
+        else:
+            print("[CodeQL] CLI not found, skipping pack download.")
+            return
+
+    packs_to_install = [CODEQL_PACK_MAP[l] for l in languages if l in CODEQL_PACK_MAP]
+    if not packs_to_install:
+        return
+
+    print(f"[CodeQL] Downloading packs: {', '.join(packs_to_install)}...")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        qlpack_path = Path(tmp_dir) / "qlpack.yml"
+        deps = "\n".join(f"  {p}: \"*\"" for p in packs_to_install)
+        qlpack_path.write_text(
+            f"name: arch-pack-setup\nversion: 1.0.0\ndependencies:\n{deps}\n",
+            encoding="utf-8"
+        )
+
+        res = __import__("subprocess").run(
+            [str(codeql_exe), "pack", "install"],
+            cwd=tmp_dir,
+            shell=(sys.platform == "win32"),
+            capture_output=True,
+            text=True
+        )
+        if res.returncode == 0:
+            print(f"[CodeQL] Packs downloaded successfully.")
+        else:
+            print(f"[CodeQL] Warning: pack download failed: {res.stderr}", file=sys.stderr)
 
     bin_dir.mkdir(parents=True, exist_ok=True)
     

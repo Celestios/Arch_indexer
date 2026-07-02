@@ -3,6 +3,8 @@ from typing import List, Optional
 from pathlib import Path
 from collections import deque
 
+from .graph_utils import bfs_shortest_path
+
 @dataclass
 class FlowStep:
     symbol: str
@@ -10,6 +12,7 @@ class FlowStep:
     line: int
     col: int
     type_name: Optional[str] = None
+    language: Optional[str] = None
 
 class DartDataflowTracer:
     """
@@ -74,22 +77,7 @@ class DartDataflowTracer:
 
     def _find_path(self, source: str, sink: str, call_graph: dict) -> List[str]:
         """BFS shortest path in combined call graph."""
-        if source not in call_graph and source != sink:
-            return []
-
-        visited = {source}
-        queue = deque([(source, [source])])
-
-        while queue:
-            current, path = queue.popleft()
-            if current == sink:
-                return path
-            for neighbor in call_graph.get(current, []):
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, path + [neighbor]))
-
-        return []
+        return bfs_shortest_path(source, sink, call_graph)
 
     def _resolve_locations(self, path: List[str]) -> List[FlowStep]:
         """Convert symbol IDs to FlowStep with file/line from both databases."""

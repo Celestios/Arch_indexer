@@ -1,6 +1,7 @@
 import sys
 import argparse
 from pathlib import Path
+from contextlib import contextmanager
 
 from setup.initializer import initialize_workspace
 
@@ -10,20 +11,7 @@ from engines.scip_wrapper import ScipWrapper
 from auditor.analyzer import Auditor
 from change_tracker.watcher import start_watcher
 from auditor.validator import ConfigValidator
-
-
-def make_progress_callback(filename: str):
-    def callback(downloaded: int, total_size: int):
-        percent = (downloaded / total_size) * 100 if total_size else 0
-        bar_len = 30
-        filled_len = int(round(bar_len * downloaded / float(total_size))) if total_size else 0
-        bar = '=' * filled_len + '-' * (bar_len - filled_len)
-        sys.stdout.write(f"\r[{filename}] [{bar}] {downloaded / (1024*1024):.1f}/{total_size / (1024*1024):.1f} MB ({percent:.1f}%)")
-        sys.stdout.flush()
-        if downloaded == total_size:
-            sys.stdout.write("\n")
-    return callback
-
+from utils.progress import make_progress_callback
 
 
 def get_project_root(args) -> Path:
@@ -34,15 +22,37 @@ def get_project_root(args) -> Path:
     return Path(args.project_root).resolve()
 
 
-def cmd_init(args):
-    """Unified setup command: initialize workspace, download models, set up CodeQL, and index symbols."""
-    import shutil
+@contextmanager
+def workspace_session(args):
+    """Context manager that validates workspace, creates Repository, and handles cleanup."""
     project_root = get_project_root(args)
-    print("====================================================")
-    print("      Arch: Code Intelligence & Compliance Setup     ")
-    print("====================================================")
+    arch_dir = project_root / ".arch"
+    if not arch_dir.exists():
+        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
+        sys.exit(1)
+    db_conn = DbConnection(arch_dir / "arch.db")
+    repository = Repository(db_conn)
+    try:
+        yield project_root, arch_dir, repository
+    finally:
+        db_conn.close()
 
-    # 0. Path Resolution
+
+def resolve_filepath(repository, raw_path: str) -> str:
+    """Resolve a filepath against the database, trying exact match then suffix fallback."""
+    file_info = repository.files.get_file(raw_path)
+    if file_info:
+        return raw_path
+    all_files = repository.files.get_all_files_metadata()
+    for fp in all_files.keys():
+        if fp.replace("\\", "/").endswith(raw_path.replace("\\", "/")):
+            return fp
+    return None
+
+
+def _resolve_init_paths(project_root: Path):
+    """Resolve bin_dir and component paths for the init command."""
+    import shutil
     if getattr(sys, 'frozen', False):
         exe_dir = Path(sys.executable).resolve().parent
         if (exe_dir / "bin").exists():
@@ -56,65 +66,40 @@ def cmd_init(args):
     tokenizer_path = target_models_dir / "tokenizer.json"
     codeql_dir = bin_dir / "codeql"
     codeql_exe = codeql_dir / "codeql.exe"
-
-    # 1. Scanner/Auto-recognition
-    languages = ScipWrapper.detect_languages(project_root)
     model_installed = model_path.exists() and tokenizer_path.exists()
     codeql_installed = codeql_exe.exists() or (shutil.which("codeql") is not None)
+    return bin_dir, target_models_dir, model_path, tokenizer_path, codeql_dir, codeql_exe, model_installed, codeql_installed
 
-    print("\n[Auto-Recognition] System Status:")
+
+def _select_languages(languages):
+    """Interactively prompt user to select languages to index."""
+    selected = []
     if not languages:
-        print("  - Languages: No supported languages (Rust, Dart) detected.")
-        print("    (Note: Arch works best on Dart/Flutter or Rust codebases.)")
-    else:
-        print(f"  - Detected languages: {', '.join(languages)}")
-        env_status = ScipWrapper.verify_environment(languages)
-        for lang, available in env_status.items():
-            status_str = "Available" if available else "NOT found on PATH"
-            print(f"    * {lang.capitalize()} Toolchain: {status_str}")
-            if not available:
-                if lang == "dart":
-                    print("      -> Recommendation: Please install Dart/Flutter SDK.")
-                elif lang == "rust":
-                    print("      -> Recommendation: Please install Rust (rustup/rust-analyzer).")
+        return selected
+    if not sys.stdin.isatty():
+        return languages
+    print("\n--- Language Indexing Options ---")
+    print("Select the languages you want to index:")
+    for idx, lang in enumerate(languages, 1):
+        print(f"  [{idx}] {lang.capitalize()}")
+    try:
+        choice = input(f"Choose languages [1-{len(languages)}] (comma-separated, e.g., 1,2, default: all): ").strip()
+        if choice:
+            selected_indices = [int(i.strip()) for i in choice.split(",") if i.strip().isdigit()]
+            valid_langs = [languages[i - 1] for i in selected_indices if 1 <= i <= len(languages)]
+            if valid_langs:
+                return valid_langs
+            print("Invalid selection. Defaulting to all detected languages.")
+        return languages
+    except (KeyboardInterrupt, EOFError):
+        print("\nDefaulting to all detected languages.")
+        return languages
 
-    print("\n[Local Components] Dependency Status:")
-    print(f"  - ONNX Embedding Model: {'Installed' if model_installed else 'Not downloaded'}")
-    print(f"  - CodeQL CLI:           {'Installed' if codeql_installed else 'Not downloaded'}")
 
-    # 1b. Language Selection
-    selected_languages = []
-    if languages:
-        if sys.stdin.isatty():
-            print("\n--- Language Indexing Options ---")
-            print("Select the languages you want to index:")
-            for idx, lang in enumerate(languages, 1):
-                print(f"  [{idx}] {lang.capitalize()}")
-            try:
-                choice = input(f"Choose languages [1-{len(languages)}] (comma-separated, e.g., 1,2, default: all): ").strip()
-                if choice:
-                    selected_indices = [int(i.strip()) for i in choice.split(",") if i.strip().isdigit()]
-                    valid_langs = []
-                    for i in selected_indices:
-                        if 1 <= i <= len(languages):
-                            valid_langs.append(languages[i - 1])
-                    if valid_langs:
-                        selected_languages = valid_langs
-                    else:
-                        print("Invalid selection. Defaulting to all detected languages.")
-                        selected_languages = languages
-                else:
-                    selected_languages = languages
-            except (KeyboardInterrupt, EOFError):
-                print("\nDefaulting to all detected languages.")
-                selected_languages = languages
-        else:
-            selected_languages = languages
-
-    # 2. Embedding Model choice
+def _select_model(model_installed):
+    """Interactively prompt user for ONNX model setup."""
     setup_model = False
     choice = "1"
-    
     if model_installed:
         if sys.stdin.isatty():
             try:
@@ -134,7 +119,6 @@ def cmd_init(args):
         print("  [2] bge-small-en-v1.5 (High Performance, ~130MB download, 384 dimensions)")
         print("  [3] all-mpnet-base-v2 (Maximum Accuracy, ~430MB download, 768 dimensions)")
         print("  [4] Skip model download (semantic search will be disabled)")
-        
         if sys.stdin.isatty():
             try:
                 choice = input("\nChoose an option [1-4] (default: 1): ").strip()
@@ -146,8 +130,13 @@ def cmd_init(args):
         else:
             print("\nNon-interactive session. Defaulting to option [1].")
             choice = "1"
+    return setup_model, choice
 
-    # 2b. CodeQL setup choice
+
+def _select_codeql(codeql_installed, codeql_dir, shutil_mod):
+    """Interactively prompt user for CodeQL setup."""
+    import shutil as shutil_local
+    shutil_mod = shutil_mod or shutil_local
     setup_cql = False
     cql_ready = codeql_installed
 
@@ -160,7 +149,7 @@ def cmd_init(args):
                     setup_cql = True
                     if codeql_dir.exists():
                         try:
-                            shutil.rmtree(codeql_dir)
+                            shutil_mod.rmtree(codeql_dir)
                         except Exception as e:
                             print(f"Warning: Could not clear existing codeql folder: {e}")
             except (KeyboardInterrupt, EOFError):
@@ -179,12 +168,286 @@ def cmd_init(args):
         else:
             print("\nNon-interactive session. Skipping CodeQL CLI setup.")
             setup_cql = False
+    return setup_cql, cql_ready
 
-    # 3. Initialize workspace structure & DB
+
+def _setup_model(setup_model, choice, target_models_dir, model_path, tokenizer_path, bin_dir):
+    """Download or load ONNX embedding model. Returns LocalEmbedder or None."""
+    embedder = None
+    if choice == "4":
+        return embedder
+    if setup_model:
+        print("\n--- Downloading ONNX Model Assets ---")
+        try:
+            from setup.embedder_bootstrap import EMBEDDING_MODELS
+            model_info = EMBEDDING_MODELS.get(choice, EMBEDDING_MODELS["1"])
+            target_models_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Downloading: {model_info['name']}")
+            if not model_path.exists():
+                from setup.downloader import download_file
+                download_file(model_info["model_url"], model_path, progress_callback=make_progress_callback("model.onnx"))
+            if not tokenizer_path.exists():
+                from setup.downloader import download_file
+                download_file(model_info["tokenizer_url"], tokenizer_path, progress_callback=make_progress_callback("tokenizer.json"))
+            from engines.embedder import LocalEmbedder
+            embedder = LocalEmbedder(bin_dir)
+            print("\nONNX model downloaded and initialized successfully.")
+        except Exception as e:
+            print(f"\nWarning: Could not set up embedder ({e}).")
+            print("Troubleshooting: Ensure you have active internet connection. You can re-run 'arch init' to retry.")
+    else:
+        try:
+            from engines.embedder import LocalEmbedder
+            embedder = LocalEmbedder(bin_dir)
+            print("\nONNX model verified and loaded successfully.")
+        except Exception as e:
+            print(f"\nWarning: Could not load existing embedding model ({e}). Re-run 'arch init' and choose to re-download.")
+    return embedder
+
+
+def _run_sci_indexer(project_root, arch_dir, selected_languages, embedder, force):
+    """Run SCIP indexer for selected languages. Returns True if any language was indexed."""
+    if not selected_languages:
+        return False
+    print("\n--- Running Code Graph Indexer ---")
+    db_conn = DbConnection(arch_dir / "arch.db")
+    repository = Repository(db_conn)
+    indexed_any = False
+    for lang in selected_languages:
+        index_path = ScipWrapper.run_indexer(project_root, lang)
+        if index_path:
+            print(f"  [{lang}] Index generated at {index_path}")
+            parsed = ScipWrapper.parse_index(index_path, project_root)
+            ScipWrapper.ingest_index(repository, parsed, embedder, project_root, force=force)
+            print(f"  [{lang}] {len(parsed['symbols'])} symbols ingested.")
+            indexed_any = True
+        else:
+            print(f"  [{lang}] Indexing failed. Verify environment settings.", file=sys.stderr)
+    db_conn.close()
+    return indexed_any
+
+
+def _build_codeql_dbs(project_root, arch_dir, bin_dir, selected_languages, cql_ready):
+    """Build CodeQL databases and Dart analyzer DB. Returns dart_analyzer instance."""
+    if not (cql_ready and selected_languages):
+        return None
+    codeql_lang_map = {
+        "rust": "rust", "go": "go", "java": "java", "python": "python",
+        "typescript": "javascript",
+    }
+    cql_langs = [codeql_lang_map[l] for l in selected_languages if l in codeql_lang_map]
+    dart_analyzer = None
+
+    if cql_langs:
+        try:
+            from setup.indexers import download_codeql_packs
+            download_codeql_packs(bin_dir, cql_langs)
+        except Exception as e:
+            print(f"  Warning: CodeQL pack download failed: {e}")
+
+        build_cql = True
+        if sys.stdin.isatty():
+            try:
+                lang_str = ", ".join(cql_langs)
+                cql_db_ans = input(f"\nBuild CodeQL database for {lang_str}? [Y/n]: ").strip().lower()
+                build_cql = cql_db_ans not in ("n", "no")
+            except (KeyboardInterrupt, EOFError):
+                build_cql = True
+        else:
+            build_cql = False
+
+        if "dart" in selected_languages:
+            try:
+                from engines.dart_analyzer import DartAnalyzerWrapper
+                dart_analyzer = DartAnalyzerWrapper(arch_dir)
+                if dart_analyzer.is_available():
+                    print("\n--- Running Dart Analyzer Database Generator ---")
+                    dart_analyzer.create_database(
+                        source_root=project_root,
+                        db_output_dir=arch_dir / "dart_analyzer_db",
+                        language="dart"
+                    )
+                else:
+                    print("\n[DartAnalyzer] analyzer package not available, skipping.")
+                    dart_analyzer = None
+            except ImportError:
+                print("\n[DartAnalyzer] Failed to import, skipping.")
+                dart_analyzer = None
+
+        if build_cql:
+            print("\n--- Running CodeQL Database Generator ---")
+            try:
+                from engines.codeql_wrapper import CodeQlWrapper
+                codeql = CodeQlWrapper(bin_dir)
+                cql_langs_filtered = [l for l in cql_langs if l != "dart"]
+                for lang in cql_langs_filtered:
+                    db_output_dir = arch_dir / f"codeql_db_{lang}"
+                    print(f"\n[CodeQL] Building database for {lang}...")
+                    success = codeql.create_database(
+                        source_root=project_root,
+                        db_output_dir=db_output_dir,
+                        language=lang
+                    )
+                    if success:
+                        print(f"  [{lang}] CodeQL database built successfully.")
+                    else:
+                        print(f"  [{lang}] Warning: CodeQL database build failed.")
+            except Exception as e:
+                print(f"Error creating CodeQL database: {e}")
+
+    return dart_analyzer
+
+
+def _extract_codeql_kinds(arch_dir, bin_dir, selected_languages, cql_ready):
+    """Extract symbol kinds from CodeQL databases."""
+    if not (cql_ready and selected_languages):
+        return
+    codeql_lang_map = {
+        "rust": "rust", "go": "go", "java": "java", "python": "python",
+        "typescript": "javascript",
+    }
+    print("\n--- Extracting Symbol Kinds from CodeQL ---")
+    try:
+        from engines.codeql_wrapper import CodeQlWrapper
+        codeql = CodeQlWrapper(bin_dir)
+        if codeql.is_available():
+            db_conn = DbConnection(arch_dir / "arch.db")
+            with db_conn.session() as conn:
+                for lang in selected_languages:
+                    cql_lang = codeql_lang_map.get(lang, lang)
+                    db_dir = arch_dir / f"codeql_db_{cql_lang}"
+                    if not db_dir.exists():
+                        db_dir = arch_dir / "codeql_db"
+                    if not db_dir.exists():
+                        continue
+                    kinds = codeql.extract_kinds(db_dir, cql_lang)
+                    if kinds:
+                        updated = 0
+                        for entry in kinds:
+                            sym_name, kind, file_path, line = entry["name"], entry["kind"], entry["file"], entry["line"]
+                            file_path = file_path.replace("\\", "/")
+                            res = conn.execute(
+                                "UPDATE symbols SET kind = ? WHERE kind = 'UnspecifiedKind' AND filepath LIKE ? AND start_line = ?",
+                                (kind, f"%{file_path}", line)
+                            )
+                            if res.rowcount == 0:
+                                res = conn.execute(
+                                    "UPDATE symbols SET kind = ? WHERE kind = 'UnspecifiedKind' AND (symbol LIKE ? OR symbol = ?)",
+                                    (kind, f"%{sym_name}%", sym_name)
+                                )
+                            updated += res.rowcount
+                        print(f"  [{lang}] Updated {updated} symbol kinds from CodeQL.")
+                    else:
+                        print(f"  [{lang}] No kind data extracted from CodeQL.")
+            db_conn.close()
+    except Exception as e:
+        print(f"  Warning: Kind extraction failed: {e}")
+
+
+def _link_ffi(project_root, arch_dir, bin_dir, selected_languages, cql_ready, dart_analyzer):
+    """Run FFI cross-language linking."""
+    if len(selected_languages) <= 1:
+        return
+    print("\n--- Running FFI Cross-Language Linker ---")
+    try:
+        from engines.ffi_extractor import FfiExtractor
+        from engines.ffi_matcher import FfiMatcher
+        from engines.ffi_linker import FfiLinker
+
+        codeql_wrappers = {}
+        if cql_ready:
+            from engines.codeql_wrapper import CodeQlWrapper
+            try:
+                codeql = CodeQlWrapper(bin_dir)
+                if codeql.is_available():
+                    for lang in selected_languages:
+                        if lang == "dart":
+                            continue
+                        db_dir = arch_dir / f"codeql_db_{lang}"
+                        if db_dir.exists():
+                            codeql_wrappers[lang] = codeql
+            except Exception:
+                pass
+
+        extractor = FfiExtractor(codeql_wrappers=codeql_wrappers, dart_analyzer=dart_analyzer)
+        surfaces = extractor.extract_all(project_root, languages=selected_languages)
+
+        if surfaces:
+            matcher = FfiMatcher()
+            by_lang = {}
+            for s in surfaces:
+                by_lang.setdefault(s.language, []).append(s)
+
+            all_matches = []
+            lang_keys = list(by_lang.keys())
+            for i in range(len(lang_keys)):
+                for j in range(i + 1, len(lang_keys)):
+                    matches = matcher.match(by_lang[lang_keys[i]], by_lang[lang_keys[j]])
+                    all_matches.extend(matches)
+
+            if all_matches:
+                db_conn = DbConnection(arch_dir / "arch.db")
+                repository = Repository(db_conn)
+                linker = FfiLinker(repository)
+                edges_created = linker.link(all_matches)
+                db_conn.close()
+                print(f"  FFI linking complete: {edges_created} cross-language edges created.")
+            else:
+                print("  No FFI matches found across languages.")
+        else:
+            print("  No FFI surfaces detected.")
+    except Exception as e:
+        print(f"  Warning: FFI linking failed: {e}")
+
+
+def cmd_init(args):
+    """Unified setup command: initialize workspace, download models, set up CodeQL, and index symbols."""
+    import shutil
+    project_root = get_project_root(args)
+
+    bin_dir, target_models_dir, model_path, tokenizer_path, codeql_dir, codeql_exe, model_installed, codeql_installed = _resolve_init_paths(project_root)
+
+    # 1. Workspace init
+    if getattr(args, 'force', False):
+        arch_dir = project_root / ".arch"
+        db_path = arch_dir / "arch.db"
+        if db_path.exists():
+            print(f"[Force] Deleting database at {db_path}...")
+            db_path.unlink()
+        for f in arch_dir.glob("index_*.scip"):
+            f.unlink()
+            print(f"[Force] Deleted {f.name}")
+
     arch_dir = initialize_workspace(project_root)
     print(f"\nWorkspace folder initialized at {arch_dir}")
 
-    # 3a. Setup CodeQL if requested
+    # 2. Auto-recognition
+    languages = ScipWrapper.detect_languages(project_root)
+    print("\n[Auto-Recognition] System Status:")
+    if not languages:
+        print("  - Languages: No supported languages (Rust, Dart) detected.")
+        print("    (Note: Arch works best on Dart/Flutter or Rust codebases.)")
+    else:
+        print(f"  - Detected languages: {', '.join(languages)}")
+        env_status = ScipWrapper.verify_environment(languages)
+        for lang, available in env_status.items():
+            status_str = "Available" if available else "NOT found on PATH"
+            print(f"    * {lang.capitalize()} Toolchain: {status_str}")
+            if not available:
+                if lang == "dart":
+                    print("      -> Recommendation: Please install Dart/Flutter SDK.")
+                elif lang == "rust":
+                    print("      -> Recommendation: Please install Rust (rustup/rust-analyzer).")
+    print("\n[Local Components] Dependency Status:")
+    print(f"  - ONNX Embedding Model: {'Installed' if model_installed else 'Not downloaded'}")
+    print(f"  - CodeQL CLI:           {'Installed' if codeql_installed else 'Not downloaded'}")
+
+    # 3. User selections
+    selected_languages = _select_languages(languages)
+    setup_model, model_choice = _select_model(model_installed)
+    setup_cql, cql_ready = _select_codeql(codeql_installed, codeql_dir, shutil)
+
+    # 4. Setup CodeQL
     if setup_cql:
         print("\n--- Bootstrapping CodeQL CLI ---")
         try:
@@ -196,179 +459,22 @@ def cmd_init(args):
     elif cql_ready:
         print("\nCodeQL CLI is ready (using existing installation).")
 
-    # 4. Bootstrap ONNX model if requested
-    embedder = None
-    if choice != "4":
-        if setup_model:
-            print("\n--- Downloading ONNX Model Assets ---")
-            try:
-                from setup.embedder_bootstrap import EMBEDDING_MODELS
-                
-                model_info = EMBEDDING_MODELS.get(choice, EMBEDDING_MODELS["1"])
-                target_models_dir.mkdir(parents=True, exist_ok=True)
-                print(f"Downloading: {model_info['name']}")
-                if not model_path.exists():
-                    from setup.downloader import download_file
-                    download_file(model_info["model_url"], model_path, progress_callback=make_progress_callback("model.onnx"))
-                if not tokenizer_path.exists():
-                    from setup.downloader import download_file
-                    download_file(model_info["tokenizer_url"], tokenizer_path, progress_callback=make_progress_callback("tokenizer.json"))
-                
-                from engines.embedder import LocalEmbedder
-                embedder = LocalEmbedder(bin_dir)
-                print("\nONNX model downloaded and initialized successfully.")
-            except Exception as e:
-                print(f"\nWarning: Could not set up embedder ({e}).")
-                print("Troubleshooting: Ensure you have active internet connection. You can re-run 'arch init' to retry.")
-        else:
-            try:
-                from engines.embedder import LocalEmbedder
-                embedder = LocalEmbedder(bin_dir)
-                print("\nONNX model verified and loaded successfully.")
-            except Exception as e:
-                print(f"\nWarning: Could not load existing embedding model ({e}). Re-run 'arch init' and choose to re-download.")
+    # 5. Setup model
+    embedder = _setup_model(setup_model, model_choice, target_models_dir, model_path, tokenizer_path, bin_dir)
 
-    # 5. Run indexer automatically
-    if selected_languages:
-        print("\n--- Running Code Graph Indexer ---")
-        db_conn = DbConnection(arch_dir / "arch.db")
-        repository = Repository(db_conn)
-        
-        indexed_any = False
-        for lang in selected_languages:
-            index_path = ScipWrapper.run_indexer(project_root, lang)
-            if index_path:
-                print(f"  [{lang}] Index generated at {index_path}")
-                parsed = ScipWrapper.parse_index(index_path)
-                ScipWrapper.ingest_index(repository, parsed, embedder, project_root)
-                print(f"  [{lang}] {len(parsed['symbols'])} symbols ingested.")
-                indexed_any = True
-            else:
-                print(f"  [{lang}] Indexing failed. Verify environment settings.", file=sys.stderr)
+    # 6. Run SCIP indexer
+    indexed_any = _run_sci_indexer(project_root, arch_dir, selected_languages, embedder, getattr(args, 'force', False))
 
-        db_conn.close()
+    # 7. Build CodeQL + Dart databases
+    dart_analyzer = _build_codeql_dbs(project_root, arch_dir, bin_dir, selected_languages, cql_ready)
 
-    # 5b. CodeQL Database Creation (must happen before FFI extraction)
-    if cql_ready and selected_languages:
-        # Map our language names to CodeQL language names
-        codeql_lang_map = {
-            "rust": "rust",
-            "go": "go",
-            "java": "java",
-            "python": "python",
-            "typescript": "javascript",  # CodeQL uses 'javascript' for both JS and TS
-            # Dart not supported by CodeQL
-        }
-        cql_langs = [codeql_lang_map[l] for l in selected_languages if l in codeql_lang_map]
+    # 8. Extract symbol kinds
+    _extract_codeql_kinds(arch_dir, bin_dir, selected_languages, cql_ready)
 
-        if cql_langs:
-            build_cql = True
-            if sys.stdin.isatty():
-                try:
-                    lang_str = ", ".join(cql_langs)
-                    cql_db_ans = input(f"\nBuild CodeQL database for {lang_str}? [Y/n]: ").strip().lower()
-                    build_cql = cql_db_ans not in ("n", "no")
-                except (KeyboardInterrupt, EOFError):
-                    build_cql = True
-            else:
-                build_cql = False
+    # 9. FFI cross-language linking
+    _link_ffi(project_root, arch_dir, bin_dir, selected_languages, cql_ready, dart_analyzer)
 
-            # Create Dart analyzer database (lighter, no compiler needed)
-            dart_analyzer = None
-            if "dart" in selected_languages:
-                try:
-                    from engines.dart_analyzer import DartAnalyzerWrapper
-                    dart_analyzer = DartAnalyzerWrapper(arch_dir)
-                    if dart_analyzer.is_available():
-                        print("\n--- Running Dart Analyzer Database Generator ---")
-                        dart_analyzer.create_database(
-                            source_root=project_root,
-                            db_output_dir=arch_dir / "dart_analyzer_db",
-                            language="dart"
-                        )
-                    else:
-                        print("\n[DartAnalyzer] analyzer package not available, skipping.")
-                        dart_analyzer = None
-                except ImportError:
-                    print("\n[DartAnalyzer] Failed to import, skipping.")
-                    dart_analyzer = None
-
-            if build_cql:
-                print("\n--- Running CodeQL Database Generator ---")
-                try:
-                    from engines.codeql_wrapper import CodeQlWrapper
-                    codeql = CodeQlWrapper(bin_dir)
-                    cql_langs_filtered = [l for l in cql_langs if l != "dart"]
-                    for lang in cql_langs_filtered:
-                        db_output_dir = arch_dir / f"codeql_db_{lang}"
-                        print(f"\n[CodeQL] Building database for {lang}...")
-                        success = codeql.create_database(
-                            source_root=project_root,
-                            db_output_dir=db_output_dir,
-                            language=lang
-                        )
-                        if success:
-                            print(f"  [{lang}] CodeQL database built successfully.")
-                        else:
-                            print(f"  [{lang}] Warning: CodeQL database build failed.")
-                except Exception as e:
-                    print(f"Error creating CodeQL database: {e}")
-
-    # 5c. FFI Cross-Language Linking (after databases are built)
-    if len(selected_languages) > 1:
-        print("\n--- Running FFI Cross-Language Linker ---")
-        try:
-            from engines.ffi_extractor import FfiExtractor
-            from engines.ffi_matcher import FfiMatcher
-            from engines.ffi_linker import FfiLinker
-
-            # Build CodeQL wrappers dict for each available language database
-            codeql_wrappers = {}
-            if cql_ready:
-                from engines.codeql_wrapper import CodeQlWrapper
-                try:
-                    codeql = CodeQlWrapper(bin_dir)
-                    if codeql.is_available():
-                        # Add wrapper for each language with a database
-                        for lang in selected_languages:
-                            if lang == "dart":
-                                continue  # Dart uses analyzer
-                            db_dir = arch_dir / f"codeql_db_{lang}"
-                            if db_dir.exists():
-                                codeql_wrappers[lang] = codeql
-                except Exception:
-                    pass
-
-            extractor = FfiExtractor(codeql_wrappers=codeql_wrappers, dart_analyzer=dart_analyzer)
-            surfaces = extractor.extract_all(project_root, languages=selected_languages)
-
-            if surfaces:
-                matcher = FfiMatcher()
-                by_lang = {}
-                for s in surfaces:
-                    by_lang.setdefault(s.language, []).append(s)
-
-                all_matches = []
-                lang_keys = list(by_lang.keys())
-                for i in range(len(lang_keys)):
-                    for j in range(i + 1, len(lang_keys)):
-                        matches = matcher.match(by_lang[lang_keys[i]], by_lang[lang_keys[j]])
-                        all_matches.extend(matches)
-
-                if all_matches:
-                    db_conn = DbConnection(arch_dir / "arch.db")
-                    repository = Repository(db_conn)
-                    linker = FfiLinker(repository)
-                    edges_created = linker.link(all_matches)
-                    db_conn.close()
-                    print(f"  FFI linking complete: {edges_created} cross-language edges created.")
-                else:
-                    print("  No FFI matches found across languages.")
-            else:
-                print("  No FFI surfaces detected.")
-        except Exception as e:
-            print(f"  Warning: FFI linking failed: {e}")
-
+    # 10. Summary
     if selected_languages:
         if indexed_any:
             print("\nIndexing completed successfully!")
@@ -380,37 +486,6 @@ def cmd_init(args):
         else:
             print("\nNo languages selected for indexing. Setup complete, but index could not be built.")
 
-    # 5b. CodeQL Database Creation
-    if cql_ready and "rust" in selected_languages:
-        build_cql = True
-        if sys.stdin.isatty():
-            try:
-                cql_db_ans = input("\nBuild CodeQL database for Rust? (Requires cargo compiler setup) [Y/n]: ").strip().lower()
-                build_cql = cql_db_ans not in ("n", "no")
-            except (KeyboardInterrupt, EOFError):
-                build_cql = True
-        else:
-            build_cql = False
-
-        if build_cql:
-            print("\n--- Running CodeQL Database Generator ---")
-            try:
-                from engines.codeql_wrapper import CodeQlWrapper
-                codeql = CodeQlWrapper(bin_dir)
-                db_output_dir = arch_dir / "codeql_db"
-                success = codeql.create_database(
-                    source_root=project_root,
-                    db_output_dir=db_output_dir,
-                    language="rust"
-                )
-                if success:
-                    print("CodeQL database built successfully.")
-                else:
-                    print("Warning: CodeQL database build failed. Verify build environments.")
-            except Exception as e:
-                print(f"Error creating CodeQL database: {e}")
-
-
     print("\n====================================================")
     print(" Arch setup is complete! Ready to start MCP Server. ")
     print("====================================================")
@@ -418,101 +493,56 @@ def cmd_init(args):
 
 def cmd_audit(args):
     """Run architectural compliance audit."""
-    project_root = get_project_root(args)
-    arch_dir = project_root / ".arch"
+    with workspace_session(args) as (project_root, arch_dir, repository):
+        auditor = Auditor(repository, project_root)
+        violations = auditor.run_audit()
 
-    if not arch_dir.exists():
-        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
-        sys.exit(1)
-
-    db_conn = DbConnection(arch_dir / "arch.db")
-    repository = Repository(db_conn)
-
-    auditor = Auditor(repository, project_root)
-    violations = auditor.run_audit()
-
-    if violations:
-        print(f"\nFound {len(violations)} violations:")
-        for v in violations:
-            print(f"  [{v['rule_id']}] {v['filepath']}:{v['line']} — {v['message']}")
-    else:
-        print("No violations found.")
-
-    db_conn.close()
+        if violations:
+            print(f"\nFound {len(violations)} violations:")
+            for v in violations:
+                print(f"  [{v['rule_id']}] {v['filepath']}:{v['line']} — {v['message']}")
+        else:
+            print("No violations found.")
 
 
 def cmd_report(args):
     """Generates a codebase report."""
-    project_root = get_project_root(args)
-    arch_dir = project_root / ".arch"
-
-    if not arch_dir.exists():
-        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
-        sys.exit(1)
-
-    from reporter.generator import Reporter
-    db_conn = DbConnection(arch_dir / "arch.db")
-    repository = Repository(db_conn)
-
-    reporter = Reporter(repository)
-    try:
-        report_text = reporter.generate_report(args.name, args.format)
-        print(report_text)
-    except KeyError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        db_conn.close()
+    with workspace_session(args) as (project_root, arch_dir, repository):
+        from reporter.generator import Reporter
+        reporter = Reporter(repository)
+        try:
+            report_text = reporter.generate_report(args.name, args.format)
+            print(report_text)
+        except KeyError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 def cmd_set_status(args):
     """Sets manual AI compliance status flag for a file."""
-    project_root = get_project_root(args)
-    arch_dir = project_root / ".arch"
-    if not arch_dir.exists():
-        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
-        sys.exit(1)
+    with workspace_session(args) as (project_root, arch_dir, repository):
+        status = args.status.upper()
+        if status not in ("COMPLIANT", "VIOLATION_DETECTED"):
+            print(f"Error: Invalid manual compliance status choice: {args.status}. Allowed: COMPLIANT, VIOLATION_DETECTED.", file=sys.stderr)
+            sys.exit(1)
 
-    db_conn = DbConnection(arch_dir / "arch.db")
-    repository = Repository(db_conn)
+        if status == "VIOLATION_DETECTED" and not args.justification:
+            print("Error: Justification must be provided when flagging a file as VIOLATION_DETECTED.", file=sys.stderr)
+            sys.exit(1)
 
-    status = args.status.upper()
-    if status not in ("COMPLIANT", "VIOLATION_DETECTED"):
-        print(f"Error: Invalid manual compliance status choice: {args.status}. Allowed: COMPLIANT, VIOLATION_DETECTED.", file=sys.stderr)
-        sys.exit(1)
-
-    if status == "VIOLATION_DETECTED" and not args.justification:
-        print("Error: Justification must be provided when flagging a file as VIOLATION_DETECTED.", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        filepath = args.filepath
-        file_info = repository.files.get_file(filepath)
-        if not file_info:
-            all_files = repository.files.get_all_files_metadata()
-            matched = None
-            for fp in all_files.keys():
-                if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
-                    matched = fp
-                    break
-            if matched:
-                filepath = matched
-                file_info = repository.files.get_file(filepath)
-                
-        if not file_info:
+        filepath = resolve_filepath(repository, args.filepath)
+        if not filepath:
             print(f"Error: File '{args.filepath}' is not registered in the database.", file=sys.stderr)
             sys.exit(1)
 
-        # 1. Update manual_status in files table
         repository.files.update_file_manual_status(filepath, status, args.justification)
-        
-        # 2. Sync manual violations in compliance_violations table
+
         repository.compliance.delete_manual_violations(filepath)
         if status == "VIOLATION_DETECTED":
             import hashlib
             violation_text = f"manual_logical_audit_{filepath}_{args.justification}"
             violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
-            
+
             repository.compliance.add_violation(
                 violation_id=violation_id,
                 rule_id="logical_audit",
@@ -522,51 +552,26 @@ def cmd_set_status(args):
                 message=args.justification,
                 origin="manual"
             )
-            
+
         print(f"Successfully updated manual status for '{filepath}' to '{status}'.")
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        db_conn.close()
 
 
 def cmd_set_fields(args):
     """Sets manual fields for a file."""
-    project_root = get_project_root(args)
-    arch_dir = project_root / ".arch"
-    if not arch_dir.exists():
-        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
-        sys.exit(1)
+    with workspace_session(args) as (project_root, arch_dir, repository):
+        import json
+        try:
+            fields = json.loads(args.fields_json)
+        except Exception as e:
+            print(f"Error: Invalid JSON fields payload: {e}", file=sys.stderr)
+            sys.exit(1)
 
-    db_conn = DbConnection(arch_dir / "arch.db")
-    repository = Repository(db_conn)
-
-    import json
-    try:
-        fields = json.loads(args.fields_json)
-    except Exception as e:
-        print(f"Error: Invalid JSON fields payload: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        filepath = args.filepath
-        file_info = repository.files.get_file(filepath)
-        if not file_info:
-            all_files = repository.files.get_all_files_metadata()
-            matched = None
-            for fp in all_files.keys():
-                if fp.replace("\\", "/").endswith(filepath.replace("\\", "/")):
-                    matched = fp
-                    break
-            if matched:
-                filepath = matched
-                file_info = repository.files.get_file(filepath)
-                
-        if not file_info:
+        filepath = resolve_filepath(repository, args.filepath)
+        if not filepath:
             print(f"Error: File '{args.filepath}' is not registered in the database.", file=sys.stderr)
             sys.exit(1)
 
+        file_info = repository.files.get_file(filepath)
         current_fields = {}
         if file_info.get("manual_fields"):
             try:
@@ -581,38 +586,20 @@ def cmd_set_fields(args):
                 current_fields[k] = v
 
         repository.files.update_file_manual_fields(filepath, current_fields, args.justification)
-        
+
         auditor = Auditor(repository, project_root)
         auditor.run_audit()
-        
+
         print(f"Successfully updated manual fields for '{filepath}' to: {current_fields}.")
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        db_conn.close()
+
+
 def cmd_clear_pending(args):
     """Clears all pending audit flags in the database."""
-    project_root = get_project_root(args)
-    arch_dir = project_root / ".arch"
-    if not arch_dir.exists():
-        print("Error: Workspace not initialized. Run 'arch init' first.", file=sys.stderr)
-        sys.exit(1)
-
-    db_conn = DbConnection(arch_dir / "arch.db")
-    repository = Repository(db_conn)
-
-    try:
+    with workspace_session(args) as (project_root, arch_dir, repository):
         repository.files.clear_all_pending_audits(args.justification)
-        # Run audit to update violations
         auditor = Auditor(repository, project_root)
         auditor.run_audit()
         print("Successfully cleared pending audit status for all files.")
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        db_conn.close()
 
 
 def cmd_watch(args):
@@ -732,6 +719,7 @@ def main():
     # init (unified setup + indexer)
     init_parser = subparsers.add_parser("init", help="Initialize workspace, download models, and index symbols")
     init_parser.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    init_parser.add_argument("--force", action="store_true", help="Force clean rebuild: delete DB and re-index from scratch")
     init_parser.set_defaults(func=cmd_init)
 
     # audit

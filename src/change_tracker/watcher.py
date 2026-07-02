@@ -9,6 +9,8 @@ from db.repository import Repository
 from engines.scip_wrapper import ScipWrapper
 from auditor.analyzer import Auditor
 from engines.embedder import LocalEmbedder
+from utils.exclusions import load_include_dirs, is_included
+from utils.progress import resolve_bin_dir
 
 _WATCHED_EXTENSIONS = {".rs", ".dart"}
 
@@ -30,14 +32,7 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
         print(f"Error: Database not found at {db_path}. Please run 'arch init' first.", file=sys.stderr)
         return
 
-    if getattr(sys, 'frozen', False):
-        exe_dir = Path(sys.executable).resolve().parent
-        if (exe_dir / "bin").exists():
-            bin_dir = exe_dir / "bin"
-        else:
-            bin_dir = exe_dir.parent / "bin"
-    else:
-        bin_dir = Path(__file__).resolve().parent.parent.parent / "bin"
+    bin_dir = resolve_bin_dir()
     embedder = None
     try:
         embedder = LocalEmbedder(bin_dir)
@@ -48,6 +43,8 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
     pending: bool = False
     changed_files: Set[Path] = set()
 
+    include_dirs = load_include_dirs(project_root)
+
     class Handler(FileSystemEventHandler):
         def on_any_event(self, event):
             nonlocal last_trigger, pending
@@ -55,7 +52,7 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
                 return
 
             path = Path(os.fsdecode(event.src_path))
-            
+
             # Check exclusions
             try:
                 rel_parts = path.relative_to(project_root).parts
@@ -67,7 +64,11 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
                 return
             if any(part in ("venv", ".venv", "bin", "build", "target", "node_modules") for part in rel_parts):
                 return
-            
+
+            # Filter by include_dirs if configured
+            if include_dirs and not any(part in include_dirs for part in rel_parts):
+                return
+
             if path.suffix.lower() not in _WATCHED_EXTENSIONS:
                 return
 
@@ -103,7 +104,7 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
                         print(f"[arch watch] Running indexer for {lang}...")
                         index_path = ScipWrapper.run_indexer(project_root, lang)
                         if index_path:
-                            parsed = ScipWrapper.parse_index(index_path)
+                            parsed = ScipWrapper.parse_index(index_path, project_root)
                             ScipWrapper.ingest_index(repository, parsed, embedder, project_root)
                             indexed_any = True
                     

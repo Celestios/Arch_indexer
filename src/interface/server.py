@@ -17,25 +17,41 @@ from auditor.compiler import ContextCompiler
 from auditor.validator import ConfigValidator
 from engines.embedder import LocalEmbedder
 from engines.communities import detect_communities
+from utils.progress import resolve_bin_dir
 
-# Resolve project root: explicit arg > env var > CWD
-if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-    PROJECT_ROOT = Path(sys.argv[1]).resolve()
-elif os.environ.get("ARCH_PROJECT_ROOT"):
-    PROJECT_ROOT = Path(os.environ["ARCH_PROJECT_ROOT"]).resolve()
-else:
-    PROJECT_ROOT = Path.cwd().resolve()
+from contextlib import contextmanager
+
+# Resolve project root: env var > explicit arg > CWD
+# When invoked via "arch mcp <path>", sys.argv is [exe, "mcp", "<path>"]
+# When invoked directly as "python server.py <path>", sys.argv is [server.py, "<path>"]
+def _resolve_project_root() -> Path:
+    if os.environ.get("ARCH_PROJECT_ROOT"):
+        return Path(os.environ["ARCH_PROJECT_ROOT"]).resolve()
+    if len(sys.argv) > 2 and not sys.argv[2].startswith("-"):
+        return Path(sys.argv[2]).resolve()
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        return Path(sys.argv[1]).resolve()
+    return Path.cwd().resolve()
+
+PROJECT_ROOT = _resolve_project_root()
 
 ARCH_DIR = PROJECT_ROOT / ".arch"
 DB_PATH = ARCH_DIR / "arch.db"
 
-def get_bin_dir() -> Path:
-    if getattr(sys, 'frozen', False):
-        exe_dir = Path(sys.executable).resolve().parent
-        if (exe_dir / "bin").exists():
-            return exe_dir / "bin"
-        return exe_dir.parent / "bin"
-    return src_dir.parent / "bin"
+get_bin_dir = resolve_bin_dir
+
+
+@contextmanager
+def get_repository():
+    """Context manager that yields a Repository connected to the arch database."""
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Arch database not found at {DB_PATH}. Please run 'arch init' first.")
+    db_conn = DbConnection(DB_PATH)
+    repository = Repository(db_conn)
+    try:
+        yield repository, db_conn
+    finally:
+        db_conn.close()
 
 # Initialize FastMCP Server
 mcp = FastMCP("arch")
@@ -54,88 +70,74 @@ def query(text: Union[List[str], str], limit: int = 5) -> str:
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
 
-    # Force queries into a list
     queries = [text] if isinstance(text, str) else text
 
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
     embedder = None
-
     try:
-        bin_dir = get_bin_dir()
-        embedder = LocalEmbedder(bin_dir)
+        embedder = LocalEmbedder(get_bin_dir())
     except Exception as e:
-        db_conn.close()
         return f"Error: Could not initialize embedding engine: {e}"
 
     md = []
     try:
-        for q in queries:
-            # 1. Keyword search on symbol (nodes) names
-            with db_conn.session() as conn:
-                keyword_symbols = conn.execute(
-                    "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE LOWER(symbol) LIKE ? LIMIT ?",
-                    (f"%{q.lower()}%", limit)
-                ).fetchall()
-                
-                # 2. Keyword search on filepaths
-                file_matches = conn.execute(
-                    "SELECT filepath, language, status FROM files WHERE LOWER(filepath) LIKE ? LIMIT ?",
-                    (f"%{q.lower()}%", limit)
-                ).fetchall()
+        with get_repository() as (repository, db_conn):
+            for q in queries:
+                with db_conn.session() as conn:
+                    keyword_symbols = conn.execute(
+                        "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE LOWER(symbol) LIKE ? LIMIT ?",
+                        (f"%{q.lower()}%", limit)
+                    ).fetchall()
 
-            # 3. Semantic search over docstrings (vector similarity)
-            results = []
-            try:
-                embedding = embedder.embed(q)
-                results = repository.symbols.semantic_search(embedding, limit=limit)
-            except Exception as e:
-                # Fallback if embedding generation fails
-                pass
+                    file_matches = conn.execute(
+                        "SELECT filepath, language, status FROM files WHERE LOWER(filepath) LIKE ? LIMIT ?",
+                        (f"%{q.lower()}%", limit)
+                    ).fetchall()
 
-            md.append(f"## Search Results for: \"{q}\"\n")
-            
-            # Section 1: Symbol Name Matches (Keyword)
-            md.append("### 1. Symbol Name Matches (Keyword Search)")
-            if not keyword_symbols:
-                md.append("*No matching symbols found by name.*\n")
-            else:
-                for idx, row in enumerate(keyword_symbols, 1):
-                    md.append(f"{idx}. **{row[0]}**")
-                    md.append(f"   - **File**: `{row[1]}`")
-                    md.append(f"   - **Kind**: `{row[2]}`")
-                    if row[3]:
-                        md.append(f"   - **Signature**: `{row[3]}`")
-                md.append("")
-                
-            # Section 2: Semantic Matches (Docstrings)
-            md.append("### 2. Semantic Docstring Matches")
-            if not results:
-                md.append("*No semantically matching symbols found in docstrings.*\n")
-            else:
-                for idx, res in enumerate(results, 1):
-                    md.append(f"{idx}. **{res['symbol']}** (Similarity: {res['similarity']:.2f})")
-                    md.append(f"   - **File**: `{res['filepath']}`")
-                    md.append(f"   - **Kind**: `{res['kind']}`")
-                    if res['docstring']:
-                        doc = res['docstring'].strip().replace("\n", "\n     ")
-                        md.append(f"   - **Doc**: {doc}")
-                md.append("")
-                
-            # Section 3: Filepath Matches
-            md.append("### 3. Filepath Matches")
-            if not file_matches:
-                md.append("*No matching files found by path.*\n")
-            else:
-                for idx, row in enumerate(file_matches, 1):
-                    md.append(f"{idx}. **{row[0]}**")
-                    md.append(f"   - **Language**: `{row[1]}`")
-                    md.append(f"   - **Audit Status**: `{row[2]}`")
-                md.append("")
+                results = []
+                try:
+                    embedding = embedder.embed(q)
+                    results = repository.symbols.semantic_search(embedding, limit=limit)
+                except Exception:
+                    pass
+
+                md.append(f"## Search Results for: \"{q}\"\n")
+
+                md.append("### 1. Symbol Name Matches (Keyword Search)")
+                if not keyword_symbols:
+                    md.append("*No matching symbols found by name.*\n")
+                else:
+                    for idx, row in enumerate(keyword_symbols, 1):
+                        md.append(f"{idx}. **{row[0]}**")
+                        if row[3]:
+                            md.append(f"   - **Signature**: `{row[3]}`")
+                    md.append("")
+
+                md.append("### 2. Semantic Docstring Matches")
+                if not results:
+                    md.append("*No semantically matching symbols found in docstrings.*\n")
+                else:
+                    for idx, res in enumerate(results, 1):
+                        md.append(f"{idx}. **{res['symbol']}** (Similarity: {res['similarity']:.2f})")
+                        md.append(f"   - **File**: `{res['filepath']}`")
+                        md.append(f"   - **Kind**: `{res['kind']}`")
+                        if res['docstring']:
+                            doc = res['docstring'].strip().replace("\n", "\n     ")
+                            md.append(f"   - **Doc**: {doc}")
+                    md.append("")
+
+                md.append("### 3. Filepath Matches")
+                if not file_matches:
+                    md.append("*No matching files found by path.*\n")
+                else:
+                    for idx, row in enumerate(file_matches, 1):
+                        md.append(f"{idx}. **{row[0]}**")
+                        md.append(f"   - **Language**: `{row[1]}`")
+                        md.append(f"   - **Audit Status**: `{row[2]}`")
+                    md.append("")
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error executing query search: {e}"
-    finally:
-        db_conn.close()
 
     return "\n".join(md)
 
@@ -158,10 +160,6 @@ def context(filepaths: Union[List[str], str]) -> str:
       - A comma-separated filepath string (e.g. 'file1.dart, file2.dart')
       - A list/array of filepaths
     """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    # Normalize files to a list
     if isinstance(filepaths, str):
         if "," in filepaths:
             paths = [p.strip() for p in filepaths.split(",") if p.strip()]
@@ -170,98 +168,95 @@ def context(filepaths: Union[List[str], str]) -> str:
     else:
         paths = filepaths
 
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-
     out_md = []
 
     try:
-        for fp in paths:
-            symbols = repository.symbols.get_symbols_in_file(fp)
-            # Resolve relative file name match if not found exactly
-            if not symbols:
-                all_files = repository.files.get_all_files_metadata()
-                matched = None
-                for real_fp in all_files.keys():
-                    if real_fp.replace("\\", "/").endswith(fp.replace("\\", "/")):
-                        matched = real_fp
-                        break
-                if matched:
-                    fp = matched
-                    symbols = repository.symbols.get_symbols_in_file(fp)
+        with get_repository() as (repository, db_conn):
+            for fp in paths:
+                symbols = repository.symbols.get_symbols_in_file(fp)
+                if not symbols:
+                    all_files = repository.files.get_all_files_metadata()
+                    matched = None
+                    for real_fp in all_files.keys():
+                        if real_fp.replace("\\", "/").endswith(fp.replace("\\", "/")):
+                            matched = real_fp
+                            break
+                    if matched:
+                        fp = matched
+                        symbols = repository.symbols.get_symbols_in_file(fp)
 
-            if not symbols:
-                out_md.append(f"## File Index: `{fp}`\n\n*No indexed symbols found in file. Make sure the file exists and is indexed.*")
-                continue
+                if not symbols:
+                    out_md.append(f"## File Index: `{fp}`\n\n*No indexed symbols found in file. Make sure the file exists and is indexed.*")
+                    continue
 
-            with db_conn.session() as conn:
-                occs = conn.execute(
-                    """
-                    SELECT symbol, start_line, end_line, role 
-                    FROM occurrences 
-                    WHERE replace(filepath, '\\', '/') = ? OR filepath = ?
-                    """,
-                    (fp.replace("\\", "/"), fp)
-                ).fetchall()
+                with db_conn.session() as conn:
+                    occs = conn.execute(
+                        """
+                        SELECT symbol, start_line, end_line, role
+                        FROM occurrences
+                        WHERE replace(filepath, '\\', '/') = ? OR filepath = ?
+                        """,
+                        (fp.replace("\\", "/"), fp)
+                    ).fetchall()
 
-            # Map symbols to their occurrences (prefer role = 1: SCIP Definition)
-            symbol_to_lines = {}
-            for sym_name, start_line, end_line, role in occs:
-                if sym_name not in symbol_to_lines or role == 1:
-                    symbol_to_lines[sym_name] = (start_line, end_line)
+                symbol_to_lines = {}
+                for sym_name, start_line, end_line, role in occs:
+                    if sym_name not in symbol_to_lines or role == 1:
+                        effective_end = end_line if end_line > start_line else start_line
+                        symbol_to_lines[sym_name] = (start_line, effective_end)
 
-            classes = []
-            methods_and_funcs = []
+                classes = []
+                methods_and_funcs = []
 
-            for sym in symbols:
-                sym_name = sym["symbol"]
-                line_range = ""
-                if sym_name in symbol_to_lines:
-                    start_line, end_line = symbol_to_lines[sym_name]
-                    line_range = f"L{start_line}-{end_line}"
+                for sym in symbols:
+                    sym_name = sym["symbol"]
+                    line_range = ""
+                    if sym_name in symbol_to_lines:
+                        start_line, end_line = symbol_to_lines[sym_name]
+                        line_range = f"L{start_line}-{end_line}"
 
-                sym_data = {
-                    "symbol": sym_name,
-                    "signature": sym["signature"],
-                    "docstring": sym["docstring"],
-                    "line_range": line_range,
-                    "kind": sym["kind"]
-                }
+                    sym_data = {
+                        "symbol": sym_name,
+                        "signature": sym["signature"],
+                        "docstring": sym["docstring"],
+                        "line_range": line_range,
+                        "kind": sym["kind"]
+                    }
 
-                if sym["kind"].lower() in ("class", "struct", "interface"):
-                    classes.append(sym_data)
-                else:
-                    methods_and_funcs.append(sym_data)
+                    if sym["kind"].lower() in ("class", "struct", "interface"):
+                        classes.append(sym_data)
+                    else:
+                        methods_and_funcs.append(sym_data)
 
-            md = [f"## File Index: `{fp}`\n"]
+                md = [f"## File Index: `{fp}`\n"]
 
-            if classes:
-                md.append("### Classes")
-                for cl in classes:
-                    range_str = f" [{cl['line_range']}]" if cl['line_range'] else ""
-                    md.append(f"- **{cl['symbol']}**{range_str} ({cl['kind']})")
-                    if cl['docstring']:
-                        doc = cl['docstring'].strip().split("\n")[0]
-                        md.append(f"  * {doc}")
-                md.append("")
+                if classes:
+                    md.append("### Classes")
+                    for cl in classes:
+                        range_str = f" [{cl['line_range']}]" if cl['line_range'] else ""
+                        md.append(f"- **{cl['symbol']}**{range_str} ({cl['kind']})")
+                        if cl['docstring']:
+                            doc = cl['docstring'].strip().split("\n")[0]
+                            md.append(f"  * {doc}")
+                    md.append("")
 
-            if methods_and_funcs:
-                md.append("### Methods & Functions")
-                for mf in methods_and_funcs:
-                    range_str = f" [{mf['line_range']}]" if mf['line_range'] else ""
-                    md.append(f"- **{mf['symbol']}**{range_str}")
-                    if mf['signature']:
-                        md.append(f"  * *Signature*: `{mf['signature']}`")
-                    if mf['docstring']:
-                        doc = mf['docstring'].strip().split("\n")[0]
-                        md.append(f"  * *Docstring*: {doc}")
-                md.append("")
+                if methods_and_funcs:
+                    md.append("### Methods & Functions")
+                    for mf in methods_and_funcs:
+                        range_str = f" [{mf['line_range']}]" if mf['line_range'] else ""
+                        md.append(f"- **{mf['symbol']}**{range_str}")
+                        if mf['signature']:
+                            md.append(f"  * *Signature*: `{mf['signature']}`")
+                        if mf['docstring']:
+                            doc = mf['docstring'].strip().split("\n")[0]
+                            md.append(f"  * *Docstring*: {doc}")
+                    md.append("")
 
-            out_md.append("\n".join(md))
+                out_md.append("\n".join(md))
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error retrieving context: {e}"
-    finally:
-        db_conn.close()
 
     return "\n\n---\n\n".join(out_md)
 
@@ -278,18 +273,13 @@ def impact(symbol: str, max_depth: int = 3) -> str:
         that control many downstream targets, to understand what components the change
         might impact and prevent regressions.
     """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-
     try:
-        closure = repository.edges.get_transitive_closure(symbol, max_depth=max_depth)
+        with get_repository() as (repository, db_conn):
+            closure = repository.edges.get_transitive_closure(symbol, max_depth=max_depth)
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error computing blast radius: {e}"
-    finally:
-        db_conn.close()
 
     upstream = closure.get("upstream", [])
     downstream = closure.get("downstream", [])
@@ -333,33 +323,27 @@ def audit() -> str:
     if not DB_PATH.exists():
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
 
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-    auditor = Auditor(repository, PROJECT_ROOT)
-
     try:
-        # Run static compliance check (updates files status and returns automatic violations)
-        violations = auditor.run_audit()
-        
-        # Also fetch all violations (both manual/AI and automatic) from compliance_violations table
-        all_violations = repository.compliance.get_violations()
+        with get_repository() as (repository, db_conn):
+            auditor = Auditor(repository, PROJECT_ROOT)
+            violations = auditor.run_audit()
+            all_violations = repository.compliance.get_violations()
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error running compliance audit: {e}"
-    finally:
-        db_conn.close()
 
     if not all_violations:
         pending_count = repository.files.get_files_pending_audit_count() if hasattr(repository.files, 'get_files_pending_audit_count') else 0
         pending_msg = f"\n\n*{pending_count} file(s) pending deep audit.*" if pending_count > 0 else ""
         return f"## Compliance Audit\n\n**No boundary rule violations found** project-wide.{pending_msg}"
 
-    md = [f"## Compliance Audit Report: {len(all_violations)} violation(s) found\n"]
+    md = [f"## Compliance Audit: {len(all_violations)} finding(s)\n"]
     for i, v in enumerate(all_violations, 1):
-        origin_str = f" [{v['origin'].upper()}]" if v.get("origin") else ""
-        md.append(f"{i}. **[{v['rule_id']}]**{origin_str} (File: `{v['filepath']}:L{v['line']}`)")
+        md.append(f"{i}. **[{v['rule_id']}]** (`{v['filepath']}:L{v['line']}`)")
         if v['symbol']:
-            md.append(f"   - **Symbol**: `{v['symbol']}`")
-        md.append(f"   - **Violation**: {v['message']}")
+            md.append(f"   - Symbol: `{v['symbol']}`")
+        md.append(f"   - {v['message']}")
         md.append("")
     return "\n".join(md)
 
@@ -375,19 +359,14 @@ def map() -> str:
       - Use map at the start of a task when no information for the project is available.
         It gives a bird's-eye view of the project and module dependencies.
     """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-
     try:
-        totals = repository.metrics.get_repo_totals()
-        communities, connections, degrees = detect_communities(repository)
+        with get_repository() as (repository, db_conn):
+            totals = repository.metrics.get_repo_totals()
+            communities, connections, degrees = detect_communities(repository)
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error building architectural graph map: {e}"
-    finally:
-        db_conn.close()
 
     md = ["## Repository Architectural Blueprint Map\n"]
 
@@ -439,56 +418,45 @@ def trace(source: str, sink: str) -> str:
       - Supports cross-language traces: any language -> FFI -> any other language
       - Auto-detects languages from symbol names or file paths
     """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-
     try:
-        from engines.dart_analyzer import CombinedDataflowTracer, DartAnalyzerDB
-        from engines.codeql_wrapper import CodeQlWrapper
+        with get_repository() as (repository, db_conn):
+            from engines.dart_analyzer import CombinedDataflowTracer, DartAnalyzerDB
+            from engines.codeql_wrapper import CodeQlWrapper
 
-        # Initialize analyzer DB if it exists (for Dart)
-        analyzer_db = None
-        dart_db_path = ARCH_DIR / "dart_analyzer_db"
-        if dart_db_path.exists():
-            analyzer_db = DartAnalyzerDB(ARCH_DIR)
+            analyzer_db = None
+            dart_db_path = ARCH_DIR / "dart_analyzer_db"
+            if dart_db_path.exists():
+                analyzer_db = DartAnalyzerDB(ARCH_DIR)
 
-        # Initialize CodeQL wrappers for each available language database
-        codeql_wrappers = {}
-        try:
-            bin_dir = get_bin_dir()
-            # Check for language-specific and generic CodeQL databases
-            for db_entry in ARCH_DIR.iterdir():
-                if db_entry.is_dir() and db_entry.name.startswith("codeql_db"):
-                    # Extract language from dir name (e.g., "codeql_db_rust" -> "rust")
-                    lang = db_entry.name.replace("codeql_db_", "").replace("codeql_db", "")
-                    if not lang:
-                        lang = "generic"
-                    try:
-                        codeql = CodeQlWrapper(bin_dir)
-                        if codeql.is_available():
-                            codeql_wrappers[lang] = codeql
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+            codeql_wrappers = {}
+            try:
+                bin_dir = get_bin_dir()
+                for db_entry in ARCH_DIR.iterdir():
+                    if db_entry.is_dir() and db_entry.name.startswith("codeql_db"):
+                        lang = db_entry.name.replace("codeql_db_", "").replace("codeql_db", "")
+                        if not lang:
+                            lang = "generic"
+                        try:
+                            codeql = CodeQlWrapper(bin_dir)
+                            if codeql.is_available():
+                                codeql_wrappers[lang] = codeql
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
-        # Use combined tracer (language-agnostic: analyzer + CodeQL + FFI_Binds)
-        tracer = CombinedDataflowTracer(
-            project_root=ARCH_DIR.parent,
-            arch_dir=ARCH_DIR,
-            analyzer_db=analyzer_db,
-            codeql_wrappers=codeql_wrappers,
-            repository=repository
-        )
-        steps = tracer.trace(source, sink)
-
+            tracer = CombinedDataflowTracer(
+                project_root=ARCH_DIR.parent,
+                arch_dir=ARCH_DIR,
+                analyzer_db=analyzer_db,
+                codeql_wrappers=codeql_wrappers,
+                repository=repository
+            )
+            steps = tracer.trace(source, sink)
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error running data flow trace: {e}"
-    finally:
-        db_conn.close()
 
     if not steps:
         return f"## Data Flow Trace\n\nNo flow path found between source `{source}` and sink `{sink}`."
@@ -514,20 +482,15 @@ def report(name: str, format: str = "markdown") -> str:
       - Similar to compile_context, but provides less direct control and a broader view of
         the workspace across different aspects.
     """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-
     try:
-        from reporter.generator import Reporter
-        reporter = Reporter(repository)
-        return reporter.generate_report(name, format)
+        with get_repository() as (repository, db_conn):
+            from reporter.generator import Reporter
+            reporter = Reporter(repository)
+            return reporter.generate_report(name, format)
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error generating report: {e}"
-    finally:
-        db_conn.close()
 
 
 @mcp.tool()
@@ -552,172 +515,146 @@ def set_fields(
       - Negative Constraint: Do NOT modify the ontology config.json file directly without
         first consulting the user.
     """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-
-    # 1. Load config for ontology validation
     config_path = PROJECT_ROOT / ".arch" / "config.json"
     if not config_path.exists():
-        db_conn.close()
         return "Error: Ontology config not found at .arch/config.json. Please run 'arch init' first."
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
     except Exception as e:
-        db_conn.close()
         return f"Error loading config.json: {e}"
 
-    # Helper function to resolve filepath to database matching key
-    def resolve_filepath(fp: str) -> Optional[str]:
-        file_info = repository.files.get_file(fp)
-        if file_info:
-            return fp
-        all_files = repository.files.get_all_files_metadata()
-        for real_fp in all_files.keys():
-            if real_fp.replace("\\", "/").endswith(fp.replace("\\", "/")):
-                return real_fp
-        return None
-
-    # Helper to validate a specific file field updates against the config ontology
-    def validate_file_fields(fp: str, fields: dict) -> Optional[str]:
-        normalized_path = fp.replace("\\", "/")
-        matching_prefix = None
-        for prefix in config.keys():
-            if prefix == ".":
-                if matching_prefix is None:
-                    matching_prefix = "."
-            elif normalized_path.startswith(prefix):
-                if matching_prefix is None or len(prefix) > len(matching_prefix):
-                    matching_prefix = prefix
-        
-        if not matching_prefix:
-            return f"No configuration prefix matches file '{fp}'."
-            
-        prefix_conf = config[matching_prefix]
-        manual_cfg = prefix_conf.get("manual_fields", {})
-        auto_cfg = prefix_conf.get("automatic_fields", {})
-
-        for f_name, val in fields.items():
-            if f_name == "status":
-                if str(val).upper() not in ("COMPLIANT", "VIOLATION"):
-                    return f"Invalid value '{val}' for field 'status'. Allowed values: 'COMPLIANT', 'VIOLATION'."
-                continue
-
-            if f_name in auto_cfg:
-                return f"Field '{f_name}' in '{fp}' is an automatic field defined in the ontology and cannot be modified manually."
-
-            if f_name not in manual_cfg:
-                return f"Field '{f_name}' is not defined as a manual field in the ontology for prefix '{matching_prefix}'."
-
-            field_conf = manual_cfg[f_name]
-            allowed_values = field_conf.get("values")
-            if allowed_values is not None:
-                if val not in allowed_values:
-                    return f"Invalid value '{val}' for manual field '{f_name}' in '{fp}'. Allowed values: {allowed_values}."
-            else:
-                if not isinstance(val, str):
-                    return f"Value for manual field '{f_name}' in '{fp}' must be a string."
-        return None
-
-    # Helper to apply the updates to database
-    def apply_updates(fp: str, fields: dict):
-        status_val = fields.get("status")
-        manual_updates = {k: v for k, v in fields.items() if k != "status"}
-
-        if status_val is not None:
-            status_db = "VIOLATION_DETECTED" if status_val.upper() == "VIOLATION" else "COMPLIANT"
-            repository.files.update_file_manual_status(fp, status_db, justification)
-            
-            repository.compliance.delete_manual_violations(fp)
-            if status_db == "VIOLATION_DETECTED":
-                import hashlib
-                violation_text = f"manual_logical_audit_{fp}_{justification or ''}"
-                violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
-                repository.compliance.add_violation(
-                    violation_id=violation_id,
-                    rule_id="logical_audit",
-                    symbol=None,
-                    filepath=fp,
-                    line=1,
-                    message=justification or "Manual compliance violation flagged",
-                    origin="manual"
-                )
-
-        if manual_updates:
-            file_info = repository.files.get_file(fp)
-            current_fields = {}
-            if file_info and file_info.get("manual_fields"):
-                try:
-                    current_fields = json.loads(file_info["manual_fields"])
-                except Exception:
-                    pass
-            for k, v in manual_updates.items():
-                if v is None:
-                    current_fields.pop(k, None)
-                else:
-                    current_fields[k] = v
-            repository.files.update_file_manual_fields(fp, current_fields, justification)
-
     try:
-        updates_map = {}
-        if update is None:
-            # Batch update from JSON file
-            path_obj = Path(target)
-            if not path_obj.is_absolute():
-                path_obj = PROJECT_ROOT / path_obj
-            if not path_obj.exists():
-                return f"Error: JSON file not found at {path_obj}"
-            with open(path_obj, "r", encoding="utf-8") as f:
-                raw_json = json.load(f)
-            if not isinstance(raw_json, dict):
-                return "Error: JSON file must contain a top-level object mapping filepaths to fields."
-            updates_map = raw_json
-        else:
-            # Single field update
-            if ":" not in update:
-                return "Error: Update parameter must be in the format 'field:value'."
-            field, val = update.split(":", 1)
-            field = field.strip()
-            val = val.strip()
-            if val.lower() == "true":
-                val = True
-            elif val.lower() == "false":
-                val = False
-            elif val.lower() == "null":
-                val = None
-            
-            updates_map = {target: {field: val}}
+        with get_repository() as (repository, db_conn):
+            def resolve_filepath_local(fp: str) -> Optional[str]:
+                file_info = repository.files.get_file(fp)
+                if file_info:
+                    return fp
+                all_files = repository.files.get_all_files_metadata()
+                for real_fp in all_files.keys():
+                    if real_fp.replace("\\", "/").endswith(fp.replace("\\", "/")):
+                        return real_fp
+                return None
 
-        # Resolve paths and validate first (atomic validations)
-        resolved_updates = {}
-        for raw_fp, fields in updates_map.items():
-            real_fp = resolve_filepath(raw_fp)
-            if not real_fp:
-                return f"Error: File '{raw_fp}' is not registered in the database. Please index it first."
-            
-            val_err = validate_file_fields(real_fp, fields)
-            if val_err:
-                return f"Ontology Validation Error: {val_err}"
-            
-            resolved_updates[real_fp] = fields
+            def validate_file_fields(fp: str, fields: dict) -> Optional[str]:
+                normalized_path = fp.replace("\\", "/")
+                matching_prefix = None
+                for prefix in config.keys():
+                    if prefix == ".":
+                        if matching_prefix is None:
+                            matching_prefix = "."
+                    elif normalized_path.startswith(prefix):
+                        if matching_prefix is None or len(prefix) > len(matching_prefix):
+                            matching_prefix = prefix
 
-        # Apply updates
-        for real_fp, fields in resolved_updates.items():
-            apply_updates(real_fp, fields)
+                if not matching_prefix:
+                    return f"No configuration prefix matches file '{fp}'."
 
-        # Run compliance audit to propagate changes
-        auditor = Auditor(repository, PROJECT_ROOT)
-        auditor.run_audit()
+                prefix_conf = config[matching_prefix]
+                manual_cfg = prefix_conf.get("manual_fields", {})
+                auto_cfg = prefix_conf.get("automatic_fields", {})
 
-        return f"Successfully updated manual fields and compliance status for {len(resolved_updates)} file(s) and re-ran audit."
+                for f_name, val in fields.items():
+                    if f_name == "status":
+                        if str(val).upper() not in ("COMPLIANT", "VIOLATION"):
+                            return f"Invalid value '{val}' for field 'status'. Allowed values: 'COMPLIANT', 'VIOLATION'."
+                        continue
+                    if f_name in auto_cfg:
+                        return f"Field '{f_name}' in '{fp}' is an automatic field defined in the ontology and cannot be modified manually."
+                    if f_name not in manual_cfg:
+                        return f"Field '{f_name}' is not defined as a manual field in the ontology for prefix '{matching_prefix}'."
+                    field_conf = manual_cfg[f_name]
+                    allowed_values = field_conf.get("values")
+                    if allowed_values is not None:
+                        if val not in allowed_values:
+                            return f"Invalid value '{val}' for manual field '{f_name}' in '{fp}'. Allowed values: {allowed_values}."
+                    else:
+                        if not isinstance(val, str):
+                            return f"Value for manual field '{f_name}' in '{fp}' must be a string."
+                return None
+
+            def apply_updates(fp: str, fields: dict):
+                status_val = fields.get("status")
+                manual_updates = {k: v for k, v in fields.items() if k != "status"}
+
+                if status_val is not None:
+                    status_db = "VIOLATION_DETECTED" if status_val.upper() == "VIOLATION" else "COMPLIANT"
+                    repository.files.update_file_manual_status(fp, status_db, justification)
+                    repository.compliance.delete_manual_violations(fp)
+                    if status_db == "VIOLATION_DETECTED":
+                        import hashlib
+                        violation_text = f"manual_logical_audit_{fp}_{justification or ''}"
+                        violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
+                        repository.compliance.add_violation(
+                            violation_id=violation_id, rule_id="logical_audit",
+                            symbol=None, filepath=fp, line=1,
+                            message=justification or "Manual compliance violation flagged",
+                            origin="manual"
+                        )
+
+                if manual_updates:
+                    file_info = repository.files.get_file(fp)
+                    current_fields = {}
+                    if file_info and file_info.get("manual_fields"):
+                        try:
+                            current_fields = json.loads(file_info["manual_fields"])
+                        except Exception:
+                            pass
+                    for k, v in manual_updates.items():
+                        if v is None:
+                            current_fields.pop(k, None)
+                        else:
+                            current_fields[k] = v
+                    repository.files.update_file_manual_fields(fp, current_fields, justification)
+
+            updates_map = {}
+            if update is None:
+                path_obj = Path(target)
+                if not path_obj.is_absolute():
+                    path_obj = PROJECT_ROOT / path_obj
+                if not path_obj.exists():
+                    return f"Error: JSON file not found at {path_obj}"
+                with open(path_obj, "r", encoding="utf-8") as f:
+                    raw_json = json.load(f)
+                if not isinstance(raw_json, dict):
+                    return "Error: JSON file must contain a top-level object mapping filepaths to fields."
+                updates_map = raw_json
+            else:
+                if ":" not in update:
+                    return "Error: Update parameter must be in the format 'field:value'."
+                field, val = update.split(":", 1)
+                field = field.strip()
+                val = val.strip()
+                if val.lower() == "true":
+                    val = True
+                elif val.lower() == "false":
+                    val = False
+                elif val.lower() == "null":
+                    val = None
+                updates_map = {target: {field: val}}
+
+            resolved_updates = {}
+            for raw_fp, fields in updates_map.items():
+                real_fp = resolve_filepath_local(raw_fp)
+                if not real_fp:
+                    return f"Error: File '{raw_fp}' is not registered in the database. Please index it first."
+                val_err = validate_file_fields(real_fp, fields)
+                if val_err:
+                    return f"Ontology Validation Error: {val_err}"
+                resolved_updates[real_fp] = fields
+
+            for real_fp, fields in resolved_updates.items():
+                apply_updates(real_fp, fields)
+
+            auditor = Auditor(repository, PROJECT_ROOT)
+            auditor.run_audit()
+
+            return f"Successfully updated manual fields and compliance status for {len(resolved_updates)} file(s) and re-ran audit."
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error updating fields: {e}"
-    finally:
-        db_conn.close()
 
 
 @mcp.tool()
@@ -730,26 +667,20 @@ def clear_pending_audits() -> str:
       - This tool operates on the database's compliance state. Run this tool only when instructed
         by the user's prompt or other skills on how and where to use it.
     """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-
     try:
-        repository.files.clear_all_pending_audits("Cleared manually via API")
-        # Run audit to clean up all pending_audit violations
-        auditor = Auditor(repository, PROJECT_ROOT)
-        auditor.run_audit()
-        return "Successfully cleared pending audit status for all files."
+        with get_repository() as (repository, db_conn):
+            repository.files.clear_all_pending_audits("Cleared manually via API")
+            auditor = Auditor(repository, PROJECT_ROOT)
+            auditor.run_audit()
+            return "Successfully cleared pending audit status for all files."
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error clearing pending audits: {e}"
-    finally:
-        db_conn.close()
 
 
 @mcp.tool()
-def index(target: str) -> str:
+def lookup(target: str) -> str:
     """
     Looks up details, metadata, and relationships for a file module or code symbol.
     The tool automatically detects whether the target is a file path (e.g. 'auditor.analyzer' 
@@ -759,12 +690,6 @@ def index(target: str) -> str:
       - Use to retrieve symbol definitions, occurrences, and relationships for any target symbol
         or file module before reading or modifying it.
     """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
-    db_conn = DbConnection(DB_PATH)
-
-    # Normalize target for file matching (replace dots with slashes)
     target_normalized = target.strip()
     target_slashes = target_normalized.replace(".", "/")
 
@@ -774,135 +699,142 @@ def index(target: str) -> str:
     matching_files = []
 
     try:
-        with db_conn.session() as conn:
-            # A. Search symbols table
-            sym_row = conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring, body_hash FROM symbols WHERE symbol = ?",
-                (target_normalized,)
-            ).fetchone()
-            if sym_row:
-                exact_symbol = sym_row
-            else:
-                # Substring search
-                sym_rows = conn.execute(
-                    "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE symbol LIKE ? LIMIT 10",
-                    (f"%{target_normalized}%",)
-                ).fetchall()
-                matching_symbols = sym_rows
+        with get_repository() as (repository, db_conn):
+            with db_conn.session() as conn:
+                sym_row = conn.execute(
+                    "SELECT symbol, filepath, kind, signature, docstring, body_hash FROM symbols WHERE symbol = ?",
+                    (target_normalized,)
+                ).fetchone()
+                if sym_row:
+                    exact_symbol = sym_row
+                else:
+                    sym_rows = conn.execute(
+                        "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE symbol LIKE ? LIMIT 10",
+                        (f"%{target_normalized}%",)
+                    ).fetchall()
+                    matching_symbols = sym_rows
 
-            # B. Search files table
-            file_row = conn.execute(
-                """
-                SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification 
-                FROM files 
-                WHERE filepath = ? OR replace(filepath, '\\', '/') = ?
-                """,
-                (target_normalized, target_normalized.replace("\\", "/"))
-            ).fetchone()
-            
-            if file_row:
-                exact_file = file_row
-            else:
-                file_rows = conn.execute(
+                file_row = conn.execute(
                     """
-                    SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification 
-                    FROM files 
-                    WHERE replace(filepath, '\\', '/') LIKE ? OR replace(filepath, '\\', '/') = ?
+                    SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification
+                    FROM files
+                    WHERE filepath = ? OR replace(filepath, '\\', '/') = ?
                     """,
-                    (f"%{target_slashes}%", target_slashes)
-                ).fetchall()
-                if file_rows:
-                    if len(file_rows) == 1:
-                        exact_file = file_rows[0]
-                    else:
-                        matching_files = file_rows
+                    (target_normalized, target_normalized.replace("\\", "/"))
+                ).fetchone()
 
-        # Generate markdown output
-        md = []
-        
-        # 1. Exact Symbol Details
-        if exact_symbol:
-            md.append(f"## Code Symbol: `{exact_symbol[0]}`\n")
-            md.append(f"- **Filepath**: `{exact_symbol[1] or 'External / Third-party'}`")
-            md.append(f"- **Kind**: `{exact_symbol[2]}`")
-            md.append(f"- **Signature**: `{exact_symbol[3] or 'None'}`")
-            doc = exact_symbol[4].strip() if exact_symbol[4] else "No docstring available."
-            md.append(f"- **Docstring**:\n  {doc.replace('\n', '\n  ')}\n")
+                if file_row:
+                    exact_file = file_row
+                else:
+                    file_rows = conn.execute(
+                        """
+                        SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification
+                        FROM files
+                        WHERE replace(filepath, '\\', '/') LIKE ? OR replace(filepath, '\\', '/') = ?
+                        """,
+                        (f"%{target_slashes}%", target_slashes)
+                    ).fetchall()
+                    if file_rows:
+                        if len(file_rows) == 1:
+                            exact_file = file_rows[0]
+                        else:
+                            matching_files = file_rows
 
-            with db_conn.session() as conn:
-                occs = conn.execute(
-                    "SELECT filepath, start_line, end_line, role FROM occurrences WHERE symbol = ?",
-                    (exact_symbol[0],)
-                ).fetchall()
-                edges = conn.execute(
-                    "SELECT source, target, relation FROM edges WHERE source = ? OR target = ?",
-                    (exact_symbol[0], exact_symbol[0])
-                ).fetchall()
+            md = []
 
-            if occs:
-                md.append("### Symbol Occurrences")
-                md.append("| Filepath | Line Range | Role (Definition=1, Ref=2) |")
-                md.append("| :--- | :--- | :--- |")
-                for o in occs:
-                    role_map = {0: "Reference", 1: "Definition", 2: "Declaration"}
-                    role_label = role_map.get(o[3], f"Unknown ({o[3]})")
-                    line_str = f"L{o[1]}" if o[1] == o[2] else f"L{o[1]}-{o[2]}"
-                    md.append(f"| `{o[0]}` | {line_str} | {role_label} |")
+            if exact_symbol:
+                md.append(f"## Code Symbol: `{exact_symbol[0]}`\n")
+                md.append(f"- **Filepath**: `{exact_symbol[1] or 'External / Third-party'}`")
+                md.append(f"- **Kind**: `{exact_symbol[2]}`")
+                md.append(f"- **Signature**: `{exact_symbol[3] or 'None'}`")
+                doc = exact_symbol[4].strip() if exact_symbol[4] else "No docstring available."
+                md.append(f"- **Docstring**:\n  {doc.replace(chr(10), chr(10) + '  ')}\n")
+
+                with db_conn.session() as conn:
+                    occs = conn.execute(
+                        "SELECT filepath, start_line, end_line, role FROM occurrences WHERE symbol = ?",
+                        (exact_symbol[0],)
+                    ).fetchall()
+                    edges = conn.execute(
+                        "SELECT source, target, relation FROM edges WHERE source = ? OR target = ?",
+                        (exact_symbol[0], exact_symbol[0])
+                    ).fetchall()
+
+                if occs:
+                    md.append("### Symbol Occurrences")
+                    md.append("| Filepath | Line Range | Role (Definition=1, Ref=2) |")
+                    md.append("| :--- | :--- | :--- |")
+                    for o in occs:
+                        role_map = {0: "Reference", 1: "Definition", 2: "Declaration"}
+                        role_label = role_map.get(o[3], f"Unknown ({o[3]})")
+                        line_str = f"L{o[1]}" if o[1] == o[2] else f"L{o[1]}-{o[2]}"
+                        md.append(f"| `{o[0]}` | {line_str} | {role_label} |")
+                    md.append("")
+
+                if edges:
+                    md.append("### Call Graph Relationships")
+                    md.append("| Source (Caller) | Target (Callee) | Relation |")
+                    md.append("| :--- | :--- | :--- |")
+                    for e in edges:
+                        md.append(f"| `{e[0]}` | `{e[1]}` | `{e[2]}` |")
+                    md.append("")
+
+            if exact_file:
+                status = exact_file[4].replace("VIOLATION_DETECTED", "VIOLATION") if exact_file[4] else ""
+                md.append(f"## File Module: `{exact_file[0]}`\n")
+                md.append(f"- **Status**: `{status}`")
+                md.append(f"- **Justification**: *{exact_file[8] or 'None'}*")
+                if exact_file[7] and exact_file[7] != '{}':
+                    md.append(f"- **Manual Fields**: `{exact_file[7]}`")
                 md.append("")
 
-            if edges:
-                md.append("### Call Graph Relationships")
-                md.append("| Source (Caller) | Target (Callee) | Relation |")
-                md.append("| :--- | :--- | :--- |")
-                for e in edges:
-                    md.append(f"| `{e[0]}` | `{e[1]}` | `{e[2]}` |")
-                md.append("")
+                with db_conn.session() as conn:
+                    file_syms = conn.execute(
+                        "SELECT symbol, kind, signature FROM symbols WHERE filepath = ?",
+                        (exact_file[0],)
+                    ).fetchall()
 
-        # 2. Exact File Details
-        if exact_file:
-            md.append(f"## File Module: `{exact_file[0]}`\n")
-            md.append(f"- **Language**: `{exact_file[2]}`")
-            md.append(f"- **Computed Status**: `{exact_file[4]}`")
-            md.append(f"- **Manual status**: `{exact_file[5]}`")
-            md.append(f"- **Pending Audit**: `{exact_file[6]}`")
-            md.append(f"- **Justification**: *{exact_file[8] or 'None'}*")
-            md.append(f"- **Manual Fields**: `{exact_file[7]}`\n")
+                def _infer_kind(sym_name):
+                    name = sym_name.rsplit("/", 1)[-1] if "/" in sym_name else sym_name
+                    if name.endswith("#") or name.endswith("#."):
+                        return "Class"
+                    if name.endswith("()") or name.endswith(".()"):
+                        return "Function"
+                    if ".__init__()" in name or ".constructor()" in name:
+                        return "Constructor"
+                    if "." in name and not name.endswith("#"):
+                        return "Method"
+                    return "Symbol"
 
-            with db_conn.session() as conn:
-                file_syms = conn.execute(
-                    "SELECT symbol, kind, signature FROM symbols WHERE filepath = ?",
-                    (exact_file[0],)
-                ).fetchall()
-            
-            if file_syms:
-                md.append("### Symbols Declared in File")
-                md.append("| Symbol | Kind | Signature |")
-                md.append("| :--- | :--- | :--- |")
-                for s in file_syms:
-                    md.append(f"| `{s[0]}` | `{s[1]}` | `{s[2] or ''}` |")
-                md.append("")
+                if file_syms:
+                    md.append("### Symbols Declared in File")
+                    md.append("| Symbol | Kind |")
+                    md.append("| :--- | :--- |")
+                    for s in file_syms:
+                        kind = _infer_kind(s[0]) if s[1] == "UnspecifiedKind" else s[1]
+                        md.append(f"| `{s[0]}` | {kind} |")
+                    md.append("")
 
-        # 3. Substring listing
-        if not exact_symbol and not exact_file:
-            if matching_files:
-                md.append("### Matching File Modules Found")
-                for f in matching_files:
-                    md.append(f"- **{f[0]}** (Language: `{f[2]}`, Status: `{f[4]}`)")
-                md.append("")
+            if not exact_symbol and not exact_file:
+                if matching_files:
+                    md.append("### Matching File Modules Found")
+                    for f in matching_files:
+                        md.append(f"- **{f[0]}** (Language: `{f[2]}`, Status: `{f[4]}`)")
+                    md.append("")
 
-            if matching_symbols:
-                md.append("### Matching Code Symbols Found")
-                for s in matching_symbols:
-                    md.append(f"- **{s[0]}** (`{s[2]}` in `{s[1] or 'External'}`)")
-                md.append("")
+                if matching_symbols:
+                    md.append("### Matching Code Symbols Found")
+                    for s in matching_symbols:
+                        md.append(f"- **{s[0]}** (`{s[2]}` in `{s[1] or 'External'}`)")
+                    md.append("")
 
-            if not matching_files and not matching_symbols:
-                md.append(f"*No files or symbols matched target query: '{target}'*")
+                if not matching_files and not matching_symbols:
+                    md.append(f"*No files or symbols matched target query: '{target}'*")
 
-        db_conn.close()
-        return "\n".join(md)
+            return "\n".join(md)
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
-        db_conn.close()
         return f"Error executing index search: {e}"
 
 
@@ -932,9 +864,6 @@ def compile_context(
       - Negative Constraint: Do NOT run this tool with a radius > 2 or resolution='full' unless
         necessary, as it rapidly consumes the token context window budget.
     """
-    if not DB_PATH.exists():
-        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
-
     direction = direction.lower()
     if direction not in ("upstream", "downstream", "both"):
         return f"Error: Invalid direction: '{direction}'. Allowed: upstream, downstream, both."
@@ -943,22 +872,18 @@ def compile_context(
     if resolution not in ("full", "signature"):
         return f"Error: Invalid resolution: '{resolution}'. Allowed: full, signature."
 
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-    compiler = ContextCompiler(repository, PROJECT_ROOT)
-
     try:
-        return compiler.compile(
-            focal_symbol=symbol,
-            radius=radius,
-            direction=direction,
-            resolution=resolution,
-            out_filepath=out_filepath
-        )
+        with get_repository() as (repository, db_conn):
+            compiler = ContextCompiler(repository, PROJECT_ROOT)
+            return compiler.compile(
+                focal_symbol=symbol, radius=radius,
+                direction=direction, resolution=resolution,
+                out_filepath=out_filepath
+            )
+    except FileNotFoundError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error compiling architectural context: {e}"
-    finally:
-        db_conn.close()
 
 
 @mcp.tool()
