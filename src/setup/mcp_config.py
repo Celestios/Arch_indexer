@@ -27,7 +27,10 @@ def register_claude_desktop_mcp(project_root: Path):
         config["mcpServers"] = {}
         
     python_exe = sys.executable
+    # Cross-platform venv detection
     venv_python = project_root / ".venv" / "Scripts" / "python.exe"
+    if not venv_python.exists():
+        venv_python = project_root / ".venv" / "bin" / "python"
     if venv_python.exists():
         python_exe = str(venv_python)
         

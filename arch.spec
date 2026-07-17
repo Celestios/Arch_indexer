@@ -7,9 +7,10 @@ a = Analysis(
     binaries=[],
     datas=[
         ('src/db/schema.sql', 'src/db'),
-        ('src/engines/ffi_queries/*', 'engines/ffi_queries'),
+        ('src/engines/queries/*', 'engines/queries'),
+        ('src/engines/dart_analyzer/helper', 'engines/dart_analyzer/helper'),
     ],
-    hiddenimports=[],
+    hiddenimports=['uuid', 'mcp'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

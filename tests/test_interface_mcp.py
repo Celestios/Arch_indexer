@@ -322,17 +322,32 @@ def test_mcp_tools_trace_mocked(tmp_path, monkeypatch):
     codeql_db_dir = root / ".arch" / "codeql_db"
     codeql_db_dir.mkdir(parents=True, exist_ok=True)
 
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
+            VALUES
+                ('source_sym', 'src/source.py', 'Function', null, null, null),
+                ('sink_sym', 'src/sink.py', 'Function', null, null, null)
+        """)
+        conn.execute("""
+            INSERT INTO occurrences (symbol, filepath, start_line, start_col, end_line, end_col, role)
+            VALUES
+                ('source_sym', 'src/source.py', 5, 0, 5, 10, 1),
+                ('sink_sym', 'src/sink.py', 10, 0, 10, 10, 1)
+        """)
+
     class MockCodeQlWrapper:
         def __init__(self, *args, **kwargs):
             pass
 
-        def trace_data_flow(self, db_dir, source, sink):
-            if source == "source_sym" and sink == "sink_sym":
-                return [
-                    {"symbol": "source_sym", "filepath": "src/source.py", "line": 5},
-                    {"symbol": "sink_sym", "filepath": "src/sink.py", "line": 10}
-                ]
-            return []
+        def is_available(self):
+            return True
+
+        def run_query(self, db_dir, ql_file, bqrs_file):
+            return True
+
+        def decode_bqrs(self, bqrs_file, json_file):
+            return {"tuples": [[{"value": "source_sym"}, {"value": "sink_sym"}]]}
 
     # Inject mock
     # Add a mock class to engines.codeql_wrapper

@@ -32,7 +32,7 @@ class FfiExtractor:
         surfaces = extractor.extract_all(project_root, languages=["dart", "rust", "go"])
     """
 
-    QUERIES_DIR = Path(__file__).parent / "ffi_queries"
+    QUERIES_DIR = Path(__file__).parent / "queries"
 
     def __init__(self, codeql_wrappers: Optional[Dict[str, "CodeQlWrapper"]] = None,
                  dart_analyzer: Optional["DartAnalyzerWrapper"] = None,
@@ -119,7 +119,6 @@ class FfiExtractor:
         ql_path = self.QUERIES_DIR / query_file
 
         if not ql_path.exists():
-            print(f"[FFI Extract] Query file not found: {ql_path}")
             return []
 
         arch_dir = project_root / ".arch"

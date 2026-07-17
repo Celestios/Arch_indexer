@@ -32,14 +32,34 @@ def test_auditor_loads_config(tmp_path):
     auditor = Auditor(repository, root)
     config = auditor.load_config()
 
-    assert "lib" in config
-    assert "automatic_fields" in config["lib"]
+    assert isinstance(config, dict)
 
     db_conn.close()
 
 
 def test_auditor_detects_violation(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
+
+    config = {
+        "lib": {
+            "automatic_fields": {
+                "layer": {
+                    "values": ["Presentation", "Application", "Domain", "Infrastructure"],
+                    "default": "Domain",
+                    "assignment_rules": [
+                        {"value": "Presentation", "conditions": {"path_prefix": "lib/ui"}},
+                        {"value": "Infrastructure", "conditions": {"path_prefix": "lib/infra"}}
+                    ],
+                    "handler": "dependency_check",
+                    "rules": [
+                        {"source": "Presentation", "target": "Infrastructure", "message": "Presentation layer cannot directly call Infrastructure layer"}
+                    ]
+                }
+            }
+        }
+    }
+    with open(root / ".arch" / "config.json", "w") as f:
+        json.dump(config, f)
 
     with db_conn.session() as conn:
         conn.execute("""

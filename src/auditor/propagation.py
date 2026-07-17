@@ -64,10 +64,13 @@ class MetadataPropagator:
                 return weights.get(val, 0)
 
             # Determine neighbors traversal function
+            # Use default argument binding to avoid late-binding closure over mutable dict
             if direction == "upstream":
-                get_neighbors = lambda n: adj_backward.get(n, [])
+                _adj = adj_backward
+                get_neighbors = lambda n, _a=_adj: _a.get(n, [])
             else:
-                get_neighbors = lambda n: adj_forward.get(n, [])
+                _adj = adj_forward
+                get_neighbors = lambda n, _a=_adj: _a.get(n, [])
 
             # Initialize worklist with all symbols having non-default values
             worklist = []

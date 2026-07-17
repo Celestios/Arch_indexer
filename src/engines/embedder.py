@@ -49,14 +49,20 @@ class LocalEmbedder:
 
         input_ids = np.array([encoding.ids], dtype=np.int64)
         attention_mask = np.array([encoding.attention_mask], dtype=np.int64)
-        token_type_ids = np.array([encoding.type_ids], dtype=np.int64)
+
+        onnx_inputs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask
+        }
+
+        # Conditionally pass token_type_ids if expected by the model
+        model_inputs = {inp.name for inp in self.session.get_inputs()}
+        if "token_type_ids" in model_inputs:
+            token_type_ids = np.array([encoding.type_ids], dtype=np.int64)
+            onnx_inputs["token_type_ids"] = token_type_ids
 
         try:
-            outputs = self.session.run(None, {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "token_type_ids": token_type_ids
-            })
+            outputs = self.session.run(None, onnx_inputs)
         except Exception as e:
             raise RuntimeError(f"ONNX inference execution failed: {e}")
 

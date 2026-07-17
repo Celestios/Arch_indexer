@@ -108,10 +108,10 @@ class TestDartAnalyzerDB:
 class TestDartAnalyzerWrapper:
     """Tests for the DartAnalyzerWrapper API compatibility."""
 
-    def test_is_available_returns_false_without_analyzer(self, tmp_path):
-        """Returns False when analyzer package is not installed."""
+    def test_is_available_returns_true_natively(self, tmp_path):
+        """Returns True since it is now natively supported in pure-Python."""
         wrapper = DartAnalyzerWrapper(tmp_path)
-        assert wrapper.is_available() is False
+        assert wrapper.is_available() is True
 
     def test_create_database_returns_false_for_non_dart(self, tmp_path):
         """Returns False when language is not dart."""
@@ -119,11 +119,11 @@ class TestDartAnalyzerWrapper:
         result = wrapper.create_database(tmp_path, tmp_path / "db", "rust")
         assert result is False
 
-    def test_create_database_returns_false_without_analyzer(self, tmp_path):
-        """Returns False when analyzer package is not installed."""
+    def test_create_database_succeeds_natively(self, tmp_path):
+        """Returns True when database is created successfully."""
         wrapper = DartAnalyzerWrapper(tmp_path)
         result = wrapper.create_database(tmp_path, tmp_path / "db", "dart")
-        assert result is False
+        assert result is True
 
     def test_trace_data_flow_returns_correct_format(self, tmp_path):
         """trace_data_flow returns dict format expected by server.py."""

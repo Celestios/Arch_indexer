@@ -91,11 +91,4 @@ class FfiMatcher:
     def _signatures_compatible(self, sig_a: str, sig_b: str) -> bool:
         return sig_a == sig_b
 
-    def _extract_param_count(self, sig: str) -> Optional[int]:
-        paren_match = re.search(r'\(([^)]*)\)', sig)
-        if not paren_match:
-            return None
-        params_str = paren_match.group(1).strip()
-        if not params_str:
-            return 0
-        return len([p.strip() for p in params_str.split(',') if p.strip()])
+

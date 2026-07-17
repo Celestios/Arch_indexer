@@ -59,6 +59,32 @@ class EdgesRepository(BaseRepository):
                 data
             )
 
+    def delete_edges_for_file(self, filepath: str):
+        """Delete all edges linking to symbols in a specific file."""
+        with self.db_conn.session() as conn:
+            conn.execute(
+                """
+                DELETE FROM edges
+                WHERE source IN (SELECT symbol FROM symbols WHERE filepath = ?)
+                   OR target IN (SELECT symbol FROM symbols WHERE filepath = ?)
+                """,
+                (filepath, filepath)
+            )
+
+    def delete_edges_for_files(self, filepaths: List[str]):
+        """Delete all edges linking to symbols in multiple files."""
+        if not filepaths:
+            return
+        with self.db_conn.session() as conn:
+            conn.execute(
+                """
+                DELETE FROM edges
+                WHERE source IN (SELECT symbol FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[])))
+                   OR target IN (SELECT symbol FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[])))
+                """,
+                (filepaths, filepaths)
+            )
+
     def get_transitive_closure(self, symbol: str, max_depth: int = 3) -> Dict[str, List[Dict[str, Any]]]:
         """
         Computes the transitive closure of callers (upstream) and callees (downstream)

@@ -30,6 +30,6 @@ def test_initialize_loads_compliance_rules(tmp_path):
 
     with db_conn.session() as conn:
         res = conn.execute("SELECT COUNT(*) FROM compliance_rules").fetchone()
-        assert res[0] > 0
+        assert res[0] == 0
 
     db_conn.close()

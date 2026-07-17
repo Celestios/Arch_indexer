@@ -8,7 +8,7 @@ license = {text = "MIT"}
 dependencies = [
     "mcp>=0.1.0",
     "duckdb>=1.0.0",
-    "protobuf>=4.21.0",
+    "protobuf>=4.21.0,<5",
     "onnxruntime>=1.16.0",
     "numpy>=1.24.0",
     "tokenizers>=0.13.0",

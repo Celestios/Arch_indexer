@@ -1,3 +1,4 @@
+import os
 import sys
 import shutil
 import zipfile
@@ -6,14 +7,84 @@ from pathlib import Path
 from setup.downloader import download_file
 from utils.progress import make_progress_callback
 
-def bootstrap_codeql(bin_dir: Path, progress_callback = None) -> Path:
-    """Downloads and extracts the CodeQL CLI binary for Windows, caching the download in the archive directory."""
+
+def _get_archive_dir() -> Path:
+    """Get a user-writable archive directory."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path.home() / ".cache"
+    return base / "arch-mcp" / "archive"
+
+
+def _ensure_codeql_cli_binary(bin_dir: Path, progress_callback=None) -> Path:
+    """Download and extract the CodeQL CLI binary if not already present."""
     codeql_dir = bin_dir / "codeql"
     codeql_exe = codeql_dir / "codeql.exe"
 
     if codeql_exe.exists():
         print("CodeQL CLI is already installed locally.")
         return codeql_exe
+
+    CODEQL_URL = "https://github.com/github/codeql-cli-binaries/releases/latest/download/codeql-win64.zip"
+
+    archive_dir = _get_archive_dir()
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = archive_dir / "codeql.zip"
+    old_zip_path = bin_dir / "codeql.zip"
+
+    if old_zip_path.exists() and not zip_path.exists():
+        try:
+            print("Migrating codeql.zip from bin/ to archive/...")
+            old_zip_path.rename(zip_path)
+        except Exception:
+            pass
+
+    use_cached = False
+    if zip_path.exists():
+        try:
+            print("Checking cached CodeQL CLI zip file...")
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                _ = zip_ref.namelist()
+                use_cached = True
+                print("Cached CodeQL CLI zip file is valid.")
+        except Exception:
+            print("Cached zip file is corrupted/incomplete. Renaming to tmp to resume...")
+            temp_path = zip_path.with_suffix(".tmp")
+            if not temp_path.exists():
+                try:
+                    zip_path.rename(temp_path)
+                except Exception:
+                    pass
+
+    if not use_cached:
+        try:
+            cb = progress_callback if progress_callback else make_progress_callback("codeql.zip")
+            download_file(CODEQL_URL, zip_path, progress_callback=cb)
+        except Exception as e:
+            raise RuntimeError(f"Failed to download CodeQL CLI: {e}")
+
+    try:
+        if codeql_dir.exists():
+            shutil.rmtree(codeql_dir)
+        print(f"Extracting CodeQL CLI to {bin_dir}...")
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(bin_dir)
+        print("CodeQL CLI successfully bootstrapped.")
+    except Exception as e:
+        if codeql_dir.exists():
+            try:
+                shutil.rmtree(codeql_dir)
+            except Exception:
+                pass
+        raise RuntimeError(f"Failed to extract CodeQL CLI: {e}")
+
+    return codeql_exe
+
+
+def bootstrap_codeql(bin_dir: Path, progress_callback=None) -> Path:
+    """Downloads and extracts the CodeQL CLI binary for Windows, caching the download in the archive directory."""
+    return _ensure_codeql_cli_binary(bin_dir, progress_callback)
 
 
 CODEQL_PACK_MAP = {
@@ -63,66 +134,6 @@ def download_codeql_packs(bin_dir: Path, languages: list) -> None:
             print(f"[CodeQL] Packs downloaded successfully.")
         else:
             print(f"[CodeQL] Warning: pack download failed: {res.stderr}", file=sys.stderr)
-
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    
-    archive_dir = bin_dir.parent / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = archive_dir / "codeql.zip"
-    old_zip_path = bin_dir / "codeql.zip"
-
-    # Migrate from bin/ to archive/ if it exists from previous setup runs
-    if old_zip_path.exists() and not zip_path.exists():
-        try:
-            print("Migrating codeql.zip from bin/ to archive/...")
-            old_zip_path.rename(zip_path)
-        except Exception:
-            pass
-
-    CODEQL_URL = "https://github.com/github/codeql-cli-binaries/releases/latest/download/codeql-win64.zip"
-
-    # Check if a valid cached zip file exists
-    use_cached = False
-    if zip_path.exists():
-        try:
-            print("Checking cached CodeQL CLI zip file...")
-            with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                # Fast check: reading directory headers
-                _ = zip_ref.namelist()
-                use_cached = True
-                print("Cached CodeQL CLI zip file is valid.")
-        except Exception:
-            print("Cached zip file is corrupted/incomplete. Renaming to tmp to resume...")
-            temp_path = zip_path.with_suffix(".tmp")
-            if not temp_path.exists():
-                try:
-                    zip_path.rename(temp_path)
-                except Exception:
-                    pass
-
-    if not use_cached:
-        try:
-            cb = progress_callback if progress_callback else make_progress_callback("codeql.zip")
-            download_file(CODEQL_URL, zip_path, progress_callback=cb)
-        except Exception as e:
-            raise RuntimeError(f"Failed to download CodeQL CLI: {e}")
-
-    try:
-        # Extract Zip file
-        if codeql_dir.exists():
-            shutil.rmtree(codeql_dir)
-        print(f"Extracting CodeQL CLI to {bin_dir}...")
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(bin_dir)
-        print("CodeQL CLI successfully bootstrapped.")
-    except Exception as e:
-        # If extraction fails, clean up partially extracted files but keep the zip file
-        if codeql_dir.exists():
-            try:
-                shutil.rmtree(codeql_dir)
-            except Exception:
-                pass
-        raise RuntimeError(f"Failed to extract CodeQL CLI: {e}")
 
     return codeql_exe
 if __name__ == "__main__":

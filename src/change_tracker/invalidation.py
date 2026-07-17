@@ -53,30 +53,20 @@ class TransitiveInvalidation:
         """
         dependents = []
 
-        with self.repository.db_conn.session() as conn:
-            # Find symbols defined in this file
-            symbols_in_file = conn.execute(
-                "SELECT symbol FROM symbols WHERE filepath = ?", (filepath,)
-            ).fetchall()
+        # Find symbols defined in this file
+        symbols_in_file = self.repository.symbols.get_symbols_in_file(filepath)
+        if not symbols_in_file:
+            return dependents
 
-            if not symbols_in_file:
-                return dependents
+        symbol_list = [s["symbol"] for s in symbols_in_file]
 
-            symbol_list = [r[0] for r in symbols_in_file]
-
-            # Find files that reference these symbols (incoming edges)
-            for symbol in symbol_list:
-                callers = conn.execute(
-                    "SELECT DISTINCT source FROM edges WHERE target = ?", (symbol,)
-                ).fetchall()
-
-                for (caller_sym,) in callers:
-                    # Get the filepath of the caller
-                    caller_file = conn.execute(
-                        "SELECT filepath FROM symbols WHERE symbol = ?", (caller_sym,)
-                    ).fetchone()
-
-                    if caller_file and caller_file[0] and caller_file[0] != filepath:
-                        dependents.append(caller_file[0])
+        # Find files that reference these symbols (incoming edges)
+        for symbol in symbol_list:
+            incoming = self.repository.edges.get_incoming_edges(symbol)
+            for edge in incoming:
+                caller_sym = edge["source"]
+                caller_info = self.repository.symbols.get_symbol(caller_sym)
+                if caller_info and caller_info.get("filepath") and caller_info["filepath"] != filepath:
+                    dependents.append(caller_info["filepath"])
 
         return dependents

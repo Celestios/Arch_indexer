@@ -66,7 +66,28 @@ class Auditor:
             print("No architectural rules found in .arch/config.json. Skipping audit.")
             return []
 
-        # Clear existing violations for the target range to avoid stale data
+        self._clear_old_violations(filepath_filter)
+        self._reset_invalid_manual_fields(config)
+        self._handle_config_change()
+
+        all_symbols = self._fetch_all_symbols()
+        outgoing_map = self._build_outgoing_map(all_symbols)
+        symbol_classifications = self._classify_symbols(all_symbols, outgoing_map, config)
+        all_edges = self._fetch_all_edges()
+
+        propagation_sources = self.propagator.run_propagation(symbol_classifications, all_edges, config)
+        self._update_edge_weights(all_edges, symbol_classifications, config)
+
+        violations = []
+        violations.extend(self._check_dependency_violations(symbol_classifications, all_edges, config, filepath_filter, propagation_sources))
+        violations.extend(self._check_naming_violations(symbol_classifications, config, filepath_filter))
+        violations.extend(self._check_pending_audits(filepath_filter))
+
+        self._recompute_file_statuses(violations)
+        print(f"[Auditor] Completed audit. Found {len(violations)} architectural violations.")
+        return violations
+
+    def _clear_old_violations(self, filepath_filter: Optional[str]):
         with self.repository.db_conn.session() as conn:
             if filepath_filter:
                 normalized_filter = filepath_filter.replace("\\", "/")
@@ -77,10 +98,8 @@ class Auditor:
             else:
                 conn.execute("DELETE FROM compliance_violations WHERE origin = 'automatic'")
 
-        # Check config hash and reset fields if modified or if manual field value is invalid
+    def _reset_invalid_manual_fields(self, config: Dict[str, Any]):
         from change_tracker.tracker import ChangeTracker
-        config_changed = ChangeTracker.check_config_changed(self.project_root, self.repository)
-        
         file_metadata = self.repository.files.get_all_files_metadata()
         db_updated = False
 
@@ -91,23 +110,18 @@ class Auditor:
 
             manual_cfg = prefix_conf.get("manual_fields", {})
             current_manual_fields = meta.get("manual_fields") or {}
-            
             updated_fields = dict(current_manual_fields)
             fields_to_reset = []
-            
             justification = meta.get("justification") or ""
             is_modified = (meta.get("pending_audit") and justification == "File modified, pending re-audit")
-            
             fields_changed = False
-            
+
             for field_name, field_conf in manual_cfg.items():
                 default_val = field_conf.get("default")
                 allowed_values = field_conf.get("values")
                 reset_on_change = field_conf.get("reset_on_change", False)
-                
                 curr_val = current_manual_fields.get(field_name)
-                
-                # Check if current value is no longer allowed by configuration
+
                 if curr_val is not None and allowed_values is not None and curr_val not in allowed_values:
                     print(
                         f"warning: value '{curr_val}' for manual field '{field_name}' in '{filepath}' is no longer allowed. "
@@ -118,17 +132,10 @@ class Auditor:
                     fields_changed = True
                     with self.repository.db_conn.session() as conn:
                         conn.execute(
-                            """
-                            UPDATE files
-                            SET pending_audit = TRUE,
-                                justification = ?
-                            WHERE filepath = ?
-                            """,
+                            "UPDATE files SET pending_audit = TRUE, justification = ? WHERE filepath = ?",
                             (f"Manual field '{field_name}' value '{curr_val}' not allowed by config, reset to default.", filepath)
                         )
                     db_updated = True
-                
-                # Reset on file change/modification
                 elif is_modified and reset_on_change:
                     if curr_val != default_val:
                         updated_fields[field_name] = default_val
@@ -145,68 +152,59 @@ class Auditor:
                 db_updated = True
 
         if db_updated:
-            file_metadata = self.repository.files.get_all_files_metadata()
+            self.repository.files.get_all_files_metadata()
 
+    def _handle_config_change(self):
+        from change_tracker.tracker import ChangeTracker
+        config_changed = ChangeTracker.check_config_changed(self.project_root, self.repository)
         if config_changed:
             ChangeTracker.update_config_hash(self.project_root, self.repository)
 
-        # 1. Fetch all symbols from the database
+    def _fetch_all_symbols(self) -> List[Dict[str, Any]]:
         all_symbols = []
         with self.repository.db_conn.session() as conn:
             res = conn.execute("SELECT symbol, filepath, kind, signature, docstring FROM symbols").fetchall()
             for r in res:
                 all_symbols.append({
-                    "symbol": r[0],
-                    "filepath": r[1],
-                    "kind": r[2],
-                    "signature": r[3],
-                    "docstring": r[4]
+                    "symbol": r[0], "filepath": r[1], "kind": r[2],
+                    "signature": r[3], "docstring": r[4]
                 })
+        return all_symbols
 
-        # 2. Map outgoing edges for callers
+    def _build_outgoing_map(self, all_symbols: List[Dict[str, Any]]) -> Dict[str, List[str]]:
         outgoing_calls_map = {}
         for sym in all_symbols:
             outgoing = self.repository.edges.get_outgoing_edges(sym["symbol"])
             outgoing_calls_map[sym["symbol"]] = [o["target"] for o in outgoing]
+        return outgoing_calls_map
 
-        # 3. Classify all symbols dynamically
+    def _classify_symbols(self, all_symbols, outgoing_map, config) -> Dict[str, Dict[str, Any]]:
         file_metadata = self.repository.files.get_all_files_metadata()
-
         symbol_classifications = {}
         for sym in all_symbols:
             filepath = sym.get("filepath")
             if not filepath:
-                continue  # Skip external third-party symbols for classification
-                
+                continue
             prefix_conf = self.get_applicable_config(filepath, config)
             if not prefix_conf:
                 continue
-
-            outgoing = outgoing_calls_map.get(sym["symbol"], [])
+            outgoing = outgoing_map.get(sym["symbol"], [])
             classifications = self.classifier.assign_automatic_fields(sym, prefix_conf, outgoing)
-            
-            # Merge manual fields from files metadata (taking precedence)
             if filepath in file_metadata:
                 manual_fields = file_metadata[filepath].get("manual_fields") or {}
                 classifications.update(manual_fields)
-
             symbol_classifications[sym["symbol"]] = {
-                "symbol_info": sym,
-                "fields": classifications,
-                "static_fields": dict(classifications), # Save static classifications
-                "prefix_conf": prefix_conf
+                "symbol_info": sym, "fields": classifications,
+                "static_fields": dict(classifications), "prefix_conf": prefix_conf
             }
+        return symbol_classifications
 
-        # Fetch all edges in the database
-        all_edges = []
+    def _fetch_all_edges(self) -> List[Dict[str, Any]]:
         with self.repository.db_conn.session() as conn:
             res = conn.execute("SELECT source, target, relation FROM edges").fetchall()
-            all_edges = [{"source": r[0], "target": r[1], "relation": r[2]} for r in res]
+            return [{"source": r[0], "target": r[1], "relation": r[2]} for r in res]
 
-        # 4. Run Graph-based Metadata Propagation
-        propagation_sources = self.propagator.run_propagation(symbol_classifications, all_edges, config)
-
-        # 4b. Calculate and update dynamic edge weights based on layers, tiers, and barriers
+    def _update_edge_weights(self, all_edges, symbol_classifications, config):
         all_barriers = set()
         for prefix, prefix_conf in config.items():
             auto_fields = prefix_conf.get("automatic_fields", {})
@@ -217,22 +215,15 @@ class Auditor:
 
         updated_edges = []
         for edge in all_edges:
-            src = edge["source"]
-            tgt = edge["target"]
-            rel = edge["relation"]
+            src, tgt, rel = edge["source"], edge["target"], edge["relation"]
             weight = 1.0
-            
             src_data = symbol_classifications.get(src)
             tgt_data = symbol_classifications.get(tgt)
-            
             if src_data:
-                # 1. Same-layer check
                 src_layer = src_data["fields"].get("layer")
                 tgt_layer = tgt_data["fields"].get("layer") if tgt_data else None
                 if src_layer and tgt_layer and src_layer == tgt_layer:
                     weight *= 1.5
-                    
-                # 2. Cross-tier check
                 src_tier = src_data["fields"].get("tier")
                 tgt_tier = tgt_data["fields"].get("tier") if tgt_data else None
                 if src_tier is not None and tgt_tier is not None:
@@ -241,14 +232,11 @@ class Auditor:
                             weight *= 0.5
                     except ValueError:
                         pass
-                        
-                # 3. Barrier crossing check
                 src_role = src_data["fields"].get("architectural_role") or src_data["fields"].get("role") or ""
                 if src_role in all_barriers:
                     weight *= 0.3
-            
             updated_edges.append((weight, src, tgt, rel))
-            
+
         if updated_edges:
             with self.repository.db_conn.session() as conn:
                 conn.executemany(
@@ -256,24 +244,16 @@ class Auditor:
                     updated_edges
                 )
 
-        # 5. Audit call graph edges for compliance violations
+    def _check_dependency_violations(self, symbol_classifications, all_edges, config, filepath_filter, propagation_sources) -> List[Dict[str, Any]]:
         violations = []
-        
-        # 5a. Dependency Checks & Package Restrictions
         for edge in all_edges:
-            source_sym = edge["source"]
-            target_sym = edge["target"]
-            
-            # We only audit edges where caller is classified
+            source_sym, target_sym = edge["source"], edge["target"]
             if source_sym not in symbol_classifications:
                 continue
-                
             source_data = symbol_classifications[source_sym]
             filepath = source_data["symbol_info"]["filepath"]
             if not filepath:
                 continue
-
-            # Filter by filepath prefix if requested
             if filepath_filter:
                 norm_source_fp = filepath.replace("\\", "/")
                 norm_filter = filepath_filter.replace("\\", "/")
@@ -282,152 +262,109 @@ class Auditor:
 
             prefix_conf = source_data["prefix_conf"]
             auto_fields = prefix_conf.get("automatic_fields", {})
-            
+
             for field_name, field_conf in auto_fields.items():
                 rules = field_conf.get("rules", [])
-                
-                # Check package restriction rules
                 for rule in rules:
                     if rule.get("rule_type") == "package_restriction":
-                        source_val = source_data["static_fields"].get(field_name) # USE STATIC
-                        forbidden_source = rule.get("source")
-                        blocklist = rule.get("blocklist", [])
-                        
-                        if source_val == forbidden_source and self.tracer.matches_blocklist(target_sym, blocklist):
-                            msg = rule.get("message", f"Package restriction violation: {source_val} cannot depend on {target_sym}")
-                            
-                            # Retrieve coordinate line number
-                            line_number = 1
-                            occs = self.repository.symbols.get_occurrences_for_symbol(target_sym)
-                            for occ in occs:
-                                if occ["filepath"] == filepath:
-                                    line_number = occ["start_line"]
-                                    break
-                                    
-                            violation_text = f"{source_sym}_{target_sym}_pkg_restrict_{forbidden_source}"
-                            violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
-                            rule_id = f"{field_name}_pkg_{forbidden_source}".lower().replace("/", "_").replace(".", "_")
-                            
-                            violation_data = {
-                                "violation_id": violation_id,
-                                "rule_id": rule_id,
-                                "symbol": source_sym,
-                                "filepath": filepath,
-                                "line": line_number,
-                                "message": msg,
-                                "origin": "automatic"
-                            }
-                            violations.append(violation_data)
-                            self.repository.compliance.add_violation(**violation_data)
+                        violations.extend(self._check_package_restriction(rule, source_sym, target_sym, source_data, filepath, field_name))
+                    elif rule.get("rule_type", "dependency_check") == "dependency_check" and target_sym in symbol_classifications:
+                        target_data = symbol_classifications[target_sym]
+                        v = self._check_single_dependency(rule, source_sym, target_sym, source_data, target_data, filepath, field_name, config, propagation_sources, field_conf)
+                        if v:
+                            violations.append(v)
+        return violations
 
-                # Check standard dependency rules (only if target is classified)
-                if target_sym in symbol_classifications:
-                    target_data = symbol_classifications[target_sym]
-                    
-                    for rule in rules:
-                        if rule.get("rule_type", "dependency_check") == "dependency_check":
-                            source_val = source_data["static_fields"].get(field_name) # USE STATIC
-                            target_val = target_data["fields"].get(field_name) # USE PROPAGATED
-                            
-                            if source_val is None or target_val is None:
-                                continue
-                                
-                            forbidden_source = rule.get("source")
-                            forbidden_target = rule.get("target")
-                            
-                            if source_val == forbidden_source and target_val == forbidden_target:
-                                msg = rule.get("message", f"Dependency violation: {source_val} is not allowed to call {target_val}")
-                                
-                                # Trace the propagation path if either side was propagated
-                                path = []
-                                # Trace source side if it was propagated
-                                curr_src = source_sym
-                                src_path = [curr_src]
-                                visited = {curr_src}
-                                while (curr_src, field_name) in propagation_sources:
-                                    curr_src = propagation_sources[(curr_src, field_name)]
-                                    if curr_src in visited:
-                                        break
-                                    visited.add(curr_src)
-                                    src_path.append(curr_src)
-                                
-                                # Trace target side if it was propagated
-                                curr_tgt = target_sym
-                                tgt_path = [curr_tgt]
-                                visited = {curr_tgt}
-                                while (curr_tgt, field_name) in propagation_sources:
-                                    curr_tgt = propagation_sources[(curr_tgt, field_name)]
-                                    if curr_tgt in visited:
-                                        break
-                                    visited.add(curr_tgt)
-                                    tgt_path.append(curr_tgt)
-                                
-                                # Reconstruct path from caller source_path back to target_path root
-                                direction = field_conf.get("propagation_direction", "upstream")
-                                if direction == "upstream":
-                                    path = src_path
-                                    if path[-1] != target_sym:
-                                        path = path + tgt_path
-                                else:
-                                    tgt_path_rev = list(reversed(tgt_path))
-                                    src_path_rev = list(reversed(src_path))
-                                    path = src_path_rev + tgt_path_rev
-                                
-                                # De-duplicate path while preserving order
-                                seen = set()
-                                final_path = []
-                                for node in path:
-                                    if node not in seen:
-                                        final_path.append(node)
-                                        seen.add(node)
-                                
-                                # Generate actionable trace message
-                                trace_msg = msg + self.tracer.format_path_trace(final_path)
-                                
-                                # Retrieve coordinate line number
-                                line_number = 1
-                                occs = self.repository.symbols.get_occurrences_for_symbol(target_sym)
-                                for occ in occs:
-                                    if occ["filepath"] == filepath:
-                                        line_number = occ["start_line"]
-                                        break
-                                        
-                                violation_text = f"{source_sym}_{target_sym}_{field_name}_{forbidden_source}_{forbidden_target}"
-                                violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
-                                
-                                rule_id = f"{field_name}_{forbidden_source}_{forbidden_target}".lower().replace("/", "_").replace(".", "_")
-                                matched_prefix = None
-                                for prefix in config.keys():
-                                    if filepath.replace("\\", "/").startswith(prefix):
-                                        if matched_prefix is None or len(prefix) > len(matched_prefix):
-                                            matched_prefix = prefix
-                                if matched_prefix:
-                                    rule_id = f"{matched_prefix}_{rule_id}".lower().replace("/", "_").replace(".", "_")
-                                    
-                                violation_data = {
-                                    "violation_id": violation_id,
-                                    "rule_id": rule_id,
-                                    "symbol": source_sym,
-                                    "filepath": filepath,
-                                    "line": line_number,
-                                    "message": trace_msg,
-                                    "origin": "automatic"
-                                }
-                                violations.append(violation_data)
-                                self.repository.compliance.add_violation(**violation_data)
+    def _check_package_restriction(self, rule, source_sym, target_sym, source_data, filepath, field_name) -> List[Dict[str, Any]]:
+        source_val = source_data["static_fields"].get(field_name)
+        forbidden_source = rule.get("source")
+        blocklist = rule.get("blocklist", [])
+        if source_val != forbidden_source or not self.tracer.matches_blocklist(target_sym, blocklist):
+            return []
+        msg = rule.get("message", f"Package restriction violation: {source_val} cannot depend on {target_sym}")
+        line_number = self.repository.symbols.get_occurrences_for_symbol(target_sym)
+        line_number = next((occ["start_line"] for occ in line_number if occ["filepath"] == filepath), 1)
+        from utils.helpers import ViolationId
+        violation_id = ViolationId.generate(source_sym, target_sym, "pkg_restrict", forbidden_source)
+        rule_id = f"{field_name}_pkg_{forbidden_source}".lower().replace("/", "_").replace(".", "_")
+        data = {"violation_id": violation_id, "rule_id": rule_id, "symbol": source_sym,
+                "filepath": filepath, "line": line_number, "message": msg, "origin": "automatic"}
+        self.repository.compliance.add_violation(**data)
+        return [data]
 
-        # 5b. Naming Convention Checks
+    def _check_single_dependency(self, rule, source_sym, target_sym, source_data, target_data, filepath, field_name, config, propagation_sources, field_conf) -> Optional[Dict[str, Any]]:
+        source_val = source_data["static_fields"].get(field_name)
+        target_val = target_data["fields"].get(field_name)
+        if source_val is None or target_val is None:
+            return None
+        forbidden_source, forbidden_target = rule.get("source"), rule.get("target")
+        if source_val != forbidden_source or target_val != forbidden_target:
+            return None
+
+        msg = rule.get("message", f"Dependency violation: {source_val} is not allowed to call {target_val}")
+        path = self._trace_propagation_path(source_sym, target_sym, field_name, propagation_sources, field_conf)
+        trace_msg = msg + self.tracer.format_path_trace(path)
+        line_number = next((occ["start_line"] for occ in self.repository.symbols.get_occurrences_for_symbol(target_sym) if occ["filepath"] == filepath), 1)
+
+        from utils.helpers import ViolationId
+        violation_id = ViolationId.generate(source_sym, target_sym, field_name, forbidden_source, forbidden_target)
+        rule_id = f"{field_name}_{forbidden_source}_{forbidden_target}".lower().replace("/", "_").replace(".", "_")
+        matched_prefix = None
+        for prefix in config.keys():
+            if filepath.replace("\\", "/").startswith(prefix):
+                if matched_prefix is None or len(prefix) > len(matched_prefix):
+                    matched_prefix = prefix
+        if matched_prefix:
+            rule_id = f"{matched_prefix}_{rule_id}".lower().replace("/", "_").replace(".", "_")
+
+        data = {"violation_id": violation_id, "rule_id": rule_id, "symbol": source_sym,
+                "filepath": filepath, "line": line_number, "message": trace_msg, "origin": "automatic"}
+        self.repository.compliance.add_violation(**data)
+        return data
+
+    def _trace_propagation_path(self, source_sym, target_sym, field_name, propagation_sources, field_conf) -> List[str]:
+        curr_src = source_sym
+        src_path = [curr_src]
+        visited = {curr_src}
+        while (curr_src, field_name) in propagation_sources:
+            curr_src = propagation_sources[(curr_src, field_name)]
+            if curr_src in visited:
+                break
+            visited.add(curr_src)
+            src_path.append(curr_src)
+
+        curr_tgt = target_sym
+        tgt_path = [curr_tgt]
+        visited = {curr_tgt}
+        while (curr_tgt, field_name) in propagation_sources:
+            curr_tgt = propagation_sources[(curr_tgt, field_name)]
+            if curr_tgt in visited:
+                break
+            visited.add(curr_tgt)
+            tgt_path.append(curr_tgt)
+
+        direction = field_conf.get("propagation_direction", "upstream")
+        if direction == "upstream":
+            path = src_path
+            if path[-1] != target_sym:
+                path = path + tgt_path
+        else:
+            path = list(reversed(src_path)) + list(reversed(tgt_path))
+
+        seen = set()
+        return [node for node in path if node not in seen and not seen.add(node)]
+
+    def _check_naming_violations(self, symbol_classifications, config, filepath_filter) -> List[Dict[str, Any]]:
+        violations = []
         naming_rules = []
         for prefix, prefix_conf in config.items():
             rules = prefix_conf.get("rules", [])
             for r in rules:
                 if r.get("rule_type") == "naming_convention":
                     naming_rules.append((prefix, r))
-            
             auto_fields = prefix_conf.get("automatic_fields", {})
             for field_name, field_conf in auto_fields.items():
-                rules = field_conf.get("rules", [])
-                for r in rules:
+                for r in field_conf.get("rules", []):
                     if r.get("rule_type") == "naming_convention":
                         naming_rules.append((prefix, r))
 
@@ -435,8 +372,6 @@ class Auditor:
             filepath = data["symbol_info"]["filepath"]
             if not filepath:
                 continue
-                
-            # Filter by filepath prefix if requested
             if filepath_filter:
                 norm_source_fp = filepath.replace("\\", "/")
                 norm_filter = filepath_filter.replace("\\", "/")
@@ -448,92 +383,55 @@ class Auditor:
                     classification = rule.get("classification")
                     suffix = rule.get("name_suffix")
                     prefix_pattern = rule.get("name_prefix")
-                    
-                    # Check if symbol has this classification value in any of its fields
-                    is_match = False
-                    for f_name, f_val in data["fields"].items():
-                        if f_val == classification:
-                            is_match = True
-                            break
-                            
-                    if is_match:
-                        simple_name = self.tracer.get_simple_name(sym)
-                        violated = False
-                        if suffix and not simple_name.endswith(suffix):
-                            violated = True
-                        if prefix_pattern and not simple_name.startswith(prefix_pattern):
-                            violated = True
-                            
-                        if violated:
-                            msg = rule.get("message", f"Naming convention violation: '{simple_name}' must match constraints for {classification}")
-                            
-                            # Find definition line
-                            line_number = 1
-                            occs = self.repository.symbols.get_occurrences_for_symbol(sym)
-                            for occ in occs:
-                                if occ["filepath"] == filepath and occ["role"] == 1:
-                                    line_number = occ["start_line"]
-                                    break
-                            if line_number == 1 and occs:
-                                line_number = occs[0]["start_line"]
-                                
-                            violation_text = f"{sym}_naming_{classification}"
-                            violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
-                            rule_id = f"naming_{classification}".lower().replace("/", "_").replace(".", "_")
-                            
-                            violation_data = {
-                                "violation_id": violation_id,
-                                "rule_id": rule_id,
-                                "symbol": sym,
-                                "filepath": filepath,
-                                "line": line_number,
-                                "message": msg,
-                                "origin": "automatic"
-                            }
-                            violations.append(violation_data)
-                            self.repository.compliance.add_violation(**violation_data)
-
-        # 5c. Check for files pending manual compliance audit
-        for f_path, meta in file_metadata.items():
-            if meta.get("pending_audit"):
-                # Filter by filepath prefix if requested
-                if filepath_filter:
-                    norm_source_fp = f_path.replace("\\", "/")
-                    norm_filter = filepath_filter.replace("\\", "/")
-                    if not norm_source_fp.startswith(norm_filter):
+                    is_match = any(f_val == classification for f_val in data["fields"].values())
+                    if not is_match:
                         continue
+                    simple_name = self.tracer.get_simple_name(sym)
+                    violated = (suffix and not simple_name.endswith(suffix)) or (prefix_pattern and not simple_name.startswith(prefix_pattern))
+                    if not violated:
+                        continue
+                    msg = rule.get("message", f"Naming convention violation: '{simple_name}' must match constraints for {classification}")
+                    line_number = next((occ["start_line"] for occ in self.repository.symbols.get_occurrences_for_symbol(sym) if occ["filepath"] == filepath and occ["role"] == 1), 1)
+                    if line_number == 1:
+                        occs = self.repository.symbols.get_occurrences_for_symbol(sym)
+                        if occs:
+                            line_number = occs[0]["start_line"]
+                    from utils.helpers import ViolationId
+                    violation_id = ViolationId.generate(sym, "naming", classification)
+                    rule_id = f"naming_{classification}".lower().replace("/", "_").replace(".", "_")
+                    vdata = {"violation_id": violation_id, "rule_id": rule_id, "symbol": sym,
+                             "filepath": filepath, "line": line_number, "message": msg, "origin": "automatic"}
+                    violations.append(vdata)
+                    self.repository.compliance.add_violation(**vdata)
+        return violations
 
-                violation_text = f"pending_audit_{f_path}"
-                violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
-                
-                justification_msg = meta.get("justification") or "pending initial audit"
-                msg = f"Component '{f_path}' requires manual compliance audit (justification: {justification_msg})."
-                
-                violation_data = {
-                    "violation_id": violation_id,
-                    "rule_id": "pending_audit",
-                    "symbol": None,
-                    "filepath": f_path,
-                    "line": 1,
-                    "message": msg,
-                    "origin": "automatic"
-                }
-                violations.append(violation_data)
-                self.repository.compliance.add_violation(**violation_data)
+    def _check_pending_audits(self, filepath_filter) -> List[Dict[str, Any]]:
+        violations = []
+        file_metadata = self.repository.files.get_all_files_metadata()
+        for f_path, meta in file_metadata.items():
+            if not meta.get("pending_audit"):
+                continue
+            if filepath_filter:
+                norm_source_fp = f_path.replace("\\", "/")
+                norm_filter = filepath_filter.replace("\\", "/")
+                if not norm_source_fp.startswith(norm_filter):
+                    continue
+            justification_msg = meta.get("justification") or ""
+            msg = f"{f_path}: file changed" if "modified" in justification_msg.lower() or "changed" in justification_msg.lower() else f"{f_path}: new file"
+            from utils.helpers import ViolationId
+            violation_id = ViolationId.generate("pending_audit", f_path)
+            vdata = {"violation_id": violation_id, "rule_id": "pending_audit", "symbol": None,
+                     "filepath": f_path, "line": 1, "message": msg, "origin": "automatic"}
+            violations.append(vdata)
+            self.repository.compliance.add_violation(**vdata)
+        return violations
 
-        # Re-compute automated status for all files based on active automatic violations
+    def _recompute_file_statuses(self, violations):
+        file_metadata = self.repository.files.get_all_files_metadata()
         violations_by_file = {}
         for v in violations:
-            v_filepath = v["filepath"]
-            violations_by_file.setdefault(v_filepath, []).append(v.get("origin", "automatic"))
-
+            violations_by_file.setdefault(v["filepath"], []).append(v.get("origin", "automatic"))
         for f_path in file_metadata.keys():
             v_origins = violations_by_file.get(f_path, [])
-            if not v_origins or all(o != "automatic" for o in v_origins):
-                new_status = "COMPLIANT"
-            else:
-                new_status = "VIOLATION_DETECTED"
+            new_status = "COMPLIANT" if not v_origins or all(o != "automatic" for o in v_origins) else "VIOLATION_DETECTED"
             self.repository.files.update_file_status(f_path, new_status)
-
-        print(f"[Auditor] Completed audit. Found {len(violations)} architectural violations.")
-        return violations

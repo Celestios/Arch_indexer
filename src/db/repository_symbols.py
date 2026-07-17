@@ -57,6 +57,29 @@ class SymbolsRepository(BaseRepository):
                 }
         return None
 
+    def get_symbols_by_filepaths(self, filepaths: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Get all symbols for a list of filepaths, returned as {symbol: {kind, body_hash, ...}}."""
+        if not filepaths:
+            return {}
+        result = {}
+        with self.db_conn.session() as conn:
+            # Build a single query with IN clause for all normalized filepaths
+            fp_norms = [fp.replace("\\", "/") for fp in filepaths]
+            placeholders = ",".join("?" for _ in fp_norms)
+            rows = conn.execute(
+                f"""SELECT symbol, kind, body_hash, signature, docstring FROM symbols
+                    WHERE replace(filepath, '\\', '/') IN ({placeholders})""",
+                fp_norms
+            ).fetchall()
+            for r in rows:
+                result[r[0]] = {
+                    "kind": r[1],
+                    "body_hash": r[2],
+                    "signature": r[3],
+                    "docstring": r[4]
+                }
+        return result
+
     def add_occurrence(
         self,
         symbol: str,
@@ -98,7 +121,7 @@ class SymbolsRepository(BaseRepository):
                 for r in res
             ]
 
-    def upsert_symbols_bulk(self, symbols_list: List[Dict[str, Any]]):
+    def upsert_symbols_bulk(self, symbols_list: List[Dict[str, Any]], progress_callback=None):
         """Bulk upserts a list of symbols in a single transaction."""
         if not symbols_list:
             return
@@ -131,8 +154,10 @@ class SymbolsRepository(BaseRepository):
                 """,
                 data
             )
+        if progress_callback:
+            progress_callback(len(data), len(data))
 
-    def add_occurrences_bulk(self, occurrences_list: List[Dict[str, Any]]):
+    def add_occurrences_bulk(self, occurrences_list: List[Dict[str, Any]], progress_callback=None):
         """Bulk inserts a list of occurrences in a single transaction."""
         if not occurrences_list:
             return
@@ -156,6 +181,8 @@ class SymbolsRepository(BaseRepository):
                 """,
                 data
             )
+        if progress_callback:
+            progress_callback(len(data), len(data))
 
     def get_symbols_in_file(self, filepath: str) -> List[Dict[str, Any]]:
         """Retrieves all symbols defined inside a specific file."""
@@ -262,6 +289,36 @@ class SymbolsRepository(BaseRepository):
                         "role": r[6]
                     }
         return result
+
+    def delete_symbols_for_file(self, filepath: str):
+        """Delete all symbols defined in a specific file."""
+        with self.db_conn.session() as conn:
+            conn.execute("DELETE FROM symbols WHERE filepath = ?", (filepath,))
+
+    def delete_occurrences_for_file(self, filepath: str):
+        """Delete all occurrences in a specific file."""
+        with self.db_conn.session() as conn:
+            conn.execute("DELETE FROM occurrences WHERE filepath = ?", (filepath,))
+
+    def delete_symbols_for_files(self, filepaths: List[str]):
+        """Delete all symbols defined in multiple files."""
+        if not filepaths:
+            return
+        with self.db_conn.session() as conn:
+            conn.execute(
+                "DELETE FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
+                (filepaths,)
+            )
+
+    def delete_occurrences_for_files(self, filepaths: List[str]):
+        """Delete all occurrences in multiple files."""
+        if not filepaths:
+            return
+        with self.db_conn.session() as conn:
+            conn.execute(
+                "DELETE FROM occurrences WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
+                (filepaths,)
+            )
 
     def recalculate_connection_weights(self):
         """

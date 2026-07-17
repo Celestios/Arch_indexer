@@ -1,3 +1,4 @@
+import json
 from typing import Dict, List, Any, Optional
 from db.base import BaseRepository
 
@@ -25,25 +26,32 @@ class FilesRepository(BaseRepository):
 
     def delete_file(self, filepath: str):
         """
-        Deletes a file record and manually cleans up associated symbols, occurrences, and edges
-        to maintain referential integrity.
+        Deletes a file record and cleans up associated symbols, occurrences, and edges.
+        Delegates cross-table cleanup to CascadeCleanupService.
         """
+        from db.cascade import CascadeCleanupService
+        cascade = CascadeCleanupService(self._get_repository())
+        cascade.delete_file(filepath)
+
+    def delete_file_record(self, filepath: str):
+        """Deletes only the file record (no cross-table cleanup)."""
         with self.db_conn.session() as conn:
-            # 1. Delete outgoing or incoming edges linking to symbols in this file
-            conn.execute(
-                """
-                DELETE FROM edges 
-                WHERE source IN (SELECT symbol FROM symbols WHERE filepath = ?)
-                   OR target IN (SELECT symbol FROM symbols WHERE filepath = ?)
-                """,
-                (filepath, filepath)
-            )
-            # 2. Delete occurrences in this file
-            conn.execute("DELETE FROM occurrences WHERE filepath = ?", (filepath,))
-            # 3. Delete symbols in this file
-            conn.execute("DELETE FROM symbols WHERE filepath = ?", (filepath,))
-            # 4. Delete the file itself
             conn.execute("DELETE FROM files WHERE filepath = ?", (filepath,))
+
+    def delete_files_records(self, filepaths: List[str]):
+        """Deletes only file records for multiple files (no cross-table cleanup)."""
+        if not filepaths:
+            return
+        with self.db_conn.session() as conn:
+            conn.execute(
+                "DELETE FROM files WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
+                (filepaths,)
+            )
+
+    def _get_repository(self):
+        """Get the parent Repository for cascade operations."""
+        from db.repository import Repository
+        return Repository(self.db_conn)
 
     def get_file(self, filepath: str) -> Optional[Dict[str, Any]]:
         """Retrieves indexing metadata for a specific file."""
@@ -109,7 +117,6 @@ class FilesRepository(BaseRepository):
 
     def update_file_manual_fields(self, filepath: str, manual_fields: dict, justification: Optional[str] = None):
         """Sets or updates the manual metadata fields (JSON format) for a file."""
-        import json
         fields_str = json.dumps(manual_fields)
         with self.db_conn.session() as conn:
             conn.execute(
@@ -136,7 +143,6 @@ class FilesRepository(BaseRepository):
 
     def get_all_files_metadata(self) -> Dict[str, Dict[str, Any]]:
         """Retrieves all files' status, manual status, pending_audit, manual fields, justification, and sha256."""
-        import json
         with self.db_conn.session() as conn:
             rows = conn.execute(
                 "SELECT filepath, sha256, status, manual_status, pending_audit, manual_fields, justification, language FROM files"
@@ -183,17 +189,6 @@ class FilesRepository(BaseRepository):
         """Cleans up occurrences, edges, and symbols for the given filepaths before re-ingesting."""
         if not filepaths:
             return
-        with self.db_conn.session() as conn:
-            # Delete edges linking to symbols in these files
-            conn.execute(
-                """
-                DELETE FROM edges 
-                WHERE source IN (SELECT symbol FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[])))
-                   OR target IN (SELECT symbol FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[])))
-                """,
-                (filepaths, filepaths)
-            )
-            # Delete occurrences
-            conn.execute("DELETE FROM occurrences WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))", (filepaths,))
-            # Delete symbols
-            conn.execute("DELETE FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))", (filepaths,))
+        from db.cascade import CascadeCleanupService
+        cascade = CascadeCleanupService(self._get_repository())
+        cascade.delete_files_bulk(filepaths)

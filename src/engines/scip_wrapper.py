@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Set
 
 from utils.exclusions import load_include_dirs, is_included
+from utils.helpers import IS_WINDOWS, ext_to_lang as _ext_to_lang
 
 
 def print_progress(current: int, total: int, prefix: str = "", width: int = 30):
@@ -217,7 +218,7 @@ class ScipWrapper:
                 ["dart", "pub", "global", "activate", "scip_dart"],
                 cwd=str(pubspec_dir), check=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                shell=(sys.platform == "win32")
+                shell=IS_WINDOWS
             )
         except subprocess.CalledProcessError as e:
             print(f"Warning: Failed to activate scip_dart: {e}", file=sys.stderr)
@@ -225,7 +226,7 @@ class ScipWrapper:
         try:
             rc = run_with_scroll(
                 ["dart", "pub", "global", "run", "scip_dart", "."],
-                cwd=str(pubspec_dir), shell=(sys.platform == "win32")
+                cwd=str(pubspec_dir), shell=IS_WINDOWS
             )
             if rc != 0:
                 raise subprocess.CalledProcessError(rc, "scip_dart")
@@ -242,15 +243,15 @@ class ScipWrapper:
             ra_cmd = ["rustup", "run", "stable", "rust-analyzer", "scip", "."]
 
         try:
-            rc = run_with_scroll(ra_cmd, cwd=str(project_dir), shell=(sys.platform == "win32"))
+            rc = run_with_scroll(ra_cmd, cwd=str(project_dir), shell=IS_WINDOWS)
             if rc != 0:
                 raise subprocess.CalledProcessError(rc, "rust-analyzer")
             return ScipWrapper._move_index_to_arch(project_dir, language)
         except subprocess.CalledProcessError:
             print("Warning: rust-analyzer CLI was not found. Attempting to add it via rustup...")
             try:
-                subprocess.run(["rustup", "component", "add", "rust-analyzer"], check=True, shell=(sys.platform == "win32"))
-                rc = run_with_scroll(["rust-analyzer", "scip", "."], cwd=str(project_dir), shell=(sys.platform == "win32"))
+                subprocess.run(["rustup", "component", "add", "rust-analyzer"], check=True, shell=IS_WINDOWS)
+                rc = run_with_scroll(["rust-analyzer", "scip", "."], cwd=str(project_dir), shell=IS_WINDOWS)
                 if rc != 0:
                     raise subprocess.CalledProcessError(rc, "rust-analyzer")
                 return ScipWrapper._move_index_to_arch(project_dir, language)
@@ -274,7 +275,7 @@ class ScipWrapper:
             print(f"Error: {tool_name} CLI is not on the system PATH.", file=sys.stderr)
             return None
         try:
-            rc = run_with_scroll([tool_name] + extra_args, cwd=str(project_dir), shell=(sys.platform == "win32"))
+            rc = run_with_scroll([tool_name] + extra_args, cwd=str(project_dir), shell=IS_WINDOWS)
             if rc != 0:
                 raise subprocess.CalledProcessError(rc, tool_name)
             return ScipWrapper._move_index_to_arch(project_dir, language)
@@ -294,7 +295,7 @@ class ScipWrapper:
             rc = run_with_scroll(
                 ["scip-python", "index", "--project-name", str(project_dir.name),
                  "--output", str(arch_index)],
-                cwd=str(project_dir), shell=(sys.platform == "win32")
+                cwd=str(project_dir), shell=IS_WINDOWS
             )
             if rc != 0:
                 raise subprocess.CalledProcessError(rc, "scip-python")
@@ -511,7 +512,7 @@ class ScipWrapper:
         return weight
 
     @staticmethod
-    def ingest_index(repository: Any, parsed_data: Dict[str, Any], embedder: Optional[Any] = None, project_root: Optional[Path] = None, force: bool = False):
+    def ingest_index(repository: Any, parsed_data: Dict[str, Any], embedder: Optional[Any] = None, project_root: Optional[Path] = None, force: bool = False, config: Optional[Dict[str, Any]] = None):
         """
         Ingests the parsed symbols, occurrences, and edges into the database.
         Optionally uses an embedder to compute vector representations for symbol docstrings.
@@ -615,9 +616,6 @@ class ScipWrapper:
                     "Refusing to overwrite. This might be due to a failed SCIP extraction. Pass force=True to override."
                 )
 
-        # Clean old symbols, occurrences, and edges only for CHANGED files
-        repository.files.clean_files_symbols_and_relations(changed_files)
-
         # Clean up deleted files
         for fp in deleted_files:
             print(f"[SCIP Ingest] Cleaning up deleted file from database: {fp}")
@@ -649,11 +647,24 @@ class ScipWrapper:
                           if v["filepath"] is None or v["filepath"] in changed_set}
         total_symbols = len(filtered_symbols)
         print(f"[SCIP Ingest] Ingesting {total_symbols} symbols from {len(changed_files)} changed files...")
-        symbols_to_ingest = []
+
+        # Load existing symbols from DB to compare
+        existing_symbols = {}
+        if changed_files:
+            existing_symbols = repository.symbols.get_symbols_by_filepaths(changed_files)
+
         items = list(filtered_symbols.items())
 
         def process_symbol(item):
             sym_id, sym = item
+            # Skip if symbol exists and hasn't changed
+            if sym_id in existing_symbols:
+                existing = existing_symbols[sym_id]
+                if (existing["body_hash"] == sym["body_hash"] and
+                    existing["kind"] == sym["kind"] and
+                    existing["signature"] == sym.get("signature") and
+                    existing["docstring"] == sym["docstring"]):
+                    return None  # Skip unchanged
             embedding = None
             if embedder and sym["docstring"]:
                 try:
@@ -682,34 +693,52 @@ class ScipWrapper:
                     print_progress(completed, total_symbols, prefix="[SCIP Ingest] Symbols")
             symbols_to_ingest = [r for r in results if r is not None]
 
-        repository.symbols.upsert_symbols_bulk(symbols_to_ingest)
+        skipped = total_symbols - len(symbols_to_ingest)
+        if skipped > 0:
+            print(f"  Skipped {skipped} unchanged symbols.")
+        print(f"[SCIP Ingest] Writing {len(symbols_to_ingest)} symbols to database...")
+        sym_chunk = 100
+        for i in range(0, len(symbols_to_ingest), sym_chunk):
+            chunk = symbols_to_ingest[i:i + sym_chunk]
+            repository.symbols.upsert_symbols_bulk(chunk)
+            print_progress(min(i + sym_chunk, len(symbols_to_ingest)), len(symbols_to_ingest), prefix="[SCIP Ingest] Symbols DB")
 
         # 3. Ingest occurrences (only changed files)
         filtered_occurrences = [occ for occ in parsed_data["occurrences"]
                                if occ["filepath"] and occ["filepath"] in changed_set]
         total_occ = len(filtered_occurrences)
+        # Delete old occurrences for changed files before re-inserting
+        for fp in changed_files:
+            repository.symbols.delete_occurrences_for_file(fp)
         print(f"[SCIP Ingest] Ingesting {total_occ} occurrences...")
-        print_progress(total_occ, total_occ, prefix="[SCIP Ingest] Occurrences")
-        repository.symbols.add_occurrences_bulk(filtered_occurrences)
+        occ_chunk = 100
+        for i in range(0, total_occ, occ_chunk):
+            chunk = filtered_occurrences[i:i + occ_chunk]
+            repository.symbols.add_occurrences_bulk(chunk)
+            print_progress(min(i + occ_chunk, total_occ), total_occ, prefix="[SCIP Ingest] Occurrences")
 
         # 4. Ingest call graph edges (only changed files)
         filtered_edges = [e for e in parsed_data["edges"]
                          if filtered_symbols.get(e["source"], {}).get("filepath") in changed_set
                          or filtered_symbols.get(e["target"], {}).get("filepath") in changed_set]
         total_edges = len(filtered_edges)
+        # Delete old edges for changed files before re-inserting
+        for fp in changed_files:
+            repository.edges.delete_edges_for_file(fp)
         print(f"[SCIP Ingest] Ingesting {total_edges} edges from changed files...")
         
         # Load config to calculate weights
-        config = {}
-        if project_root:
-            config_path = project_root / ".arch" / "config.json"
-            if config_path.exists():
-                try:
-                    import json
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        config = json.load(f)
-                except Exception:
-                    pass
+        if config is None:
+            config = {}
+            if project_root:
+                config_path = project_root / ".arch" / "config.json"
+                if config_path.exists():
+                    try:
+                        import json
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            config = json.load(f)
+                    except Exception:
+                        pass
 
         edges_to_ingest = []
         for idx, edge in enumerate(filtered_edges, 1):

@@ -1,3 +1,4 @@
+import json
 import sys
 import argparse
 from pathlib import Path
@@ -12,6 +13,7 @@ from auditor.analyzer import Auditor
 from change_tracker.watcher import start_watcher
 from auditor.validator import ConfigValidator
 from utils.progress import make_progress_callback
+from utils.helpers import resolve_filepath as _resolve_filepath, CODEQL_LANG_MAP
 
 
 def get_project_root(args) -> Path:
@@ -40,14 +42,7 @@ def workspace_session(args):
 
 def resolve_filepath(repository, raw_path: str) -> str:
     """Resolve a filepath against the database, trying exact match then suffix fallback."""
-    file_info = repository.files.get_file(raw_path)
-    if file_info:
-        return raw_path
-    all_files = repository.files.get_all_files_metadata()
-    for fp in all_files.keys():
-        if fp.replace("\\", "/").endswith(raw_path.replace("\\", "/")):
-            return fp
-    return None
+    return _resolve_filepath(repository, raw_path)
 
 
 def _resolve_init_paths(project_root: Path):
@@ -171,6 +166,56 @@ def _select_codeql(codeql_installed, codeql_dir, shutil_mod):
     return setup_cql, cql_ready
 
 
+def _select_include_dirs(project_root, arch_dir):
+    """Interactively prompt user to select directories to index. Writes selection to config.json."""
+    from utils.helpers import ext_to_lang
+    skip_dirs = {".git", ".arch", ".venv", "__pycache__", "node_modules", ".mypy_cache", ".pytest_cache", "build", "dist"}
+    code_exts = {ext for ext, lang in {".rs": "rust", ".dart": "dart", ".py": "python", ".go": "go", ".js": "javascript", ".ts": "typescript", ".java": "java"}.items()}
+
+    code_dirs = set()
+    for ext in code_exts:
+        for f in project_root.rglob(f"*{ext}"):
+            try:
+                rel = f.relative_to(project_root)
+            except ValueError:
+                continue
+            top = rel.parts[0]
+            if top not in skip_dirs and not top.startswith("."):
+                code_dirs.add(top)
+
+    code_dirs = sorted(code_dirs, key=str.lower)
+    if not code_dirs:
+        return
+
+    print("\n--- Directory Indexing Options ---")
+    print("Directories containing code files:")
+    for idx, d in enumerate(code_dirs, 1):
+        print(f"  [{idx}] {d}")
+    try:
+        choice = input(f"Choose directories [1-{len(code_dirs)}] (comma-separated, e.g., 1,2, default: all): ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\nDefaulting to all directories.")
+        choice = ""
+
+    selected = code_dirs
+    if choice:
+        try:
+            indices = [int(i.strip()) for i in choice.split(",") if i.strip().isdigit()]
+            valid = [code_dirs[i - 1] for i in indices if 1 <= i <= len(code_dirs)]
+            if valid:
+                selected = valid
+            else:
+                print("Invalid selection. Defaulting to all directories.")
+        except ValueError:
+            print("Invalid input. Defaulting to all directories.")
+
+    config = {d: {} for d in selected}
+    config_path = arch_dir / "config.json"
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+    print(f"  Indexed directories: {', '.join(selected)}")
+
+
 def _setup_model(setup_model, choice, target_models_dir, model_path, tokenizer_path, bin_dir):
     """Download or load ONNX embedding model. Returns LocalEmbedder or None."""
     embedder = None
@@ -205,13 +250,11 @@ def _setup_model(setup_model, choice, target_models_dir, model_path, tokenizer_p
     return embedder
 
 
-def _run_sci_indexer(project_root, arch_dir, selected_languages, embedder, force):
+def _run_sci_indexer(project_root, repository, selected_languages, embedder, force):
     """Run SCIP indexer for selected languages. Returns True if any language was indexed."""
     if not selected_languages:
         return False
     print("\n--- Running Code Graph Indexer ---")
-    db_conn = DbConnection(arch_dir / "arch.db")
-    repository = Repository(db_conn)
     indexed_any = False
     for lang in selected_languages:
         index_path = ScipWrapper.run_indexer(project_root, lang)
@@ -223,7 +266,6 @@ def _run_sci_indexer(project_root, arch_dir, selected_languages, embedder, force
             indexed_any = True
         else:
             print(f"  [{lang}] Indexing failed. Verify environment settings.", file=sys.stderr)
-    db_conn.close()
     return indexed_any
 
 
@@ -231,11 +273,7 @@ def _build_codeql_dbs(project_root, arch_dir, bin_dir, selected_languages, cql_r
     """Build CodeQL databases and Dart analyzer DB. Returns dart_analyzer instance."""
     if not (cql_ready and selected_languages):
         return None
-    codeql_lang_map = {
-        "rust": "rust", "go": "go", "java": "java", "python": "python",
-        "typescript": "javascript",
-    }
-    cql_langs = [codeql_lang_map[l] for l in selected_languages if l in codeql_lang_map]
+    cql_langs = [CODEQL_LANG_MAP[l] for l in selected_languages if l in CODEQL_LANG_MAP]
     dart_analyzer = None
 
     if cql_langs:
@@ -267,6 +305,7 @@ def _build_codeql_dbs(project_root, arch_dir, bin_dir, selected_languages, cql_r
                         db_output_dir=arch_dir / "dart_analyzer_db",
                         language="dart"
                     )
+
                 else:
                     print("\n[DartAnalyzer] analyzer package not available, skipping.")
                     dart_analyzer = None
@@ -298,23 +337,18 @@ def _build_codeql_dbs(project_root, arch_dir, bin_dir, selected_languages, cql_r
     return dart_analyzer
 
 
-def _extract_codeql_kinds(arch_dir, bin_dir, selected_languages, cql_ready):
+def _extract_codeql_kinds(db_conn, arch_dir, bin_dir, selected_languages, cql_ready):
     """Extract symbol kinds from CodeQL databases."""
     if not (cql_ready and selected_languages):
         return
-    codeql_lang_map = {
-        "rust": "rust", "go": "go", "java": "java", "python": "python",
-        "typescript": "javascript",
-    }
     print("\n--- Extracting Symbol Kinds from CodeQL ---")
     try:
         from engines.codeql_wrapper import CodeQlWrapper
         codeql = CodeQlWrapper(bin_dir)
         if codeql.is_available():
-            db_conn = DbConnection(arch_dir / "arch.db")
             with db_conn.session() as conn:
                 for lang in selected_languages:
-                    cql_lang = codeql_lang_map.get(lang, lang)
+                    cql_lang = CODEQL_LANG_MAP.get(lang, lang)
                     db_dir = arch_dir / f"codeql_db_{cql_lang}"
                     if not db_dir.exists():
                         db_dir = arch_dir / "codeql_db"
@@ -326,25 +360,23 @@ def _extract_codeql_kinds(arch_dir, bin_dir, selected_languages, cql_ready):
                         for entry in kinds:
                             sym_name, kind, file_path, line = entry["name"], entry["kind"], entry["file"], entry["line"]
                             file_path = file_path.replace("\\", "/")
+                            # SCIP symbols store name as "module/name().", CodeQL returns "module.name"
+                            # Extract the short name (last part) for matching
+                            short_name = sym_name.rsplit(".", 1)[-1] if "." in sym_name else sym_name
                             res = conn.execute(
-                                "UPDATE symbols SET kind = ? WHERE kind = 'UnspecifiedKind' AND filepath LIKE ? AND start_line = ?",
-                                (kind, f"%{file_path}", line)
+                                "UPDATE symbols SET kind = ? WHERE kind = 'UnspecifiedKind' AND filepath LIKE ? AND symbol LIKE ?",
+                                (kind, f"%{file_path}", f"%{short_name}%")
                             )
-                            if res.rowcount == 0:
-                                res = conn.execute(
-                                    "UPDATE symbols SET kind = ? WHERE kind = 'UnspecifiedKind' AND (symbol LIKE ? OR symbol = ?)",
-                                    (kind, f"%{sym_name}%", sym_name)
-                                )
-                            updated += res.rowcount
+                            if res.rowcount > 0:
+                                updated += res.rowcount
                         print(f"  [{lang}] Updated {updated} symbol kinds from CodeQL.")
                     else:
                         print(f"  [{lang}] No kind data extracted from CodeQL.")
-            db_conn.close()
     except Exception as e:
         print(f"  Warning: Kind extraction failed: {e}")
 
 
-def _link_ffi(project_root, arch_dir, bin_dir, selected_languages, cql_ready, dart_analyzer):
+def _link_ffi(project_root, repository, arch_dir, bin_dir, selected_languages, cql_ready, dart_analyzer):
     """Run FFI cross-language linking."""
     if len(selected_languages) <= 1:
         return
@@ -386,11 +418,8 @@ def _link_ffi(project_root, arch_dir, bin_dir, selected_languages, cql_ready, da
                     all_matches.extend(matches)
 
             if all_matches:
-                db_conn = DbConnection(arch_dir / "arch.db")
-                repository = Repository(db_conn)
                 linker = FfiLinker(repository)
                 edges_created = linker.link(all_matches)
-                db_conn.close()
                 print(f"  FFI linking complete: {edges_created} cross-language edges created.")
             else:
                 print("  No FFI matches found across languages.")
@@ -446,6 +475,7 @@ def cmd_init(args):
     selected_languages = _select_languages(languages)
     setup_model, model_choice = _select_model(model_installed)
     setup_cql, cql_ready = _select_codeql(codeql_installed, codeql_dir, shutil)
+    _select_include_dirs(project_root, arch_dir)
 
     # 4. Setup CodeQL
     if setup_cql:
@@ -462,17 +492,23 @@ def cmd_init(args):
     # 5. Setup model
     embedder = _setup_model(setup_model, model_choice, target_models_dir, model_path, tokenizer_path, bin_dir)
 
-    # 6. Run SCIP indexer
-    indexed_any = _run_sci_indexer(project_root, arch_dir, selected_languages, embedder, getattr(args, 'force', False))
+    # 6. Create shared repository for indexing and linking
+    db_conn = DbConnection(arch_dir / "arch.db")
+    repository = Repository(db_conn)
 
-    # 7. Build CodeQL + Dart databases
+    # 7. Run SCIP indexer
+    indexed_any = _run_sci_indexer(project_root, repository, selected_languages, embedder, getattr(args, 'force', False))
+
+    # 8. Build CodeQL + Dart databases
     dart_analyzer = _build_codeql_dbs(project_root, arch_dir, bin_dir, selected_languages, cql_ready)
 
-    # 8. Extract symbol kinds
-    _extract_codeql_kinds(arch_dir, bin_dir, selected_languages, cql_ready)
+    # 9. Extract symbol kinds
+    _extract_codeql_kinds(db_conn, arch_dir, bin_dir, selected_languages, cql_ready)
 
-    # 9. FFI cross-language linking
-    _link_ffi(project_root, arch_dir, bin_dir, selected_languages, cql_ready, dart_analyzer)
+    # 10. FFI cross-language linking
+    _link_ffi(project_root, repository, arch_dir, bin_dir, selected_languages, cql_ready, dart_analyzer)
+
+    db_conn.close()
 
     # 10. Summary
     if selected_languages:

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from collections import deque
 from db.repository import Repository
+from utils.helpers import load_config as _load_config
 
 
 class ContextCompiler:
@@ -16,17 +17,6 @@ class ContextCompiler:
     def __init__(self, repository: Repository, project_root: Path):
         self.repository = repository
         self.project_root = project_root
-        self.config_path = project_root / ".arch" / "config.json"
-
-    def load_config(self) -> Dict[str, Any]:
-        """Loads and parses the .arch/config.json file."""
-        if not self.config_path.exists():
-            return {}
-        try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
 
     def traverse_subgraph(
         self,
@@ -50,22 +40,17 @@ class ContextCompiler:
                 continue
 
             neighbors = set()
-            with self.repository.db_conn.session() as conn:
-                # Upstream (Who calls curr)
-                if direction in ("upstream", "both"):
-                    rows = conn.execute(
-                        "SELECT source FROM edges WHERE target = ?", (curr,)
-                    ).fetchall()
-                    for (src,) in rows:
-                        neighbors.add(src)
+            # Upstream (Who calls curr)
+            if direction in ("upstream", "both"):
+                incoming = self.repository.edges.get_incoming_edges(curr)
+                for edge in incoming:
+                    neighbors.add(edge["source"])
 
-                # Downstream (What does curr call)
-                if direction in ("downstream", "both"):
-                    rows = conn.execute(
-                        "SELECT target FROM edges WHERE source = ?", (curr,)
-                    ).fetchall()
-                    for (tgt,) in rows:
-                        neighbors.add(tgt)
+            # Downstream (What does curr call)
+            if direction in ("downstream", "both"):
+                outgoing = self.repository.edges.get_outgoing_edges(curr)
+                for edge in outgoing:
+                    neighbors.add(edge["target"])
 
             for neighbor in neighbors:
                 if neighbor not in visited:
@@ -128,7 +113,7 @@ class ContextCompiler:
         writer.write("Generated dynamically by the Arch-mcp Context Compiler.\n\n")
 
         # 0. Active System Ontology Configuration
-        config = self.load_config()
+        config = _load_config(self.project_root)
         if config:
             writer.write("## 0. Active System Ontology Configuration (Boundary Constraints)\n")
             writer.write("```json\n")

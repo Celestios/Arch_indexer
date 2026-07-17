@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from setup.initializer import initialize_workspace, TEST_CONFIG_JSON
+from setup.initializer import initialize_workspace, DEFAULT_CONFIG_JSON
 from db.connection import DbConnection
 from db.repository import Repository
 from engines.ffi_matcher import FfiMatch
@@ -12,7 +12,7 @@ def setup_workspace(tmp_path):
     arch_dir = tmp_path / ".arch"
     arch_dir.mkdir(parents=True, exist_ok=True)
     with open(arch_dir / "config.json", "w", encoding="utf-8") as f:
-        json.dump(TEST_CONFIG_JSON, f)
+        json.dump(DEFAULT_CONFIG_JSON, f)
     initialize_workspace(tmp_path)
     db_conn = DbConnection(tmp_path / ".arch" / "arch.db")
     repository = Repository(db_conn)
