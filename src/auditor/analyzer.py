@@ -1,6 +1,4 @@
-import json
 import sys
-import hashlib
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -8,6 +6,10 @@ from db.repository import Repository
 from auditor.classifier import SymbolClassifier
 from auditor.propagation import MetadataPropagator
 from auditor.path_tracer import PathTracer
+from auditor.config_loader import ConfigLoader
+from auditor.field_validator import FieldValidator
+from auditor.edge_weights import EdgeWeightUpdater
+
 
 class Auditor:
     """
@@ -20,40 +22,17 @@ class Auditor:
         self.repository = repository
         self.project_root = project_root
         self.config_path = project_root / ".arch" / "config.json"
-        
+
+        self.config_loader = ConfigLoader(self.config_path)
         self.classifier = SymbolClassifier(repository)
         self.propagator = MetadataPropagator()
         self.tracer = PathTracer(repository)
+        self.field_validator = FieldValidator(repository, self.config_loader)
+        self.edge_weight_updater = EdgeWeightUpdater(repository)
 
     def load_config(self) -> Dict[str, Any]:
-        """Loads and parses the .arch/config.json file."""
-        if not self.config_path.exists():
-            return {}
-        try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Error loading configuration: {e}", file=sys.stderr)
-            return {}
-
-    def get_applicable_config(self, filepath: str, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Resolves the most specific directory prefix configuration matching the filepath.
-        Longest matching prefix wins. '.' is used for root-level files.
-        """
-        # Convert path separators to forward slashes for matching
-        normalized_path = filepath.replace("\\", "/")
-        
-        matching_prefix = None
-        for prefix in config.keys():
-            if prefix == ".":
-                if matching_prefix is None:
-                    matching_prefix = "."
-            elif normalized_path.startswith(prefix):
-                if matching_prefix is None or len(prefix) > len(matching_prefix):
-                    matching_prefix = prefix
-                    
-        return config.get(matching_prefix) if matching_prefix else None
+        """Loads the workspace architectural configuration."""
+        return self.config_loader.load_config()
 
     def run_audit(self, filepath_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -61,13 +40,13 @@ class Auditor:
         Resolves symbols classifications, checks dependency rules, and saves violations.
         If filepath_filter is provided, only audits files matching that path prefix.
         """
-        config = self.load_config()
+        config = self.config_loader.load_config()
         if not config:
             print("No architectural rules found in .arch/config.json. Skipping audit.")
             return []
 
         self._clear_old_violations(filepath_filter)
-        self._reset_invalid_manual_fields(config)
+        self.field_validator.reset_invalid_manual_fields(config)
         self._handle_config_change()
 
         all_symbols = self._fetch_all_symbols()
@@ -76,7 +55,7 @@ class Auditor:
         all_edges = self._fetch_all_edges()
 
         propagation_sources = self.propagator.run_propagation(symbol_classifications, all_edges, config)
-        self._update_edge_weights(all_edges, symbol_classifications, config)
+        self.edge_weight_updater.update_edge_weights(all_edges, symbol_classifications, config)
 
         violations = []
         violations.extend(self._check_dependency_violations(symbol_classifications, all_edges, config, filepath_filter, propagation_sources))
@@ -88,71 +67,10 @@ class Auditor:
         return violations
 
     def _clear_old_violations(self, filepath_filter: Optional[str]):
-        with self.repository.db_conn.session() as conn:
-            if filepath_filter:
-                normalized_filter = filepath_filter.replace("\\", "/")
-                conn.execute(
-                    "DELETE FROM compliance_violations WHERE replace(filepath, '\\', '/') LIKE ? AND origin = 'automatic'",
-                    (f"{normalized_filter}%",)
-                )
-            else:
-                conn.execute("DELETE FROM compliance_violations WHERE origin = 'automatic'")
-
-    def _reset_invalid_manual_fields(self, config: Dict[str, Any]):
-        from change_tracker.tracker import ChangeTracker
-        file_metadata = self.repository.files.get_all_files_metadata()
-        db_updated = False
-
-        for filepath, meta in file_metadata.items():
-            prefix_conf = self.get_applicable_config(filepath, config)
-            if not prefix_conf:
-                continue
-
-            manual_cfg = prefix_conf.get("manual_fields", {})
-            current_manual_fields = meta.get("manual_fields") or {}
-            updated_fields = dict(current_manual_fields)
-            fields_to_reset = []
-            justification = meta.get("justification") or ""
-            is_modified = (meta.get("pending_audit") and justification == "File modified, pending re-audit")
-            fields_changed = False
-
-            for field_name, field_conf in manual_cfg.items():
-                default_val = field_conf.get("default")
-                allowed_values = field_conf.get("values")
-                reset_on_change = field_conf.get("reset_on_change", False)
-                curr_val = current_manual_fields.get(field_name)
-
-                if curr_val is not None and allowed_values is not None and curr_val not in allowed_values:
-                    print(
-                        f"warning: value '{curr_val}' for manual field '{field_name}' in '{filepath}' is no longer allowed. "
-                        f"Resetting to default '{default_val}' and marking for audit.",
-                        file=sys.stderr
-                    )
-                    updated_fields[field_name] = default_val
-                    fields_changed = True
-                    with self.repository.db_conn.session() as conn:
-                        conn.execute(
-                            "UPDATE files SET pending_audit = TRUE, justification = ? WHERE filepath = ?",
-                            (f"Manual field '{field_name}' value '{curr_val}' not allowed by config, reset to default.", filepath)
-                        )
-                    db_updated = True
-                elif is_modified and reset_on_change:
-                    if curr_val != default_val:
-                        updated_fields[field_name] = default_val
-                        fields_changed = True
-                        fields_to_reset.append(field_name)
-
-            if fields_changed:
-                if is_modified and fields_to_reset:
-                    reset_msg = ", ".join(fields_to_reset)
-                    new_justification = f"File modified, pending re-audit (fields reset: {reset_msg})"
-                    self.repository.files.update_file_manual_fields(filepath, updated_fields, new_justification)
-                else:
-                    self.repository.files.update_file_manual_fields(filepath, updated_fields, justification)
-                db_updated = True
-
-        if db_updated:
-            self.repository.files.get_all_files_metadata()
+        if filepath_filter:
+            self.repository.compliance.delete_automatic_violations_for_path(filepath_filter)
+        else:
+            self.repository.compliance.delete_automatic_violations()
 
     def _handle_config_change(self):
         from change_tracker.tracker import ChangeTracker
@@ -161,15 +79,7 @@ class Auditor:
             ChangeTracker.update_config_hash(self.project_root, self.repository)
 
     def _fetch_all_symbols(self) -> List[Dict[str, Any]]:
-        all_symbols = []
-        with self.repository.db_conn.session() as conn:
-            res = conn.execute("SELECT symbol, filepath, kind, signature, docstring FROM symbols").fetchall()
-            for r in res:
-                all_symbols.append({
-                    "symbol": r[0], "filepath": r[1], "kind": r[2],
-                    "signature": r[3], "docstring": r[4]
-                })
-        return all_symbols
+        return self.repository.symbols.get_all_symbols_with_metadata()
 
     def _build_outgoing_map(self, all_symbols: List[Dict[str, Any]]) -> Dict[str, List[str]]:
         outgoing_calls_map = {}
@@ -185,7 +95,7 @@ class Auditor:
             filepath = sym.get("filepath")
             if not filepath:
                 continue
-            prefix_conf = self.get_applicable_config(filepath, config)
+            prefix_conf = self.config_loader.get_applicable_config(filepath, config)
             if not prefix_conf:
                 continue
             outgoing = outgoing_map.get(sym["symbol"], [])
@@ -200,49 +110,7 @@ class Auditor:
         return symbol_classifications
 
     def _fetch_all_edges(self) -> List[Dict[str, Any]]:
-        with self.repository.db_conn.session() as conn:
-            res = conn.execute("SELECT source, target, relation FROM edges").fetchall()
-            return [{"source": r[0], "target": r[1], "relation": r[2]} for r in res]
-
-    def _update_edge_weights(self, all_edges, symbol_classifications, config):
-        all_barriers = set()
-        for prefix, prefix_conf in config.items():
-            auto_fields = prefix_conf.get("automatic_fields", {})
-            manual_fields = prefix_conf.get("manual_fields", {})
-            for field_name, field_conf in {**auto_fields, **manual_fields}.items():
-                if field_conf.get("handler") == "propagation":
-                    all_barriers.update(field_conf.get("barriers") or [])
-
-        updated_edges = []
-        for edge in all_edges:
-            src, tgt, rel = edge["source"], edge["target"], edge["relation"]
-            weight = 1.0
-            src_data = symbol_classifications.get(src)
-            tgt_data = symbol_classifications.get(tgt)
-            if src_data:
-                src_layer = src_data["fields"].get("layer")
-                tgt_layer = tgt_data["fields"].get("layer") if tgt_data else None
-                if src_layer and tgt_layer and src_layer == tgt_layer:
-                    weight *= 1.5
-                src_tier = src_data["fields"].get("tier")
-                tgt_tier = tgt_data["fields"].get("tier") if tgt_data else None
-                if src_tier is not None and tgt_tier is not None:
-                    try:
-                        if int(src_tier) > int(tgt_tier):
-                            weight *= 0.5
-                    except ValueError:
-                        pass
-                src_role = src_data["fields"].get("architectural_role") or src_data["fields"].get("role") or ""
-                if src_role in all_barriers:
-                    weight *= 0.3
-            updated_edges.append((weight, src, tgt, rel))
-
-        if updated_edges:
-            with self.repository.db_conn.session() as conn:
-                conn.executemany(
-                    "UPDATE edges SET weight = ? WHERE source = ? AND target = ? AND relation = ?",
-                    updated_edges
-                )
+        return self.repository.edges.get_all_edges_with_relation()
 
     def _check_dependency_violations(self, symbol_classifications, all_edges, config, filepath_filter, propagation_sources) -> List[Dict[str, Any]]:
         violations = []
@@ -284,7 +152,7 @@ class Auditor:
         msg = rule.get("message", f"Package restriction violation: {source_val} cannot depend on {target_sym}")
         line_number = self.repository.symbols.get_occurrences_for_symbol(target_sym)
         line_number = next((occ["start_line"] for occ in line_number if occ["filepath"] == filepath), 1)
-        from utils.helpers import ViolationId
+        from utils.violation_id import ViolationId
         violation_id = ViolationId.generate(source_sym, target_sym, "pkg_restrict", forbidden_source)
         rule_id = f"{field_name}_pkg_{forbidden_source}".lower().replace("/", "_").replace(".", "_")
         data = {"violation_id": violation_id, "rule_id": rule_id, "symbol": source_sym,
@@ -306,7 +174,7 @@ class Auditor:
         trace_msg = msg + self.tracer.format_path_trace(path)
         line_number = next((occ["start_line"] for occ in self.repository.symbols.get_occurrences_for_symbol(target_sym) if occ["filepath"] == filepath), 1)
 
-        from utils.helpers import ViolationId
+        from utils.violation_id import ViolationId
         violation_id = ViolationId.generate(source_sym, target_sym, field_name, forbidden_source, forbidden_target)
         rule_id = f"{field_name}_{forbidden_source}_{forbidden_target}".lower().replace("/", "_").replace(".", "_")
         matched_prefix = None
@@ -396,7 +264,7 @@ class Auditor:
                         occs = self.repository.symbols.get_occurrences_for_symbol(sym)
                         if occs:
                             line_number = occs[0]["start_line"]
-                    from utils.helpers import ViolationId
+                    from utils.violation_id import ViolationId
                     violation_id = ViolationId.generate(sym, "naming", classification)
                     rule_id = f"naming_{classification}".lower().replace("/", "_").replace(".", "_")
                     vdata = {"violation_id": violation_id, "rule_id": rule_id, "symbol": sym,
@@ -418,7 +286,7 @@ class Auditor:
                     continue
             justification_msg = meta.get("justification") or ""
             msg = f"{f_path}: file changed" if "modified" in justification_msg.lower() or "changed" in justification_msg.lower() else f"{f_path}: new file"
-            from utils.helpers import ViolationId
+            from utils.violation_id import ViolationId
             violation_id = ViolationId.generate("pending_audit", f_path)
             vdata = {"violation_id": violation_id, "rule_id": "pending_audit", "symbol": None,
                      "filepath": f_path, "line": 1, "message": msg, "origin": "automatic"}

@@ -23,8 +23,8 @@ class DartAnalyzerWrapper:
         self._parsed_files: dict = {}
 
     def is_available(self) -> bool:
-        """Check if Dart analyzer is available (always True for this pure-Python implementation)."""
-        return True
+        """Check if the Dart SDK is available on the system PATH."""
+        return shutil.which("dart") is not None
 
     def create_database(self, source_root: Path, db_output_dir: Path,
                        language: str, **kwargs) -> bool:

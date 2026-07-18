@@ -1,10 +1,23 @@
-from typing import Dict
-from db.base import BaseRepository
+from typing import Dict, Any, List, Optional, Tuple
+from db.connection import DbConnection
 
-class MetricsRepository(BaseRepository):
+
+class MetricsRepository:
     """
     Handles queries for codebase metrics, statistics, and counts.
     """
+    def __init__(self, db_conn: DbConnection):
+        self.db_conn = db_conn
+
+    def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
+        """Execute a read query and return all rows."""
+        with self.db_conn.session() as conn:
+            return conn.execute(sql, params or ()).fetchall()
+
+    def _execute(self, sql: str, params: Optional[Tuple] = None) -> Any:
+        """Execute a write query and return the result."""
+        with self.db_conn.session() as conn:
+            return conn.execute(sql, params or ())
 
     def get_symbol_counts_by_kind(self) -> Dict[str, int]:
         """Returns symbol counts grouped by their declaration kind."""

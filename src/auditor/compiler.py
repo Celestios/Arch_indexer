@@ -5,6 +5,7 @@ from typing import Dict, List, Any, Optional
 from collections import deque
 from db.repository import Repository
 from utils.helpers import load_config as _load_config
+from engines.registry import LanguageRegistry
 
 
 class ContextCompiler:
@@ -77,27 +78,9 @@ class ContextCompiler:
             return f"_Error reading code block: {e}_"
 
     def get_language_from_filepath(self, filepath: str) -> str:
-        ext = Path(filepath).suffix.lower()
-        mapping = {
-            ".py": "python",
-            ".rs": "rust",
-            ".dart": "dart",
-            ".js": "javascript",
-            ".ts": "typescript",
-            ".java": "java",
-            ".go": "go",
-            ".cpp": "cpp",
-            ".c": "c",
-            ".h": "cpp",
-            ".cs": "csharp",
-            ".rb": "ruby",
-            ".php": "php",
-            ".html": "html",
-            ".css": "css",
-            ".sh": "bash",
-            ".ps1": "powershell"
-        }
-        return mapping.get(ext, "")
+        """Detect language from filepath using the language registry."""
+        lang = LanguageRegistry.detect_language(filepath)
+        return lang or "unknown"
 
     def generate_markdown(
         self,

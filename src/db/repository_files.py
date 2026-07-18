@@ -1,11 +1,24 @@
 import json
-from typing import Dict, List, Any, Optional
-from db.base import BaseRepository
+from typing import Dict, List, Any, Optional, Tuple
+from db.connection import DbConnection
 
-class FilesRepository(BaseRepository):
+
+class FilesRepository:
     """
     Handles queries and updates to the 'files' table.
     """
+    def __init__(self, db_conn: DbConnection):
+        self.db_conn = db_conn
+
+    def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
+        """Execute a read query and return all rows."""
+        with self.db_conn.session() as conn:
+            return conn.execute(sql, params or ()).fetchall()
+
+    def _execute(self, sql: str, params: Optional[Tuple] = None) -> Any:
+        """Execute a write query and return the result."""
+        with self.db_conn.session() as conn:
+            return conn.execute(sql, params or ())
 
     def upsert_file(self, filepath: str, sha256: str, language: str):
         """Registers or updates a file's hashing and index metadata. Sets pending_audit if changed."""
@@ -192,3 +205,87 @@ class FilesRepository(BaseRepository):
         from db.cascade import CascadeCleanupService
         cascade = CascadeCleanupService(self._get_repository())
         cascade.delete_files_bulk(filepaths)
+
+    def update_file_statuses(self, statuses):
+        """Bulk update file compliance statuses.
+        
+        Args:
+            statuses: Dict mapping filepath to status string
+        """
+        if not statuses:
+            return
+        with self.db_conn.session() as conn:
+            for filepath, status in statuses.items():
+                conn.execute(
+                    "UPDATE files SET status = ? WHERE filepath = ?",
+                    (status, filepath)
+                )
+
+    def mark_file_for_audit(self, filepath: str, justification: str):
+        """Mark a file as pending audit with a justification.
+        
+        Args:
+            filepath: Path to the file
+            justification: Reason the file needs re-auditing
+        """
+        with self.db_conn.session() as conn:
+            conn.execute(
+                "UPDATE files SET pending_audit = TRUE, justification = ? WHERE filepath = ?",
+                (justification, filepath)
+            )
+
+    def search_files_keyword(self, query: str, limit: int = 5):
+        """Search files by keyword in filepath.
+        
+        Args:
+            query: Search term (case-insensitive)
+            limit: Maximum results
+            
+        Returns:
+            List of (filepath, language, status) tuples
+        """
+        with self.db_conn.session() as conn:
+            return conn.execute(
+                "SELECT filepath, language, status FROM files WHERE LOWER(filepath) LIKE ? LIMIT ?",
+                (f"%{query.lower()}%", limit)
+            ).fetchall()
+
+    def get_file_exact(self, filepath: str):
+        """Get exact file match by filepath.
+        
+        Args:
+            filepath: File path
+            
+        Returns:
+            Tuple of file metadata or None
+        """
+        with self.db_conn.session() as conn:
+            return conn.execute(
+                """
+                SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification
+                FROM files
+                WHERE filepath = ? OR replace(filepath, '\\', '/') = ?
+                """,
+                (filepath, filepath.replace("\\", "/"))
+            ).fetchone()
+
+    def search_files_like(self, query: str, limit: int = 10):
+        """Search files by partial filepath match.
+        
+        Args:
+            query: Partial filepath
+            limit: Maximum results
+            
+        Returns:
+            List of file metadata tuples
+        """
+        normalized = query.replace("\\", "/")
+        with self.db_conn.session() as conn:
+            return conn.execute(
+                """
+                SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification
+                FROM files
+                WHERE replace(filepath, '\\', '/') LIKE ? OR replace(filepath, '\\', '/') = ?
+                """,
+                (f"%{normalized}%", normalized)
+            ).fetchall()

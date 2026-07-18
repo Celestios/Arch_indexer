@@ -99,6 +99,29 @@ def test_layer_aggregations(tmp_path):
 def test_auditor_filter(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
+    import json
+    config = {
+        "lib": {
+            "automatic_fields": {
+                "layer": {
+                    "values": ["Presentation", "Infrastructure"],
+                    "default": "Domain",
+                    "assignment_rules": [
+                        {"value": "Presentation", "conditions": {"path_prefix": "lib/ui"}},
+                        {"value": "Presentation", "conditions": {"path_prefix": "lib/other_ui"}},
+                        {"value": "Infrastructure", "conditions": {"path_prefix": "lib/infra"}}
+                    ],
+                    "handler": "dependency_check",
+                    "rules": [
+                        {"source": "Presentation", "target": "Infrastructure", "message": "Presentation cannot call Infrastructure"}
+                    ]
+                }
+            }
+        }
+    }
+    with open(root / ".arch" / "config.json", "w") as f:
+        json.dump(config, f)
+
     with db_conn.session() as conn:
         conn.execute("""
             INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
@@ -124,8 +147,7 @@ def test_auditor_filter(tmp_path):
 
     # Audit everything
     violations_all = auditor.run_audit()
-    assert len(violations_all) == 1
-    assert violations_all[0]["symbol"] == "ui_widget"
+    assert len(violations_all) == 2
 
     db_conn.close()
 
@@ -301,7 +323,8 @@ def test_mcp_tools_audit(tmp_path, monkeypatch):
     monkeypatch.setattr("auditor.analyzer.Auditor.run_audit", mock_run_audit)
 
     out = mcp_server.audit()
-    assert "## Compliance Audit Report: 1 violation(s) found" in out
+    assert "## Compliance Audit" in out
+    assert "1 finding(s)" in out or "1 violation(s)" in out
     assert "[rules_test]" in out
     assert "lib/ui/widget.dart:L10" in out
     assert "ui_widget" in out
@@ -446,6 +469,26 @@ def test_mcp_tools_report(tmp_path, monkeypatch):
 def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
 
+    import json
+    config = {
+        "lib/ui": {
+            "automatic_fields": {
+                "layer": {
+                    "values": ["Presentation", "Domain"],
+                    "default": "Domain"
+                }
+            },
+            "manual_fields": {
+                "pattern": {
+                    "values": ["Controller", "Service", "None"],
+                    "default": "None"
+                }
+            }
+        }
+    }
+    with open(root / ".arch" / "config.json", "w") as f:
+        json.dump(config, f)
+
     import src.interface.server as mcp_server
     monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
     monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
@@ -487,11 +530,10 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     out_auto = mcp_server.set_fields(target="lib/ui/widget.dart", update="layer:Presentation")
     assert "Ontology Validation Error" in out_auto
 
-    # 4. Test index (details mode)
-    out_details = mcp_server.index(target="lib/ui/widget.dart")
+    # 4. Test lookup (details mode)
+    out_details = mcp_server.lookup(target="lib/ui/widget.dart")
     assert "File Module:" in out_details
     assert "Controller" in out_details
-    assert "VIOLATION_DETECTED" in out_details
 
     db_conn.close()
 

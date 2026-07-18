@@ -1,10 +1,23 @@
-from typing import Dict, List, Any, Optional
-from db.base import BaseRepository
+from typing import Dict, List, Any, Optional, Tuple
+from db.connection import DbConnection
 
-class ComplianceRepository(BaseRepository):
+
+class ComplianceRepository:
     """
     Handles queries and updates to compliance rules and violations tables.
     """
+    def __init__(self, db_conn: DbConnection):
+        self.db_conn = db_conn
+
+    def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
+        """Execute a read query and return all rows."""
+        with self.db_conn.session() as conn:
+            return conn.execute(sql, params or ()).fetchall()
+
+    def _execute(self, sql: str, params: Optional[Tuple] = None) -> Any:
+        """Execute a write query and return the result."""
+        with self.db_conn.session() as conn:
+            return conn.execute(sql, params or ())
 
     def upsert_compliance_rule(self, rule_id: str, description: str, severity: str):
         """Stores or updates an architectural safety boundary rule."""
@@ -81,3 +94,67 @@ class ComplianceRepository(BaseRepository):
                 "DELETE FROM compliance_violations WHERE filepath = ? AND origin = 'manual'",
                 (filepath,)
             )
+
+    def delete_automatic_violations(self, rule_ids=None):
+        """Deletes automatic violations, optionally filtered by rule IDs.
+        
+        Args:
+            rule_ids: Optional list of rule IDs to filter. If None, deletes all automatic violations.
+        """
+        with self.db_conn.session() as conn:
+            if rule_ids:
+                placeholders = ",".join("?" for _ in rule_ids)
+                conn.execute(
+                    f"DELETE FROM compliance_violations WHERE origin = 'automatic' AND rule_id IN ({placeholders})",
+                    rule_ids
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM compliance_violations WHERE origin = 'automatic'"
+                )
+
+    def delete_automatic_violations_for_path(self, filepath_prefix: str):
+        """Deletes automatic violations for files matching a path prefix.
+        
+        Args:
+            filepath_prefix: Path prefix to filter violations (forward slashes normalized)
+        """
+        normalized_prefix = filepath_prefix.replace("\\", "/")
+        with self.db_conn.session() as conn:
+            conn.execute(
+                "DELETE FROM compliance_violations WHERE replace(filepath, '\\', '/') LIKE ? AND origin = 'automatic'",
+                (f"{normalized_prefix}%",)
+            )
+
+    def upsert_violations_bulk(self, violations):
+        """Bulk upsert violations in a single transaction.
+        
+        Args:
+            violations: List of dicts with keys: violation_id, rule_id, symbol, filepath, line, message, origin
+        """
+        if not violations:
+            return
+        with self.db_conn.session() as conn:
+            for v in violations:
+                conn.execute(
+                    """
+                    INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message, origin)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (violation_id) DO UPDATE SET
+                        rule_id = excluded.rule_id,
+                        symbol = excluded.symbol,
+                        filepath = excluded.filepath,
+                        line = excluded.line,
+                        message = excluded.message,
+                        origin = excluded.origin
+                    """,
+                    (
+                        v["violation_id"],
+                        v["rule_id"],
+                        v.get("symbol"),
+                        v["filepath"],
+                        v["line"],
+                        v["message"],
+                        v.get("origin", "automatic")
+                    )
+                )

@@ -1,9 +1,11 @@
 """Shared DRY utilities for arch-mcp."""
-import hashlib
 import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+
+from utils.violation_id import ViolationId
+from engines.registry import LanguageRegistry
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -23,25 +25,27 @@ def config_path_for(project_root: Path) -> Path:
 
 def ext_to_lang(ext: str) -> str:
     """Map file extension to language name."""
+    if not ext.startswith("."):
+        ext = "." + ext
+    lang = LanguageRegistry.detect_language(ext)
+    if lang:
+        return lang
     mapping = {
-        ".rs": "rust",
-        ".dart": "dart",
-        ".py": "python",
-        ".go": "go",
         ".js": "javascript",
         ".ts": "typescript",
-        ".java": "java",
+        ".go": "go",
+        ".cpp": "cpp",
+        ".c": "c",
+        ".h": "cpp",
+        ".cs": "csharp",
+        ".rb": "ruby",
+        ".php": "php",
+        ".html": "html",
+        ".css": "css",
+        ".sh": "bash",
+        ".ps1": "powershell",
     }
     return mapping.get(ext.lower(), "unknown")
-
-
-class ViolationId:
-    """Generates deterministic violation IDs from component strings."""
-
-    @staticmethod
-    def generate(*components: str) -> str:
-        text = "_".join(components)
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def resolve_filepath(repository, raw_path: str) -> Optional[str]:

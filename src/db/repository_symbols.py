@@ -1,10 +1,23 @@
-from typing import Dict, List, Any, Optional
-from db.base import BaseRepository
+from typing import Dict, List, Any, Optional, Tuple
+from db.connection import DbConnection
 
-class SymbolsRepository(BaseRepository):
+
+class SymbolsRepository:
     """
     Handles queries and updates to the 'symbols' and 'occurrences' tables.
     """
+    def __init__(self, db_conn: DbConnection):
+        self.db_conn = db_conn
+
+    def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
+        """Execute a read query and return all rows."""
+        with self.db_conn.session() as conn:
+            return conn.execute(sql, params or ()).fetchall()
+
+    def _execute(self, sql: str, params: Optional[Tuple] = None) -> Any:
+        """Execute a write query and return the result."""
+        with self.db_conn.session() as conn:
+            return conn.execute(sql, params or ())
 
     def upsert_symbol(
         self,
@@ -349,4 +362,141 @@ class SymbolsRepository(BaseRepository):
                 WHERE symbols.symbol = total_degrees.sym
                 """
             )
+
+    def search_symbols_keyword(self, query: str, limit: int = 5):
+        """Search symbols by keyword in name.
+        
+        Args:
+            query: Search term (case-insensitive)
+            limit: Maximum results
+            
+        Returns:
+            List of (symbol, filepath, kind, signature, docstring) tuples
+        """
+        with self.db_conn.session() as conn:
+            return conn.execute(
+                "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE LOWER(symbol) LIKE ? LIMIT ?",
+                (f"%{query.lower()}%", limit)
+            ).fetchall()
+
+    def search_symbols_like(self, query: str, limit: int = 10):
+        """Search symbols by partial name match.
+        
+        Args:
+            query: Partial symbol name
+            limit: Maximum results
+            
+        Returns:
+            List of (symbol, filepath, kind, signature, docstring) tuples
+        """
+        with self.db_conn.session() as conn:
+            return conn.execute(
+                "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE symbol LIKE ? LIMIT ?",
+                (f"%{query}%", limit)
+            ).fetchall()
+
+    def get_symbol_exact(self, symbol: str):
+        """Get exact symbol match.
+        
+        Args:
+            symbol: Full symbol name
+            
+        Returns:
+            Tuple (symbol, filepath, kind, signature, docstring, body_hash) or None
+        """
+        with self.db_conn.session() as conn:
+            return conn.execute(
+                "SELECT symbol, filepath, kind, signature, docstring, body_hash FROM symbols WHERE symbol = ?",
+                (symbol,)
+            ).fetchone()
+
+    def get_occurrences_by_filepath(self, filepath: str):
+        """Get all occurrences for a file.
+        
+        Args:
+            filepath: Normalized filepath
+            
+        Returns:
+            List of (symbol, start_line, end_line, role) tuples
+        """
+        normalized = filepath.replace("\\", "/")
+        with self.db_conn.session() as conn:
+            return conn.execute(
+                """
+                SELECT symbol, start_line, end_line, role
+                FROM occurrences
+                WHERE replace(filepath, '\\', '/') = ? OR filepath = ?
+                """,
+                (normalized, filepath)
+            ).fetchall()
+
+    def get_edges_for_symbol(self, symbol: str):
+        """Get all edges where symbol is source or target.
+        
+        Args:
+            symbol: Symbol name
+            
+        Returns:
+            List of (source, target, relation) tuples
+        """
+        with self.db_conn.session() as conn:
+            return conn.execute(
+                "SELECT source, target, relation FROM edges WHERE source = ? OR target = ?",
+                (symbol, symbol)
+            ).fetchall()
+
+    def get_symbols_by_filepath_exact(self, filepath: str):
+        """Get all symbols defined in a file by exact filepath.
+        
+        Args:
+            filepath: File path
+            
+        Returns:
+            List of (symbol, kind, signature) tuples
+        """
+        with self.db_conn.session() as conn:
+            return conn.execute(
+                "SELECT symbol, kind, signature FROM symbols WHERE filepath = ?",
+                (filepath,)
+            ).fetchall()
+
+    def get_all_symbols(self):
+        """Returns all symbols with filepath. Used by communities.py and auditor."""
+        with self.db_conn.session() as conn:
+            res = conn.execute(
+                "SELECT symbol, filepath FROM symbols"
+            ).fetchall()
+            return [{"symbol": r[0], "filepath": r[1]} for r in res]
+
+    def get_all_symbols_with_metadata(self):
+        """Returns all symbols with full metadata. Used by auditor."""
+        with self.db_conn.session() as conn:
+            res = conn.execute(
+                "SELECT symbol, filepath, kind, signature, docstring FROM symbols"
+            ).fetchall()
+            return [
+                {
+                    "symbol": r[0],
+                    "filepath": r[1],
+                    "kind": r[2],
+                    "signature": r[3],
+                    "docstring": r[4]
+                }
+                for r in res
+            ]
+
+    def update_kinds_from_codeql(self, kind_map):
+        """Bulk update symbol kinds from CodeQL extraction results.
+        
+        Args:
+            kind_map: Dict mapping symbol name to kind string
+        """
+        if not kind_map:
+            return
+        with self.db_conn.session() as conn:
+            for symbol, kind in kind_map.items():
+                conn.execute(
+                    "UPDATE symbols SET kind = ? WHERE symbol = ?",
+                    (kind, symbol)
+                )
 

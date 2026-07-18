@@ -1,27 +1,30 @@
 import json
+from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Type
 from db.repository import Repository
 
-class BaseReport:
+class BaseReport(ABC):
     """
     Abstract base class for all workspace reports.
     """
     def __init__(self, repository: Repository):
         self.repository = repository
 
+    @abstractmethod
     def generate(self) -> Dict[str, Any]:
         """
         Executes database queries and returns structured data as a dictionary.
         Must be implemented by subclasses.
         """
-        raise NotImplementedError("Reports must implement the generate method.")
+        ...
 
+    @abstractmethod
     def to_markdown(self, data: Dict[str, Any]) -> str:
         """
         Formats the generated report data into a Markdown string.
         Must be implemented by subclasses.
         """
-        raise NotImplementedError("Reports must implement the to_markdown method.")
+        ...
 
     def to_json(self, data: Dict[str, Any]) -> str:
         """

@@ -1,5 +1,6 @@
 from unittest.mock import patch
-from main import main, cmd_init, cmd_audit
+from main import main
+from commands import cmd_init, cmd_audit
 
 
 def test_main_no_args(capsys):
@@ -68,7 +69,7 @@ def test_cmd_impact(tmp_path, capsys):
         """)
     db_conn.close()
 
-    from main import cmd_impact
+    from commands import cmd_impact
     args = type("Args", (), {
         "project_root": str(tmp_path),
         "symbol": "B",
@@ -88,7 +89,7 @@ def test_cmd_impact(tmp_path, capsys):
 def test_cmd_mcp(tmp_path):
     """cmd_mcp sets ARCH_PROJECT_ROOT env and runs the server."""
     from unittest.mock import patch
-    from main import cmd_mcp
+    from commands import cmd_mcp
     args = type("Args", (), {
         "project_root": str(tmp_path)
     })()

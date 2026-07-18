@@ -1,10 +1,23 @@
-from typing import Dict, List, Any
-from db.base import BaseRepository
+from typing import Dict, List, Any, Optional, Tuple
+from db.connection import DbConnection
 
-class EdgesRepository(BaseRepository):
+
+class EdgesRepository:
     """
     Handles queries and updates to the 'edges' table.
     """
+    def __init__(self, db_conn: DbConnection):
+        self.db_conn = db_conn
+
+    def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
+        """Execute a read query and return all rows."""
+        with self.db_conn.session() as conn:
+            return conn.execute(sql, params or ()).fetchall()
+
+    def _execute(self, sql: str, params: Optional[Tuple] = None) -> Any:
+        """Execute a write query and return the result."""
+        with self.db_conn.session() as conn:
+            return conn.execute(sql, params or ())
 
     def add_edge(self, source: str, target: str, relation: str, weight: float = 1.0):
         """Registers a structural call or dependency link between two symbols."""
@@ -138,3 +151,33 @@ class EdgesRepository(BaseRepository):
                         queue.append((callee, depth + 1, new_path))
 
         return {"upstream": upstream, "downstream": downstream}
+
+    def get_all_edges(self):
+        """Returns all edges with source, target, weight. Used by communities.py and auditor."""
+        with self.db_conn.session() as conn:
+            res = conn.execute(
+                "SELECT source, target, weight FROM edges"
+            ).fetchall()
+            return [{"source": r[0], "target": r[1], "weight": r[2]} for r in res]
+
+    def get_all_edges_with_relation(self):
+        """Returns all edges with source, target, relation. Used by auditor."""
+        with self.db_conn.session() as conn:
+            res = conn.execute(
+                "SELECT source, target, relation FROM edges"
+            ).fetchall()
+            return [{"source": r[0], "target": r[1], "relation": r[2]} for r in res]
+
+    def update_edge_weights_bulk(self, weight_updates):
+        """Bulk update edge weights in a single transaction.
+        
+        Args:
+            weight_updates: List of (weight, source, target, relation) tuples
+        """
+        if not weight_updates:
+            return
+        with self.db_conn.session() as conn:
+            conn.executemany(
+                "UPDATE edges SET weight = ? WHERE source = ? AND target = ? AND relation = ?",
+                weight_updates
+            )
