@@ -77,10 +77,10 @@ class FfiDetector(Protocol):
 ```
 
 **Sub-steps:**
-- [ ] Create `src/engines/base.py` with all protocol definitions
-- [ ] Define `LanguageBackend`, `IndexerBackend`, `QueryEngine`, `DataFlowTracer`, `EmbedderInterface`, `FfiDetector`
-- [ ] Add type hints for all method signatures
-- [ ] Document expected behavior in docstrings
+- [x] Create `src/engines/base.py` with all protocol definitions
+- [x] Define `LanguageBackend`, `IndexerBackend`, `QueryEngine`, `DataFlowTracer`, `EmbedderInterface`, `FfiDetector`
+- [x] Add type hints for all method signatures
+- [x] Document expected behavior in docstrings
 
 ### 1.2 Create `src/auditor/interfaces.py` — Auditor Abstractions
 
@@ -133,9 +133,9 @@ class ViolationCheckerInterface(Protocol):
 ```
 
 **Sub-steps:**
-- [ ] Create `src/auditor/interfaces.py` with all protocol definitions
-- [ ] Define `ClassifierInterface`, `PropagatorInterface`, `PathTracerInterface`, `ViolationCheckerInterface`
-- [ ] Document each interface's responsibility
+- [x] Create `src/auditor/interfaces.py` with all protocol definitions
+- [x] Define `ClassifierInterface`, `PropagatorInterface`, `PathTracerInterface`, `ViolationCheckerInterface`
+- [x] Document each interface's responsibility
 
 ### 1.3 Create `src/db/interfaces.py` — Database Abstractions
 
@@ -247,9 +247,9 @@ class MetricsRepositoryInterface(Protocol):
 ```
 
 **Sub-steps:**
-- [ ] Create `src/db/interfaces.py` with all repository protocols
-- [ ] Define separate interfaces for each sub-repository
-- [ ] Add `get_all_symbols()` and `get_all_edges()` to eliminate raw SQL in `communities.py`
+- [x] Create `src/db/interfaces.py` with all repository protocols
+- [x] Define separate interfaces for each sub-repository
+- [x] Add `get_all_symbols()` and `get_all_edges()` to eliminate raw SQL in `communities.py`
 
 ### 1.4 Create `src/interfaces/container.py` — Composition Root
 
@@ -286,10 +286,10 @@ class DependencyContainer:
 ```
 
 **Sub-steps:**
-- [ ] Create `src/interfaces/container.py`
-- [ ] Implement lazy initialization for all dependencies
+- [x] Create `src/interfaces/container.py`
+- [x] Implement lazy initialization for all dependencies
 - [ ] Wire engines based on language configuration
-- [ ] Provide factory methods for all major components
+- [x] Provide factory methods for all major components
 
 ---
 
@@ -306,12 +306,12 @@ class DependencyContainer:
 - `src/db/repository_files.py` — Add `update_file_statuses()`
 
 **Sub-steps:**
-- [ ] `SymbolsRepository.get_all_symbols()` — Returns all symbols with filepath
-- [ ] `SymbolsRepository.update_kinds_from_codeql(kind_map)` — Bulk update kinds from CodeQL results
-- [ ] `EdgesRepository.get_all_edges()` — Returns all edges with source, target, weight
-- [ ] `ComplianceRepository.delete_automatic_violations(rule_ids)` — Delete non-manual violations
-- [ ] `ComplianceRepository.upsert_violations_bulk(violations)` — Bulk insert violations
-- [ ] `FilesRepository.update_file_statuses(statuses)` — Bulk update file statuses
+- [x] `SymbolsRepository.get_all_symbols()` — Returns all symbols with filepath
+- [x] `SymbolsRepository.update_kinds_from_codeql(kind_map)` — Bulk update kinds from CodeQL results
+- [x] `EdgesRepository.get_all_edges()` — Returns all edges with source, target, weight
+- [x] `ComplianceRepository.delete_automatic_violations(rule_ids)` — Delete non-manual violations
+- [x] `ComplianceRepository.upsert_violations_bulk(violations)` — Bulk insert violations
+- [x] `FilesRepository.update_file_statuses(statuses)` — Bulk update file statuses
 
 ### 2.2 Refactor `communities.py` to Use Repository Methods
 
@@ -330,9 +330,9 @@ edges_res = repository.edges.get_all_edges()
 ```
 
 **Sub-steps:**
-- [ ] Replace `_query()` calls with repository method calls
-- [ ] Remove direct DB access
-- [ ] Add type hints
+- [x] Replace `_query()` calls with repository method calls
+- [x] Remove direct DB access
+- [x] Add type hints
 
 ### 2.3 Refactor `Auditor` Raw SQL into Repository Methods
 
@@ -345,12 +345,12 @@ edges_res = repository.edges.get_all_edges()
 - Lines 174-200: `_fetch_all_edges()` → `EdgesRepository.get_all_edges()`
 
 **Sub-steps:**
-- [ ] Extract `_clear_old_violations()` into `ComplianceRepository.delete_automatic_violations()`
-- [ ] Extract file status updates into `FilesRepository.update_file_statuses()`
-- [ ] Extract symbol fetching into `SymbolsRepository.get_all_symbols()`
-- [ ] Extract edge fetching into `EdgesRepository.get_all_edges()`
-- [ ] Remove all `db_conn.session()` calls from `Auditor`
-- [ ] Remove inline imports of `ViolationId` from helper methods
+- [x] Extract `_clear_old_violations()` into `ComplianceRepository.delete_automatic_violations()`
+- [x] Extract file status updates into `FilesRepository.update_file_statuses()`
+- [x] Extract symbol fetching into `SymbolsRepository.get_all_symbols()`
+- [x] Extract edge fetching into `EdgesRepository.get_all_edges()`
+- [x] Remove all `db_conn.session()` calls from `Auditor`
+- [x] Remove inline imports of `ViolationId` from helper methods
 
 ### 2.4 Refactor `server.py` Raw SQL into Repository Methods
 
@@ -362,12 +362,12 @@ edges_res = repository.edges.get_all_edges()
 - Lines 703-761: `lookup()` tool — raw SQL against symbols/files
 
 **Sub-steps:**
-- [ ] Add `SymbolsRepository.search_symbols(query, filters)` method
-- [ ] Add `SymbolsRepository.get_occurrences_by_symbol(symbol)` method
-- [ ] Add `SymbolsRepository.lookup_symbol(name)` method
-- [ ] Replace raw SQL in `query()` with repository calls
-- [ ] Replace raw SQL in `context()` with repository calls
-- [ ] Replace raw SQL in `lookup()` with repository calls
+- [x] Add `SymbolsRepository.search_symbols(query, filters)` method
+- [x] Add `SymbolsRepository.get_occurrences_by_symbol(symbol)` method
+- [x] Add `SymbolsRepository.lookup_symbol(name)` method
+- [x] Replace raw SQL in `query()` with repository calls
+- [x] Replace raw SQL in `context()` with repository calls
+- [x] Replace raw SQL in `lookup()` with repository calls
 
 ---
 
@@ -406,15 +406,15 @@ src/auditor/
 ```
 
 **Sub-steps:**
-- [ ] Extract `ConfigLoader` class from `Auditor.__init__()` and `load_config()`, `get_applicable_config()`
-- [ ] Extract `FieldValidator` class from `_reset_invalid_manual_fields()`
+- [x] Extract `ConfigLoader` class from `Auditor.__init__()` and `load_config()`, `get_applicable_config()`
+- [x] Extract `FieldValidator` class from `_reset_invalid_manual_fields()`
 - [ ] Extract `DependencyViolationChecker` from `_check_dependency_violations()`, `_check_package_restriction()`, `_check_single_dependency()`
 - [ ] Extract `NamingViolationChecker` from `_check_naming_violations()`
 - [ ] Extract `PendingAuditChecker` from `_check_pending_audits()`
-- [ ] Extract `EdgeWeightUpdater` from `_update_edge_weights()`
-- [ ] Create `ViolationCheckerRegistry` to hold all checkers
+- [x] Extract `EdgeWeightUpdater` from `_update_edge_weights()`
+- [x] Create `ViolationCheckerRegistry` to hold all checkers
 - [ ] Refactor `Auditor.run_audit()` to iterate over registered checkers
-- [ ] Move file status recomputation to `FilesRepository.update_file_statuses()`
+- [x] Move file status recomputation to `FilesRepository.update_file_statuses()`
 
 ### 3.2 Break Up `ScipWrapper` (scip_wrapper.py, 793 lines)
 
@@ -443,12 +443,12 @@ src/engines/
 ```
 
 **Sub-steps:**
-- [ ] Extract `LanguageDetector` class from `detect_languages()`, `verify_environment()`
-- [ ] Extract `ScipParser` class from `parse_index()` (155 lines)
-- [ ] Extract `IndexIngester` class from `ingest_index()` (250 lines)
-- [ ] Extract `ScipIndexer` class from `_index_rust()`, `_index_dart()`, `_index_python()`, `_index_generic()`
-- [ ] Refactor `ScipWrapper` into thin orchestrator that delegates to extracted classes
-- [ ] Move edge weight calculation to shared `EdgeWeightCalculator` (used by both ScipWrapper and Auditor)
+- [x] Extract `LanguageDetector` class from `detect_languages()`, `verify_environment()`
+- [x] Extract `ScipParser` class from `parse_index()` (155 lines)
+- [x] Extract `IndexIngester` class from `ingest_index()` (250 lines)
+- [x] Extract `ScipIndexer` class from `_index_rust()`, `_index_dart()`, `_index_python()`, `_index_generic()`
+- [x] Refactor `ScipWrapper` into thin orchestrator that delegates to extracted classes
+- [x] Move edge weight calculation to shared `EdgeWeightCalculator` (used by both ScipWrapper and Auditor)
 
 ### 3.3 Break Up `server.py` (968 lines)
 
@@ -480,11 +480,11 @@ src/interface/
 ```
 
 **Sub-steps:**
-- [ ] Extract `query()` tool logic into `tools/query.py`
-- [ ] Extract `set_fields()` validation into `validators.py` (~160 lines)
-- [ ] Extract markdown formatting into `formatters.py`
-- [ ] Create individual tool handler files in `tools/`
-- [ ] Refactor `server.py` to only register tools and delegate to handlers
+- [x] Extract `query()` tool logic into `tools/query.py`
+- [x] Extract `set_fields()` validation into `validators.py` (~160 lines)
+- [x] Extract markdown formatting into `formatters.py`
+- [x] Create individual tool handler files in `tools/`
+- [x] Refactor `server.py` to only register tools and delegate to handlers
 - [ ] Remove global mutable state (`PROJECT_ROOT`, `DB_PATH`, `get_bin_dir`)
 
 ### 3.4 Break Up `main.py` (849 lines)
@@ -518,11 +518,11 @@ src/
 ```
 
 **Sub-steps:**
-- [ ] Extract `InitPipeline` class from `cmd_init()` (95 lines → pipeline with 10 steps)
-- [ ] Extract `CodeqlPipeline` from `_build_codeql_dbs()` and `_extract_codeql_kinds()`
-- [ ] Create `commands/` directory with individual command files
-- [ ] Refactor `main.py` to only parse arguments and dispatch to commands
-- [ ] Deduplicate violation ID creation pattern (appears in both `main.py` and `server.py`)
+- [x] Extract `InitPipeline` class from `cmd_init()` (95 lines → pipeline with 10 steps)
+- [x] Extract `CodeqlPipeline` from `_build_codeql_dbs()` and `_extract_codeql_kinds()`
+- [x] Create `commands/` directory with individual command files
+- [x] Refactor `main.py` to only parse arguments and dispatch to commands
+- [x] Deduplicate violation ID creation pattern (appears in both `main.py` and `server.py`)
 
 ---
 
@@ -567,11 +567,11 @@ class LanguageRegistry:
 ```
 
 **Sub-steps:**
-- [ ] Create `src/engines/registry.py`
-- [ ] Implement `LanguageRegistry` with `register()`, `get_backend()`, `detect_language()`
-- [ ] Move extension→language mapping from `helpers.py`, `compiler.py`, `scip_wrapper.py` into registry
-- [ ] Register Rust, Dart, Python backends
-- [ ] Update all callers to use registry instead of hardcoded maps
+- [x] Create `src/engines/registry.py`
+- [x] Implement `LanguageRegistry` with `register()`, `get_backend()`, `detect_language()`
+- [x] Move extension→language mapping from `helpers.py`, `compiler.py`, `scip_wrapper.py` into registry
+- [x] Register Rust, Dart, Python backends
+- [x] Update all callers to use registry instead of hardcoded maps
 
 ### 4.2 Create `ViolationCheckerRegistry` — Extensible Audit Checks
 
@@ -600,8 +600,8 @@ class ViolationCheckerRegistry:
 ```
 
 **Sub-steps:**
-- [ ] Create `src/auditor/registry.py`
-- [ ] Implement `ViolationCheckerRegistry`
+- [x] Create `src/auditor/registry.py`
+- [x] Implement `ViolationCheckerRegistry`
 - [ ] Register `DependencyViolationChecker`, `NamingViolationChecker`, `PendingAuditChecker`
 - [ ] Refactor `Auditor.run_audit()` to iterate over `ViolationCheckerRegistry.get_all()`
 - [ ] Remove hardcoded checker sequence from `Auditor`
@@ -632,9 +632,9 @@ class ConditionEvaluatorRegistry:
 ```
 
 **Sub-steps:**
-- [ ] Create `src/auditor/condition_registry.py`
-- [ ] Extract condition evaluators from `SymbolClassifier.evaluate_conditions()`
-- [ ] Register `path_prefix`, `class_suffix`, `class_contains`, `name_contains`, `calls_prefix`
+- [x] Create `src/auditor/condition_registry.py`
+- [x] Extract condition evaluators from `SymbolClassifier.evaluate_conditions()`
+- [x] Register `path_prefix`, `class_suffix`, `class_contains`, `name_contains`, `calls_prefix`
 - [ ] Refactor `SymbolClassifier` to use registry
 
 ### 4.4 Make CLI Report Choices Dynamic
@@ -701,7 +701,7 @@ return []
 5. `extract_kinds()` missing — should implement or remove from protocol
 
 **Sub-steps:**
-- [ ] Fix `DartAnalyzerWrapper.is_available()` to check for Dart SDK
+- [x] Fix `DartAnalyzerWrapper.is_available()` to check for Dart SDK
 - [ ] Fix `DartAnalyzerWrapper.create_database()` to respect `db_output_dir`
 - [ ] Fix `DartAnalyzerWrapper.run_query()` to respect `db_dir`
 - [ ] Rename `decode_bqrs()` to `decode_results()` or document format difference
@@ -718,8 +718,8 @@ return []
 3. `generate()` return shape differs between subclasses
 
 **Sub-steps:**
-- [ ] Make `BaseReport` inherit from `ABC`
-- [ ] Add `@abstractmethod` to `generate()` and `to_markdown()`
+- [x] Make `BaseReport` inherit from `ABC`
+- [x] Add `@abstractmethod` to `generate()` and `to_markdown()`
 - [ ] Remove `to_json()` default implementation (move to subclasses)
 - [ ] Define a `ReportData` TypedDict or dataclass for consistent return shapes
 - [ ] Update `OverviewReport` and `ComplianceReport` to conform to `ReportData`
@@ -738,11 +738,11 @@ return []
 **Recommended:** Option B — Remove `BaseRepository` since it provides no polymorphic value.
 
 **Sub-steps:**
-- [ ] Remove `BaseRepository` class
-- [ ] Update each sub-repository to inherit from `object` (no base class)
-- [ ] Ensure each sub-repository has its own `_query()` and `_execute()` methods (already does via `db_conn.session()`)
-- [ ] Update type hints throughout codebase
-- [ ] Add tests verifying sub-repositories work independently
+- [x] Remove `BaseRepository` class
+- [x] Update each sub-repository to inherit from `object` (no base class)
+- [x] Ensure each sub-repository has its own `_query()` and `_execute()` methods (already does via `db_conn.session()`)
+- [x] Update type hints throughout codebase
+- [x] Add tests verifying sub-repositories work independently
 
 ---
 
@@ -786,12 +786,12 @@ Language X
 - `src/engines/scip_wrapper.py:560-562` — inline mapping
 
 **Sub-steps:**
-- [ ] Move all extension mappings to `LanguageRegistry`
-- [ ] Add `detect_language(filepath)` to registry
-- [ ] Update `helpers.py` to delegate to registry
-- [ ] Update `compiler.py` to delegate to registry
-- [ ] Update `scip_wrapper.py` to delegate to registry
-- [ ] Remove duplicate mapping code
+- [x] Move all extension mappings to `LanguageRegistry`
+- [x] Add `detect_language(filepath)` to registry
+- [x] Update `helpers.py` to delegate to registry
+- [x] Update `compiler.py` to delegate to registry
+- [x] Update `scip_wrapper.py` to delegate to registry
+- [x] Remove duplicate mapping code
 
 ### 6.3 Unify Edge Weight Calculation
 
@@ -800,10 +800,10 @@ Language X
 - `src/auditor/analyzer.py:207-245` — `_update_edge_weights()`
 
 **Sub-steps:**
-- [ ] Create `src/engines/edge_weights.py` with shared `EdgeWeightCalculator`
-- [ ] Move weight calculation logic from `ScipWrapper`
-- [ ] Move weight update logic from `Auditor`
-- [ ] Make both use the shared calculator
+- [x] Create `src/engines/edge_weights.py` with shared `EdgeWeightCalculator`
+- [x] Move weight calculation logic from `ScipWrapper`
+- [x] Move weight update logic from `Auditor`
+- [x] Make both use the shared calculator
 - [ ] Add tests for weight calculation
 
 ### 6.4 Unify Violation ID Creation
@@ -813,9 +813,9 @@ Language X
 - `src/interface/server.py:586-588` — `hashlib.sha256(...)`
 
 **Sub-steps:**
-- [ ] Create `src/utils/violation_id.py` with `create_violation_id()`
-- [ ] Update `main.py` to use shared function
-- [ ] Update `server.py` to use shared function
+- [x] Create `src/utils/violation_id.py` with `create_violation_id()`
+- [x] Update `main.py` to use shared function
+- [x] Update `server.py` to use shared function
 - [ ] Add tests for violation ID creation
 
 ---
@@ -827,38 +827,38 @@ Language X
 ### 7.1 Extract Tool Handlers
 
 **Sub-steps:**
-- [ ] Create `src/interface/tools/` directory
-- [ ] Extract `query()` tool → `tools/query.py`
-- [ ] Extract `search()` tool → `tools/search.py`
-- [ ] Extract `map()` tool → `tools/map.py`
-- [ ] Extract `context()` tool → `tools/context.py`
-- [ ] Extract `trace()` tool → `tools/trace.py`
-- [ ] Extract `impact()` tool → `tools/impact.py`
-- [ ] Extract `compliance()` tool → `tools/compliance.py`
-- [ ] Extract `set_fields()` tool → `tools/set_fields.py`
-- [ ] Extract `lookup()` tool → `tools/lookup.py`
-- [ ] Each tool handler is a function that takes repository and returns result
+- [x] Create `src/interface/tools/` directory
+- [x] Extract `query()` tool → `tools/query.py`
+- [x] Extract `search()` tool → `tools/search.py`
+- [x] Extract `map()` tool → `tools/map.py`
+- [x] Extract `context()` tool → `tools/context.py`
+- [x] Extract `trace()` tool → `tools/trace.py`
+- [x] Extract `impact()` tool → `tools/impact.py`
+- [x] Extract `compliance()` tool → `tools/compliance.py`
+- [x] Extract `set_fields()` tool → `tools/set_fields.py`
+- [x] Extract `lookup()` tool → `tools/lookup.py`
+- [x] Each tool handler is a function that takes repository and returns result
 
 ### 7.2 Extract Markdown Formatting
 
 **Sub-steps:**
-- [ ] Create `src/interface/formatters.py`
-- [ ] Extract `format_query_result()` from `query()` tool
-- [ ] Extract `format_search_results()` from `search()` tool
-- [ ] Extract `format_map_data()` from `map()` tool
-- [ ] Extract `format_context()` from `context()` tool
-- [ ] Extract `format_trace()` from `trace()` tool
-- [ ] Extract `format_impact()` from `impact()` tool
-- [ ] Extract `format_compliance()` from `compliance()` tool
-- [ ] Extract `format_set_fields()` from `set_fields()` tool
-- [ ] Extract `format_lookup()` from `lookup()` tool
+- [x] Create `src/interface/formatters.py`
+- [x] Extract `format_query_result()` from `query()` tool
+- [x] Extract `format_search_results()` from `search()` tool
+- [x] Extract `format_map_data()` from `map()` tool
+- [x] Extract `format_context()` from `context()` tool
+- [x] Extract `format_trace()` from `trace()` tool
+- [x] Extract `format_impact()` from `impact()` tool
+- [x] Extract `format_compliance()` from `compliance()` tool
+- [x] Extract `format_set_fields()` from `set_fields()` tool
+- [x] Extract `format_lookup()` from `lookup()` tool
 
 ### 7.3 Extract Input Validation
 
 **Sub-steps:**
-- [ ] Create `src/interface/validators.py`
-- [ ] Extract `set_fields()` validation (~160 lines) → `FieldValidator` class
-- [ ] Extract `resolve_filepath_local()` → `FilePathResolver` class
+- [x] Create `src/interface/validators.py`
+- [x] Extract `set_fields()` validation (~160 lines) → `FieldValidator` class
+- [x] Extract `resolve_filepath_local()` → `FilePathResolver` class
 - [ ] Extract `validate_file_fields()` → `FileFieldValidator` class
 - [ ] Extract `apply_updates()` → `UpdateApplicator` class
 - [ ] Move error handling patterns to shared `error_handler()` context manager
@@ -884,10 +884,10 @@ Language X
 ### 8.1 Update Existing Tests
 
 **Sub-steps:**
-- [ ] Run existing test suite: `pytest tests/`
-- [ ] Fix any broken imports due to refactoring
-- [ ] Update test fixtures for new class structures
-- [ ] Verify all existing tests pass
+- [x] Run existing test suite: `pytest tests/`
+- [x] Fix any broken imports due to refactoring
+- [x] Update test fixtures for new class structures
+- [x] Verify all existing tests pass
 
 ### 8.2 Add Interface Tests
 
@@ -1014,14 +1014,14 @@ src/engines/dart_analyzer/ (moved to src/engines/dart/)
 ## Success Criteria
 
 - [ ] All SOLID violations identified in analysis are resolved
-- [ ] All existing tests pass
-- [ ] No raw SQL outside of repository methods
+- [x] All existing tests pass
+- [x] No raw SQL outside of repository methods
 - [ ] All engine wrappers implement `LanguageBackend` protocol
 - [ ] All auditor components implement their respective interfaces
-- [ ] Language registry replaces all hardcoded extension mappings
+- [x] Language registry replaces all hardcoded extension mappings
 - [ ] Violation checker registry replaces hardcoded audit sequence
 - [ ] Server is a thin routing layer (<200 lines)
-- [ ] Main.py is CLI parsing only (<150 lines)
+- [x] Main.py is CLI parsing only (<150 lines)
 - [ ] Symmetric support for Rust, Dart, Python
 - [ ] Type checker passes with no errors
 - [ ] Linter passes with no errors
