@@ -1,4 +1,4 @@
-from typing import Dict, Callable, Any
+from typing import Dict, Callable, Any, Optional, List
 
 
 class ConditionEvaluatorRegistry:
@@ -16,7 +16,7 @@ class ConditionEvaluatorRegistry:
     
     @classmethod
     def evaluate(cls, condition_type: str, symbol_info: Dict, 
-                 value: Any, outgoing_targets: list = None, **kwargs) -> bool:
+                 value: Any, outgoing_targets: Optional[List] = None, **kwargs) -> bool:
         """Evaluate a condition using the registered evaluator."""
         evaluator = cls._evaluators.get(condition_type)
         if not evaluator:
@@ -53,7 +53,7 @@ def _eval_name_contains(symbol_info: dict, substring: str, **kwargs) -> bool:
     name = symbol_info["symbol"].split(" ")[-1]
     return substring in name
 
-def _eval_calls_prefix(symbol_info: dict, prefix: str, outgoing_targets: list = None, **kwargs) -> bool:
+def _eval_calls_prefix(symbol_info: dict, prefix: str, outgoing_targets: Optional[List] = None, **kwargs) -> bool:
     """Evaluates calls_prefix condition. Requires repository from kwargs."""
     if not outgoing_targets:
         return False
