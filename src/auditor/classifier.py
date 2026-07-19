@@ -1,9 +1,12 @@
 from typing import Dict, List, Any
 from db.repository import Repository
+from auditor.condition_registry import ConditionEvaluatorRegistry
+
 
 class SymbolClassifier:
     """
     Evaluates classification conditions for code symbols and assigns automatic fields.
+    Uses ConditionEvaluatorRegistry for extensible condition evaluation.
     """
     def __init__(self, repository: Repository):
         self.repository = repository
@@ -11,47 +14,15 @@ class SymbolClassifier:
     def evaluate_conditions(self, symbol_info: Dict[str, Any], conditions: Dict[str, Any], outgoing_targets: List[str]) -> bool:
         """
         Returns True if a symbol definition meets all the specified assignment conditions.
+        Delegates each condition type to the registered evaluator in ConditionEvaluatorRegistry.
         """
-        # 1. Path prefix matching
-        if "path_prefix" in conditions:
-            prefix = conditions["path_prefix"]
-            filepath = symbol_info.get("filepath")
-            if not filepath or not filepath.replace("\\", "/").startswith(prefix):
+        for condition_type, value in conditions.items():
+            if not ConditionEvaluatorRegistry.evaluate(
+                condition_type, symbol_info, value,
+                outgoing_targets=outgoing_targets,
+                repository=self.repository
+            ):
                 return False
-                
-        # 2. Class name suffix matching
-        symbol_name = symbol_info["symbol"].split(" ")[-1]  # Extract simple name from SCIP FQN
-        if "class_suffix" in conditions:
-            suffix = conditions["class_suffix"]
-            if not symbol_name.endswith(suffix):
-                return False
-
-        # 3. Class name containing string matching
-        if "class_contains" in conditions:
-            substring = conditions["class_contains"]
-            if substring not in symbol_name:
-                return False
-
-        # 4. Name containing matching
-        if "name_contains" in conditions:
-            substring = conditions["name_contains"]
-            if substring not in symbol_name:
-                return False
-
-        # 5. Calls prefix matching (checks if symbol calls any symbol starting with the prefix)
-        if "calls_prefix" in conditions:
-            prefix = conditions["calls_prefix"]
-            matched_call = False
-            for target in outgoing_targets:
-                # Resolve the target symbol details to check its file path
-                target_node = self.repository.symbols.get_symbol(target)
-                if target_node and target_node.get("filepath"):
-                    if target_node["filepath"].replace("\\", "/").startswith(prefix):
-                        matched_call = True
-                        break
-            if not matched_call:
-                return False
-
         return True
 
     def assign_automatic_fields(

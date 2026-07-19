@@ -13,7 +13,9 @@ class DartAnalyzerWrapper:
     - is_available() -> bool
     - create_database(source_root, db_output_dir, language, **kwargs) -> bool
     - run_query(db_dir, ql_file, bqrs_output) -> bool
-    - decode_bqrs(bqrs_file, json_output) -> Optional[Dict]
+    - decode_results(bqrs_file, json_output) -> Optional[Dict]
+    - decode_bqrs(bqrs_file, json_output) -> Optional[Dict]  (alias for decode_results)
+    - extract_kinds(db_dir, language) -> List[Dict[str, Any]]
     - trace_data_flow(db_dir, source, sink, language) -> List[Dict]
     """
 
@@ -30,7 +32,12 @@ class DartAnalyzerWrapper:
                        language: str, **kwargs) -> bool:
         """
         Create analyzer database (like CodeQL's database create).
-        db_output_dir is ignored - we use our own dart_analyzer_db.
+
+        db_output_dir is intentionally ignored. Unlike CodeQlWrapper which
+        stores its database at the caller-specified location, DartAnalyzer
+        uses a fixed internal database at ``self.arch_dir / 'dart_analyzer_db'``.
+        This is a deliberate design choice to keep the Dart analyzer's
+        self-contained database lifecycle separate from the caller.
         """
         if language != "dart":
             return False
@@ -169,7 +176,11 @@ class DartAnalyzerWrapper:
     def run_query(self, db_dir: Path, ql_file: Path, bqrs_output: Path) -> bool:
         """
         Execute query - translates .ql patterns to analyzer visitors.
-        db_dir is ignored - we use our own database.
+
+        db_dir is intentionally ignored. DartAnalyzer queries its own
+        internal database (``self.arch_dir / 'dart_analyzer_db'``) and does
+        not use the caller-provided db_dir.
+
         Returns True on success, writes BQRS-compatible JSON to bqrs_output.
         """
         ql_content = ql_file.read_text()
@@ -187,14 +198,42 @@ class DartAnalyzerWrapper:
         }))
         return True
 
-    def decode_bqrs(self, bqrs_file: Path, json_output: Path) -> Optional[Dict]:
+    def decode_results(self, bqrs_file: Path, json_output: Path) -> Optional[Dict]:
         """
-        Decode BQRS results file to JSON.
-        Already JSON for analyzer - just copy and return parsed dict.
+        Decode results file to JSON.
+
+        For DartAnalyzer, the input is already JSON (not binary BQRS as
+        used by CodeQlWrapper). The file is copied as-is and parsed.
         """
         import json
         shutil.copy(bqrs_file, json_output)
         return json.loads(bqrs_file.read_text())
+
+    def decode_bqrs(self, bqrs_file: Path, json_output: Path) -> Optional[Dict]:
+        """Alias for decode_results() — maintained for API compatibility with CodeQlWrapper."""
+        return self.decode_results(bqrs_file, json_output)
+
+    def extract_kinds(self, db_dir: Path, language: str) -> List[Dict[str, Any]]:
+        """
+        Extract kind information for symbols in the database.
+
+        db_dir is intentionally ignored — uses the DartAnalyzer's own database.
+
+        Returns list of dicts with keys: name, kind, file, line
+        """
+        if language != "dart":
+            return []
+        try:
+            with self.db.session() as conn:
+                rows = conn.execute(
+                    "SELECT symbol_id, kind, filepath, line FROM resolved_symbols"
+                ).fetchall()
+                return [
+                    {"name": r[0], "kind": r[1], "file": r[2], "line": r[3]}
+                    for r in rows
+                ]
+        except Exception:
+            return []
 
     def trace_data_flow(self, db_dir: Path, source_symbol: str,
                        sink_symbol: str, language: str = "dart") -> List[Dict]:

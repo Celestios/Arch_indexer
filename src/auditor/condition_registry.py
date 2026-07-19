@@ -16,14 +16,14 @@ class ConditionEvaluatorRegistry:
     
     @classmethod
     def evaluate(cls, condition_type: str, symbol_info: Dict, 
-                 value: Any, outgoing_targets: list = None) -> bool:
+                 value: Any, outgoing_targets: list = None, **kwargs) -> bool:
         """Evaluate a condition using the registered evaluator."""
         evaluator = cls._evaluators.get(condition_type)
         if not evaluator:
             raise ValueError(f"Unknown condition type: {condition_type}")
         if outgoing_targets is not None:
-            return evaluator(symbol_info, value, outgoing_targets)
-        return evaluator(symbol_info, value)
+            return evaluator(symbol_info, value, outgoing_targets=outgoing_targets, **kwargs)
+        return evaluator(symbol_info, value, **kwargs)
     
     @classmethod
     def list_types(cls) -> list:
@@ -54,10 +54,18 @@ def _eval_name_contains(symbol_info: dict, substring: str, **kwargs) -> bool:
     return substring in name
 
 def _eval_calls_prefix(symbol_info: dict, prefix: str, outgoing_targets: list = None, **kwargs) -> bool:
+    """Evaluates calls_prefix condition. Requires repository from kwargs."""
     if not outgoing_targets:
         return False
-    # This evaluator needs repository access - handled specially in classifier
-    return True  # Placeholder, actual logic stays in classifier for now
+    repository = kwargs.get("repository")
+    if not repository:
+        return False
+    for target in outgoing_targets:
+        target_node = repository.symbols.get_symbol(target)
+        if target_node and target_node.get("filepath"):
+            if target_node["filepath"].replace("\\", "/").startswith(prefix):
+                return True
+    return False
 
 
 # Register built-in evaluators

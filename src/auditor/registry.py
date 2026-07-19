@@ -23,3 +23,11 @@ class ViolationCheckerRegistry:
     def clear(cls) -> None:
         """Clear all registered checkers (for testing)."""
         cls._checkers.clear()
+
+
+def _register_default_checkers():
+    """Register the built-in violation checkers."""
+    from auditor.violation_checkers.dependency import DependencyViolationChecker
+    from auditor.violation_checkers.naming import NamingViolationChecker
+    from auditor.violation_checkers.pending import PendingAuditChecker
+    # Note: checkers are instantiated in Auditor.__init__ and registered there

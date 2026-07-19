@@ -1,3 +1,5 @@
+import sys
+
 from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
@@ -10,6 +12,14 @@ def setup_workspace(tmp_path):
     db_conn = DbConnection(tmp_path / ".arch" / "arch.db")
     repository = Repository(db_conn)
     return repository, db_conn, tmp_path
+
+
+def _patch_server_config(monkeypatch, root):
+    """Patch server_config._resolved via the module that server.py actually imported."""
+    import src.interface.server  # noqa: F401 – ensures sys.path + interface.server_config loaded
+    server_config = sys.modules["interface.server_config"]
+    monkeypatch.setattr(server_config, "_resolved", {"project_root": root})
+    return server_config
 
 
 def test_get_symbols_in_file(tmp_path):
@@ -154,11 +164,9 @@ def test_auditor_filter(tmp_path):
 
 def test_map_community_mapping(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
 
     import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     with db_conn.session() as conn:
         conn.execute("""
@@ -195,11 +203,9 @@ def test_map_community_mapping(tmp_path, monkeypatch):
 
 def test_query_tool_multi_query(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
 
     import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     # Mock the embedder inside the query tool
     class MockEmbedder:
@@ -232,11 +238,9 @@ def test_query_tool_multi_query(tmp_path, monkeypatch):
 
 def test_mcp_tools_context(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
 
     import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     with db_conn.session() as conn:
         conn.execute("""
@@ -265,11 +269,9 @@ def test_mcp_tools_context(tmp_path, monkeypatch):
 
 def test_mcp_tools_impact(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
 
     import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     with db_conn.session() as conn:
         conn.execute("""
@@ -291,11 +293,9 @@ def test_mcp_tools_impact(tmp_path, monkeypatch):
 
 def test_mcp_tools_audit(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
 
     import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     # Insert a violation manually in DB to verify audit formatting
     with db_conn.session() as conn:
@@ -335,11 +335,9 @@ def test_mcp_tools_audit(tmp_path, monkeypatch):
 
 def test_mcp_tools_trace_mocked(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
 
     import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     # Create CodeQL DB folder so it exists
     codeql_db_dir = root / ".arch" / "codeql_db"
@@ -393,10 +391,12 @@ def test_mcp_tools_trace_mocked(tmp_path, monkeypatch):
 
 def test_mcp_tools_database_missing(tmp_path, monkeypatch):
     import src.interface.server as mcp_server
-    
+    server_config = sys.modules["interface.server_config"]
+
     # Set DB_PATH to non-existent location
     non_existent = tmp_path / "missing_dir" / "missing.db"
-    monkeypatch.setattr(mcp_server, "DB_PATH", non_existent)
+    monkeypatch.setattr(server_config, "_resolved", {"project_root": tmp_path})
+    monkeypatch.setattr(server_config, "get_db_path", lambda: non_existent)
 
     # All tools should return a clean error string instead of crashing
     assert "database not found" in mcp_server.query("search query")
@@ -410,11 +410,9 @@ def test_mcp_tools_database_missing(tmp_path, monkeypatch):
 
 def test_map_tool_empty_database(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
 
     import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     out = mcp_server.map()
     assert "Totals" in out
@@ -427,11 +425,9 @@ def test_map_tool_empty_database(tmp_path, monkeypatch):
 
 def test_context_tool_empty_file(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
 
     import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     out = mcp_server.context("unindexed_file.py")
     assert "No indexed symbols found in file" in out
@@ -441,11 +437,9 @@ def test_context_tool_empty_file(tmp_path, monkeypatch):
 
 def test_mcp_tools_report(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
 
     import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     # Add a mock violation
     with db_conn.session() as conn:
@@ -489,10 +483,9 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     with open(root / ".arch" / "config.json", "w") as f:
         json.dump(config, f)
 
+    _patch_server_config(monkeypatch, root)
+
     import src.interface.server as mcp_server
-    monkeypatch.setattr(mcp_server, "PROJECT_ROOT", root)
-    monkeypatch.setattr(mcp_server, "ARCH_DIR", root / ".arch")
-    monkeypatch.setattr(mcp_server, "DB_PATH", root / ".arch" / "arch.db")
 
     # Insert a file in the DB
     repository.files.upsert_file("lib/ui/widget.dart", "sha123", "dart")
@@ -536,6 +529,3 @@ def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
     assert "Controller" in out_details
 
     db_conn.close()
-
-
-
