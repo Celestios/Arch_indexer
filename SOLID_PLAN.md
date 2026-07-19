@@ -408,12 +408,12 @@ src/auditor/
 **Sub-steps:**
 - [x] Extract `ConfigLoader` class from `Auditor.__init__()` and `load_config()`, `get_applicable_config()`
 - [x] Extract `FieldValidator` class from `_reset_invalid_manual_fields()`
-- [ ] Extract `DependencyViolationChecker` from `_check_dependency_violations()`, `_check_package_restriction()`, `_check_single_dependency()`
-- [ ] Extract `NamingViolationChecker` from `_check_naming_violations()`
-- [ ] Extract `PendingAuditChecker` from `_check_pending_audits()`
+- [x] Extract `DependencyViolationChecker` from `_check_dependency_violations()`, `_check_package_restriction()`, `_check_single_dependency()`
+- [x] Extract `NamingViolationChecker` from `_check_naming_violations()`
+- [x] Extract `PendingAuditChecker` from `_check_pending_audits()`
 - [x] Extract `EdgeWeightUpdater` from `_update_edge_weights()`
 - [x] Create `ViolationCheckerRegistry` to hold all checkers
-- [ ] Refactor `Auditor.run_audit()` to iterate over registered checkers
+- [x] Refactor `Auditor.run_audit()` to iterate over registered checkers
 - [x] Move file status recomputation to `FilesRepository.update_file_statuses()`
 
 ### 3.2 Break Up `ScipWrapper` (scip_wrapper.py, 793 lines)
@@ -602,9 +602,9 @@ class ViolationCheckerRegistry:
 **Sub-steps:**
 - [x] Create `src/auditor/registry.py`
 - [x] Implement `ViolationCheckerRegistry`
-- [ ] Register `DependencyViolationChecker`, `NamingViolationChecker`, `PendingAuditChecker`
-- [ ] Refactor `Auditor.run_audit()` to iterate over `ViolationCheckerRegistry.get_all()`
-- [ ] Remove hardcoded checker sequence from `Auditor`
+- [x] Register `DependencyViolationChecker`, `NamingViolationChecker`, `PendingAuditChecker`
+- [x] Refactor `Auditor.run_audit()` to iterate over `ViolationCheckerRegistry.get_all()`
+- [x] Remove hardcoded checker sequence from `Auditor`
 
 ### 4.3 Create `ConditionEvaluatorRegistry` — Extensible Classification
 
@@ -635,7 +635,7 @@ class ConditionEvaluatorRegistry:
 - [x] Create `src/auditor/condition_registry.py`
 - [x] Extract condition evaluators from `SymbolClassifier.evaluate_conditions()`
 - [x] Register `path_prefix`, `class_suffix`, `class_contains`, `name_contains`, `calls_prefix`
-- [ ] Refactor `SymbolClassifier` to use registry
+- [x] Refactor `SymbolClassifier` to use registry
 
 ### 4.4 Make CLI Report Choices Dynamic
 
@@ -702,10 +702,10 @@ return []
 
 **Sub-steps:**
 - [x] Fix `DartAnalyzerWrapper.is_available()` to check for Dart SDK
-- [ ] Fix `DartAnalyzerWrapper.create_database()` to respect `db_output_dir`
-- [ ] Fix `DartAnalyzerWrapper.run_query()` to respect `db_dir`
-- [ ] Rename `decode_bqrs()` to `decode_results()` or document format difference
-- [ ] Implement `extract_kinds()` on `DartAnalyzerWrapper`
+- [x] Fix `DartAnalyzerWrapper.create_database()` to respect `db_output_dir`
+- [x] Fix `DartAnalyzerWrapper.run_query()` to respect `db_dir`
+- [x] Rename `decode_bqrs()` to `decode_results()` or document format difference
+- [x] Implement `extract_kinds()` on `DartAnalyzerWrapper`
 - [ ] Add tests verifying contract compliance
 
 ### 5.2 Fix `BaseReport` — Use ABC and Standardize Contracts
@@ -870,10 +870,10 @@ Language X
 **Current:** `PROJECT_ROOT`, `DB_PATH`, `get_bin_dir` set at module import time.
 
 **Sub-steps:**
-- [ ] Move `PROJECT_ROOT` and `DB_PATH` into `DependencyContainer`
-- [ ] Move `get_bin_dir()` into `DependencyContainer`
-- [ ] Update all tool handlers to receive dependencies via closure or parameter
-- [ ] Remove module-level side effects
+- [x] Move `PROJECT_ROOT` and `DB_PATH` into `DependencyContainer`
+- [x] Move `get_bin_dir()` into `DependencyContainer`
+- [x] Update all tool handlers to receive dependencies via closure or parameter
+- [x] Remove module-level side effects
 
 ---
 
@@ -1013,14 +1013,14 @@ src/engines/dart_analyzer/ (moved to src/engines/dart/)
 
 ## Success Criteria
 
-- [ ] All SOLID violations identified in analysis are resolved
+- [x] All SOLID violations identified in analysis are resolved
 - [x] All existing tests pass
 - [x] No raw SQL outside of repository methods
-- [ ] All engine wrappers implement `LanguageBackend` protocol
-- [ ] All auditor components implement their respective interfaces
+- [x] All engine wrappers implement `LanguageBackend` protocol
+- [x] All auditor components implement their respective interfaces
 - [x] Language registry replaces all hardcoded extension mappings
-- [ ] Violation checker registry replaces hardcoded audit sequence
-- [ ] Server is a thin routing layer (<200 lines)
+- [x] Violation checker registry replaces hardcoded audit sequence
+- [x] Server is a thin routing layer (<200 lines)
 - [x] Main.py is CLI parsing only (<150 lines)
 - [ ] Symmetric support for Rust, Dart, Python
 - [ ] Type checker passes with no errors
