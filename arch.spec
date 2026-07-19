@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+# Build from project venv: .venv/Scripts/python.exe -m PyInstaller arch.spec --noconfirm
 
 a = Analysis(
     ['src\\main.py'],
@@ -10,7 +10,29 @@ a = Analysis(
         ('src/engines/queries/*', 'engines/queries'),
         ('src/engines/dart_analyzer/helper', 'engines/dart_analyzer/helper'),
     ],
-    hiddenimports=['uuid', 'mcp'],
+    hiddenimports=[
+        'uuid', 'mcp', 'mcp.server.fastmcp', 'mcp.server.fastmcp.server',
+        'mcp.server.fastmcp.tools', 'mcp.server.fastmcp.resources',
+        'mcp.server.fastmcp.prompts', 'mcp.server.fastmcp.utilities',
+        'mcp.shared', 'mcp.shared.session', 'mcp.shared.message',
+        'mcp.types', 'mcp.server.session', 'mcp.server.lowlevel',
+        'mcp.server.lowlevel.server', 'mcp.server.sse',
+        'mcp.server.streamable_http', 'mcp.server.stdio',
+        'mcp.client', 'mcp.client.session', 'mcp.client.stdio',
+        'httpx', 'httpx._transports', 'httpx._transports.default',
+        'pydantic', 'pydantic.main', 'pydantic.fields',
+        'pydantic.functional_validators', 'pydantic.functional_serializers',
+        'pydantic.json_schema', 'pydantic._internal',
+        'anyio', 'anyio._backends._asyncio',
+        'starlette', 'starlette.applications', 'starlette.routing',
+        'starlette.responses', 'starlette.requests',
+        'uvicorn', 'uvicorn.server', 'uvicorn.config',
+        'yaml', 'rich', 'rich.console', 'rich.progress',
+        'scip_pb2', 'tokenizers', 'tokenizers.implementations',
+        'duckdb', 'duckdb.sqltypes',
+        'psutil', 'httpx_sse', 'httpx_ws',
+        'pydantic_settings', 'sse_starlette',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

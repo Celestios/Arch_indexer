@@ -19,8 +19,8 @@ def _get_archive_dir() -> Path:
 
 def _ensure_codeql_cli_binary(bin_dir: Path, progress_callback=None) -> Path:
     """Download and extract the CodeQL CLI binary if not already present."""
-    codeql_dir = bin_dir / "codeql"
-    codeql_exe = codeql_dir / "codeql.exe"
+    codeql_cli_dir = bin_dir / "codeql"
+    codeql_exe = codeql_cli_dir / "codeql.exe"
 
     if codeql_exe.exists():
         print("CodeQL CLI is already installed locally.")
@@ -65,16 +65,16 @@ def _ensure_codeql_cli_binary(bin_dir: Path, progress_callback=None) -> Path:
             raise RuntimeError(f"Failed to download CodeQL CLI: {e}")
 
     try:
-        if codeql_dir.exists():
-            shutil.rmtree(codeql_dir)
+        if codeql_cli_dir.exists():
+            shutil.rmtree(codeql_cli_dir)
         print(f"Extracting CodeQL CLI to {bin_dir}...")
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(bin_dir)
         print("CodeQL CLI successfully bootstrapped.")
     except Exception as e:
-        if codeql_dir.exists():
+        if codeql_cli_dir.exists():
             try:
-                shutil.rmtree(codeql_dir)
+                shutil.rmtree(codeql_cli_dir)
             except Exception:
                 pass
         raise RuntimeError(f"Failed to extract CodeQL CLI: {e}")
@@ -113,7 +113,25 @@ def download_codeql_packs(bin_dir: Path, languages: list) -> None:
     if not packs_to_install:
         return
 
-    print(f"[CodeQL] Downloading packs: {', '.join(packs_to_install)}...")
+    already_present = []
+    res_check = __import__("subprocess").run(
+        [str(codeql_exe), "pack", "list"],
+        shell=(sys.platform == "win32"),
+        capture_output=True,
+        text=True
+    )
+    if res_check.returncode == 0:
+        installed_output = res_check.stdout.lower()
+        for p in packs_to_install:
+            if p.lower() in installed_output:
+                already_present.append(p)
+    packs_needed = [p for p in packs_to_install if p not in already_present]
+
+    if not packs_needed:
+        print(f"[CodeQL] Packs already installed: {', '.join(packs_to_install)}.")
+        return
+
+    print(f"[CodeQL] Downloading packs: {', '.join(packs_needed)}...")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         qlpack_path = Path(tmp_dir) / "qlpack.yml"
