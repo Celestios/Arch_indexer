@@ -1,23 +1,10 @@
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
 from db.connection import DbConnection
+from db.base import BaseRepository, UPSERT_SYMBOL_SQL
 
 
-class SymbolsRepository:
-    """
-    Handles queries and updates to the 'symbols' and 'occurrences' tables.
-    """
-    def __init__(self, db_conn: DbConnection):
-        self.db_conn = db_conn
-
-    def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
-        """Execute a read query and return all rows."""
-        with self.db_conn.session() as conn:
-            return conn.execute(sql, params or ()).fetchall()
-
-    def _execute(self, sql: str, params: Optional[Tuple] = None) -> Any:
-        """Execute a write query and return the result."""
-        with self.db_conn.session() as conn:
-            return conn.execute(sql, params or ())
+class SymbolsRepository(BaseRepository):
+    """Handles queries and updates to the 'symbols' and 'occurrences' tables."""
 
     def upsert_symbol(
         self,
@@ -30,26 +17,9 @@ class SymbolsRepository:
         embedding: Optional[List[float]] = None,
         connection_weight: int = 0
     ):
-        """
-        Inserts or replaces a code symbol declaration in the database.
-        filepath is optional (NULL for external third-party library dependencies).
-        """
+        """Inserts or replaces a code symbol declaration in the database."""
         with self.db_conn.session() as conn:
-            conn.execute(
-                """
-                INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, embedding, connection_weight)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (symbol) DO UPDATE SET
-                    filepath = excluded.filepath,
-                    kind = excluded.kind,
-                    signature = excluded.signature,
-                    docstring = excluded.docstring,
-                    body_hash = excluded.body_hash,
-                    embedding = excluded.embedding,
-                    connection_weight = excluded.connection_weight
-                """,
-                (symbol, filepath, kind, signature, docstring, body_hash, embedding, connection_weight)
-            )
+            conn.execute(UPSERT_SYMBOL_SQL, (symbol, filepath, kind, signature, docstring, body_hash, embedding, connection_weight))
 
     def get_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Retrieves details of a registered symbol declaration."""
@@ -75,10 +45,9 @@ class SymbolsRepository:
         if not filepaths:
             return {}
         result = {}
+        fp_norms = [fp.replace("\\", "/") for fp in filepaths]
+        placeholders = ",".join("?" for _ in fp_norms)
         with self.db_conn.session() as conn:
-            # Build a single query with IN clause for all normalized filepaths
-            fp_norms = [fp.replace("\\", "/") for fp in filepaths]
-            placeholders = ",".join("?" for _ in fp_norms)
             rows = conn.execute(
                 f"""SELECT symbol, kind, body_hash, signature, docstring FROM symbols
                     WHERE replace(filepath, '\\', '/') IN ({placeholders})""",
@@ -103,9 +72,7 @@ class SymbolsRepository:
         end_col: int,
         role: int
     ):
-        """
-        Registers a reference or definition coordinate occurrence of a symbol.
-        """
+        """Registers a reference or definition coordinate occurrence of a symbol."""
         with self.db_conn.session() as conn:
             conn.execute(
                 """
@@ -152,21 +119,7 @@ class SymbolsRepository:
             for sym in symbols_list
         ]
         with self.db_conn.session() as conn:
-            conn.executemany(
-                """
-                INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, embedding, connection_weight)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (symbol) DO UPDATE SET
-                    filepath = excluded.filepath,
-                    kind = excluded.kind,
-                    signature = excluded.signature,
-                    docstring = excluded.docstring,
-                    body_hash = excluded.body_hash,
-                    embedding = excluded.embedding,
-                    connection_weight = excluded.connection_weight
-                """,
-                data
-            )
+            conn.executemany(UPSERT_SYMBOL_SQL, data)
         if progress_callback:
             progress_callback(len(data), len(data))
 
@@ -222,9 +175,7 @@ class SymbolsRepository:
             ]
 
     def semantic_search(self, query_embedding: List[float], limit: int = 5) -> List[Dict[str, Any]]:
-        """
-        Runs a cosine similarity vector search over the docstrings of code symbols.
-        """
+        """Runs a cosine similarity vector search over the docstrings of code symbols."""
         with self.db_conn.session() as conn:
             res = conn.execute(
                 """
@@ -242,7 +193,6 @@ class SymbolsRepository:
                 """,
                 (query_embedding, limit)
             ).fetchall()
-            
             return [
                 {
                     "symbol": r[0],
@@ -256,16 +206,12 @@ class SymbolsRepository:
             ]
 
     def get_symbols_metadata_batch(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-        """
-        Retrieves symbol metadata and definition occurrences in bulk.
-        """
+        """Retrieves symbol metadata and definition occurrences in bulk."""
         if not symbols:
             return {}
-
         placeholders = ",".join("?" for _ in symbols)
         result = {}
         with self.db_conn.session() as conn:
-            # 1. Fetch metadata
             sym_rows = conn.execute(
                 f"SELECT symbol, filepath, kind, signature, docstring, body_hash FROM symbols WHERE symbol IN ({placeholders})",
                 symbols
@@ -280,8 +226,6 @@ class SymbolsRepository:
                     "body_hash": r[5],
                     "definition": None
                 }
-
-            # 2. Fetch definition occurrences (role & 1 == 1)
             occ_rows = conn.execute(
                 f"""
                 SELECT symbol, filepath, start_line, start_col, end_line, end_col, role 
@@ -315,35 +259,16 @@ class SymbolsRepository:
 
     def delete_symbols_for_files(self, filepaths: List[str]):
         """Delete all symbols defined in multiple files."""
-        if not filepaths:
-            return
-        with self.db_conn.session() as conn:
-            conn.execute(
-                "DELETE FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
-                (filepaths,)
-            )
+        self._delete_by_filepaths("symbols", filepaths)
 
     def delete_occurrences_for_files(self, filepaths: List[str]):
         """Delete all occurrences in multiple files."""
-        if not filepaths:
-            return
-        with self.db_conn.session() as conn:
-            conn.execute(
-                "DELETE FROM occurrences WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
-                (filepaths,)
-            )
+        self._delete_by_filepaths("occurrences", filepaths)
 
     def recalculate_connection_weights(self):
-        """
-        Recalculates connection weights (degree = incoming edges + outgoing edges) for all symbols in the database.
-        Updates connection_weight in the symbols table.
-        """
+        """Recalculates connection weights for all symbols in the database."""
         with self.db_conn.session() as conn:
-            conn.execute(
-                """
-                UPDATE symbols SET connection_weight = 0;
-                """
-            )
+            conn.execute("UPDATE symbols SET connection_weight = 0;")
             conn.execute(
                 """
                 WITH degree_counts AS (
@@ -364,15 +289,7 @@ class SymbolsRepository:
             )
 
     def search_symbols_keyword(self, query: str, limit: int = 5):
-        """Search symbols by keyword in name.
-        
-        Args:
-            query: Search term (case-insensitive)
-            limit: Maximum results
-            
-        Returns:
-            List of (symbol, filepath, kind, signature, docstring) tuples
-        """
+        """Search symbols by keyword in name."""
         with self.db_conn.session() as conn:
             return conn.execute(
                 "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE LOWER(symbol) LIKE ? LIMIT ?",
@@ -380,15 +297,7 @@ class SymbolsRepository:
             ).fetchall()
 
     def search_symbols_like(self, query: str, limit: int = 10):
-        """Search symbols by partial name match.
-        
-        Args:
-            query: Partial symbol name
-            limit: Maximum results
-            
-        Returns:
-            List of (symbol, filepath, kind, signature, docstring) tuples
-        """
+        """Search symbols by partial name match."""
         with self.db_conn.session() as conn:
             return conn.execute(
                 "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE symbol LIKE ? LIMIT ?",
@@ -396,14 +305,7 @@ class SymbolsRepository:
             ).fetchall()
 
     def get_symbol_exact(self, symbol: str):
-        """Get exact symbol match.
-        
-        Args:
-            symbol: Full symbol name
-            
-        Returns:
-            Tuple (symbol, filepath, kind, signature, docstring, body_hash) or None
-        """
+        """Get exact symbol match."""
         with self.db_conn.session() as conn:
             return conn.execute(
                 "SELECT symbol, filepath, kind, signature, docstring, body_hash FROM symbols WHERE symbol = ?",
@@ -411,14 +313,7 @@ class SymbolsRepository:
             ).fetchone()
 
     def get_occurrences_by_filepath(self, filepath: str):
-        """Get all occurrences for a file.
-        
-        Args:
-            filepath: Normalized filepath
-            
-        Returns:
-            List of (symbol, start_line, end_line, role) tuples
-        """
+        """Get all occurrences for a file."""
         normalized = filepath.replace("\\", "/")
         with self.db_conn.session() as conn:
             return conn.execute(
@@ -431,14 +326,7 @@ class SymbolsRepository:
             ).fetchall()
 
     def get_edges_for_symbol(self, symbol: str):
-        """Get all edges where symbol is source or target.
-        
-        Args:
-            symbol: Symbol name
-            
-        Returns:
-            List of (source, target, relation) tuples
-        """
+        """Get all edges where symbol is source or target."""
         with self.db_conn.session() as conn:
             return conn.execute(
                 "SELECT source, target, relation FROM edges WHERE source = ? OR target = ?",
@@ -446,14 +334,7 @@ class SymbolsRepository:
             ).fetchall()
 
     def get_symbols_by_filepath_exact(self, filepath: str):
-        """Get all symbols defined in a file by exact filepath.
-        
-        Args:
-            filepath: File path
-            
-        Returns:
-            List of (symbol, kind, signature) tuples
-        """
+        """Get all symbols defined in a file by exact filepath."""
         with self.db_conn.session() as conn:
             return conn.execute(
                 "SELECT symbol, kind, signature FROM symbols WHERE filepath = ?",
@@ -461,15 +342,13 @@ class SymbolsRepository:
             ).fetchall()
 
     def get_all_symbols(self):
-        """Returns all symbols with filepath. Used by communities.py and auditor."""
+        """Returns all symbols with filepath."""
         with self.db_conn.session() as conn:
-            res = conn.execute(
-                "SELECT symbol, filepath FROM symbols"
-            ).fetchall()
+            res = conn.execute("SELECT symbol, filepath FROM symbols").fetchall()
             return [{"symbol": r[0], "filepath": r[1]} for r in res]
 
     def get_all_symbols_with_metadata(self):
-        """Returns all symbols with full metadata. Used by auditor."""
+        """Returns all symbols with full metadata."""
         with self.db_conn.session() as conn:
             res = conn.execute(
                 "SELECT symbol, filepath, kind, signature, docstring FROM symbols"
@@ -486,11 +365,7 @@ class SymbolsRepository:
             ]
 
     def update_kinds_from_codeql(self, kind_map):
-        """Bulk update symbol kinds from CodeQL extraction results.
-        
-        Args:
-            kind_map: Dict mapping symbol name to kind string
-        """
+        """Bulk update symbol kinds from CodeQL extraction results."""
         if not kind_map:
             return
         with self.db_conn.session() as conn:
@@ -499,4 +374,3 @@ class SymbolsRepository:
                     "UPDATE symbols SET kind = ? WHERE symbol = ?",
                     (kind, symbol)
                 )
-

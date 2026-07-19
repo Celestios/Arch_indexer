@@ -2,6 +2,9 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from utils.helpers import config_path_for
+
+
 class ChangeTracker:
     """
     Handles hashing logic to track physical (file-level) and configuration (ontology) changes.
@@ -25,8 +28,7 @@ class ChangeTracker:
     @staticmethod
     def get_config_hash(project_root: Path) -> str:
         """Returns the current SHA-256 hash of .arch/config.json."""
-        config_path = project_root / ".arch" / "config.json"
-        return ChangeTracker.calculate_sha256(config_path)
+        return ChangeTracker.calculate_sha256(config_path_for(project_root))
 
     @staticmethod
     def check_config_changed(project_root: Path, repository: Any) -> bool:

@@ -1,26 +1,19 @@
 import sys
+import shutil
 from pathlib import Path
 
 from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
 from engines.scip_wrapper import ScipWrapper
-from utils.progress import make_progress_callback
+from utils.progress import make_progress_callback, resolve_bin_dir
 from utils.helpers import CODEQL_LANG_MAP
 from utils.session import get_project_root
 
 
 def _resolve_init_paths(project_root: Path):
     """Resolve bin_dir and component paths for the init command."""
-    import shutil
-    if getattr(sys, 'frozen', False):
-        exe_dir = Path(sys.executable).resolve().parent
-        if (exe_dir / "bin").exists():
-            bin_dir = exe_dir / "bin"
-        else:
-            bin_dir = exe_dir.parent / "bin"
-    else:
-        bin_dir = Path(__file__).resolve().parent.parent.parent / "bin"
+    bin_dir = resolve_bin_dir()
     target_models_dir = bin_dir / "models"
     model_path = target_models_dir / "model.onnx"
     tokenizer_path = target_models_dir / "tokenizer.json"

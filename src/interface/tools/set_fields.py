@@ -1,10 +1,10 @@
 import hashlib
-import json
 from pathlib import Path
 from typing import Optional
 
 from auditor.analyzer import Auditor
-from interface.validators import resolve_filepath
+from auditor.config_loader import ConfigLoader
+from utils.helpers import resolve_filepath, config_path_for, load_config
 
 
 def handle_set_fields(
@@ -15,16 +15,18 @@ def handle_set_fields(
     project_root: Path,
 ) -> str:
     """Update manual compliance status or metadata fields for files. Returns markdown."""
-    config_path = project_root / ".arch" / "config.json"
-    if not config_path.exists():
+    config = load_config(project_root)
+    if not config:
         return "Error: Ontology config not found at .arch/config.json. Please run 'arch init' first."
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-
     def validate_file_fields(fp: str, fields: dict) -> Optional[str]:
-        normalized_path = fp.replace("\\", "/")
+        config_loader = ConfigLoader(config_path_for(project_root))
+        prefix_conf = config_loader.get_applicable_config(fp, config)
+        if not prefix_conf:
+            return f"No configuration prefix matches file '{fp}'."
+
         matching_prefix = None
+        normalized_path = fp.replace("\\", "/")
         for prefix in config.keys():
             if prefix == ".":
                 if matching_prefix is None:
@@ -33,10 +35,6 @@ def handle_set_fields(
                 if matching_prefix is None or len(prefix) > len(matching_prefix):
                     matching_prefix = prefix
 
-        if not matching_prefix:
-            return f"No configuration prefix matches file '{fp}'."
-
-        prefix_conf = config[matching_prefix]
         manual_cfg = prefix_conf.get("manual_fields", {})
         auto_cfg = prefix_conf.get("automatic_fields", {})
 

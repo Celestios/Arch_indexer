@@ -1,23 +1,10 @@
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
 from db.connection import DbConnection
+from db.base import BaseRepository, UPSERT_VIOLATION_SQL
 
 
-class ComplianceRepository:
-    """
-    Handles queries and updates to compliance rules and violations tables.
-    """
-    def __init__(self, db_conn: DbConnection):
-        self.db_conn = db_conn
-
-    def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
-        """Execute a read query and return all rows."""
-        with self.db_conn.session() as conn:
-            return conn.execute(sql, params or ()).fetchall()
-
-    def _execute(self, sql: str, params: Optional[Tuple] = None) -> Any:
-        """Execute a write query and return the result."""
-        with self.db_conn.session() as conn:
-            return conn.execute(sql, params or ())
+class ComplianceRepository(BaseRepository):
+    """Handles queries and updates to compliance rules and violations tables."""
 
     def upsert_compliance_rule(self, rule_id: str, description: str, severity: str):
         """Stores or updates an architectural safety boundary rule."""
@@ -45,20 +32,7 @@ class ComplianceRepository:
     ):
         """Registers an architectural boundary violation."""
         with self.db_conn.session() as conn:
-            conn.execute(
-                """
-                INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message, origin)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (violation_id) DO UPDATE SET
-                    rule_id = excluded.rule_id,
-                    symbol = excluded.symbol,
-                    filepath = excluded.filepath,
-                    line = excluded.line,
-                    message = excluded.message,
-                    origin = excluded.origin
-                """,
-                (violation_id, rule_id, symbol, filepath, line, message, origin)
-            )
+            conn.execute(UPSERT_VIOLATION_SQL, (violation_id, rule_id, symbol, filepath, line, message, origin))
 
     def get_violations(self) -> List[Dict[str, Any]]:
         """Retrieves all registered compliance violations sorted by threat severity."""
@@ -96,11 +70,7 @@ class ComplianceRepository:
             )
 
     def delete_automatic_violations(self, rule_ids=None):
-        """Deletes automatic violations, optionally filtered by rule IDs.
-        
-        Args:
-            rule_ids: Optional list of rule IDs to filter. If None, deletes all automatic violations.
-        """
+        """Deletes automatic violations, optionally filtered by rule IDs."""
         with self.db_conn.session() as conn:
             if rule_ids:
                 placeholders = ",".join("?" for _ in rule_ids)
@@ -109,16 +79,10 @@ class ComplianceRepository:
                     rule_ids
                 )
             else:
-                conn.execute(
-                    "DELETE FROM compliance_violations WHERE origin = 'automatic'"
-                )
+                conn.execute("DELETE FROM compliance_violations WHERE origin = 'automatic'")
 
     def delete_automatic_violations_for_path(self, filepath_prefix: str):
-        """Deletes automatic violations for files matching a path prefix.
-        
-        Args:
-            filepath_prefix: Path prefix to filter violations (forward slashes normalized)
-        """
+        """Deletes automatic violations for files matching a path prefix."""
         normalized_prefix = filepath_prefix.replace("\\", "/")
         with self.db_conn.session() as conn:
             conn.execute(
@@ -127,27 +91,13 @@ class ComplianceRepository:
             )
 
     def upsert_violations_bulk(self, violations):
-        """Bulk upsert violations in a single transaction.
-        
-        Args:
-            violations: List of dicts with keys: violation_id, rule_id, symbol, filepath, line, message, origin
-        """
+        """Bulk upsert violations in a single transaction."""
         if not violations:
             return
         with self.db_conn.session() as conn:
             for v in violations:
                 conn.execute(
-                    """
-                    INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message, origin)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (violation_id) DO UPDATE SET
-                        rule_id = excluded.rule_id,
-                        symbol = excluded.symbol,
-                        filepath = excluded.filepath,
-                        line = excluded.line,
-                        message = excluded.message,
-                        origin = excluded.origin
-                    """,
+                    UPSERT_VIOLATION_SQL,
                     (
                         v["violation_id"],
                         v["rule_id"],

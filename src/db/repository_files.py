@@ -1,41 +1,16 @@
 import json
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
 from db.connection import DbConnection
+from db.base import BaseRepository, UPSERT_FILE_SQL
 
 
-class FilesRepository:
-    """
-    Handles queries and updates to the 'files' table.
-    """
-    def __init__(self, db_conn: DbConnection):
-        self.db_conn = db_conn
-
-    def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
-        """Execute a read query and return all rows."""
-        with self.db_conn.session() as conn:
-            return conn.execute(sql, params or ()).fetchall()
-
-    def _execute(self, sql: str, params: Optional[Tuple] = None) -> Any:
-        """Execute a write query and return the result."""
-        with self.db_conn.session() as conn:
-            return conn.execute(sql, params or ())
+class FilesRepository(BaseRepository):
+    """Handles queries and updates to the 'files' table."""
 
     def upsert_file(self, filepath: str, sha256: str, language: str):
         """Registers or updates a file's hashing and index metadata. Sets pending_audit if changed."""
         with self.db_conn.session() as conn:
-            conn.execute(
-                """
-                INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification)
-                VALUES (?, ?, ?, now(), 'COMPLIANT', 'COMPLIANT', TRUE, '{}', 'New file, pending initial audit')
-                ON CONFLICT (filepath) DO UPDATE SET
-                    pending_audit = CASE WHEN files.sha256 <> excluded.sha256 THEN TRUE ELSE files.pending_audit END,
-                    justification = CASE WHEN files.sha256 <> excluded.sha256 THEN 'File modified, pending re-audit' ELSE files.justification END,
-                    sha256 = excluded.sha256,
-                    language = excluded.language,
-                    last_indexed = now()
-                """,
-                (filepath, sha256, language)
-            )
+            conn.execute(UPSERT_FILE_SQL, (filepath, sha256, language))
 
     def delete_file(self, filepath: str):
         """
@@ -53,13 +28,7 @@ class FilesRepository:
 
     def delete_files_records(self, filepaths: List[str]):
         """Deletes only file records for multiple files (no cross-table cleanup)."""
-        if not filepaths:
-            return
-        with self.db_conn.session() as conn:
-            conn.execute(
-                "DELETE FROM files WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
-                (filepaths,)
-            )
+        self._delete_by_filepaths("files", filepaths)
 
     def _get_repository(self):
         """Get the parent Repository for cascade operations."""
@@ -100,19 +69,7 @@ class FilesRepository:
             for f in files_list
         ]
         with self.db_conn.session() as conn:
-            conn.executemany(
-                """
-                INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification)
-                VALUES (?, ?, ?, now(), 'COMPLIANT', 'COMPLIANT', TRUE, '{}', 'New file, pending initial audit')
-                ON CONFLICT (filepath) DO UPDATE SET
-                    pending_audit = CASE WHEN files.sha256 <> excluded.sha256 THEN TRUE ELSE files.pending_audit END,
-                    justification = CASE WHEN files.sha256 <> excluded.sha256 THEN 'File modified, pending re-audit' ELSE files.justification END,
-                    sha256 = excluded.sha256,
-                    language = excluded.language,
-                    last_indexed = now()
-                """,
-                data
-            )
+            conn.executemany(UPSERT_FILE_SQL, data)
 
     def update_file_manual_status(self, filepath: str, status: str, justification: Optional[str] = None):
         """Sets the manual compliance status for a file and clears pending_audit."""
@@ -146,11 +103,7 @@ class FilesRepository:
         """Updates the automatically evaluated compliance status for a file."""
         with self.db_conn.session() as conn:
             conn.execute(
-                """
-                UPDATE files
-                SET status = ?
-                WHERE filepath = ?
-                """,
+                "UPDATE files SET status = ? WHERE filepath = ?",
                 (status, filepath)
             )
 
@@ -182,11 +135,7 @@ class FilesRepository:
         """Sets pending_audit = FALSE for all files in the database."""
         with self.db_conn.session() as conn:
             conn.execute(
-                """
-                UPDATE files
-                SET pending_audit = FALSE,
-                    justification = ?
-                """,
+                "UPDATE files SET pending_audit = FALSE, justification = ?",
                 (justification,)
             )
 
@@ -207,11 +156,7 @@ class FilesRepository:
         cascade.delete_files_bulk(filepaths)
 
     def update_file_statuses(self, statuses):
-        """Bulk update file compliance statuses.
-        
-        Args:
-            statuses: Dict mapping filepath to status string
-        """
+        """Bulk update file compliance statuses."""
         if not statuses:
             return
         with self.db_conn.session() as conn:
@@ -222,12 +167,7 @@ class FilesRepository:
                 )
 
     def mark_file_for_audit(self, filepath: str, justification: str):
-        """Mark a file as pending audit with a justification.
-        
-        Args:
-            filepath: Path to the file
-            justification: Reason the file needs re-auditing
-        """
+        """Mark a file as pending audit with a justification."""
         with self.db_conn.session() as conn:
             conn.execute(
                 "UPDATE files SET pending_audit = TRUE, justification = ? WHERE filepath = ?",
@@ -235,15 +175,7 @@ class FilesRepository:
             )
 
     def search_files_keyword(self, query: str, limit: int = 5):
-        """Search files by keyword in filepath.
-        
-        Args:
-            query: Search term (case-insensitive)
-            limit: Maximum results
-            
-        Returns:
-            List of (filepath, language, status) tuples
-        """
+        """Search files by keyword in filepath."""
         with self.db_conn.session() as conn:
             return conn.execute(
                 "SELECT filepath, language, status FROM files WHERE LOWER(filepath) LIKE ? LIMIT ?",
@@ -251,14 +183,8 @@ class FilesRepository:
             ).fetchall()
 
     def get_file_exact(self, filepath: str):
-        """Get exact file match by filepath.
-        
-        Args:
-            filepath: File path
-            
-        Returns:
-            Tuple of file metadata or None
-        """
+        """Get exact file match by filepath."""
+        normalized = filepath.replace("\\", "/")
         with self.db_conn.session() as conn:
             return conn.execute(
                 """
@@ -266,19 +192,11 @@ class FilesRepository:
                 FROM files
                 WHERE filepath = ? OR replace(filepath, '\\', '/') = ?
                 """,
-                (filepath, filepath.replace("\\", "/"))
+                (filepath, normalized)
             ).fetchone()
 
     def search_files_like(self, query: str, limit: int = 10):
-        """Search files by partial filepath match.
-        
-        Args:
-            query: Partial filepath
-            limit: Maximum results
-            
-        Returns:
-            List of file metadata tuples
-        """
+        """Search files by partial filepath match."""
         normalized = query.replace("\\", "/")
         with self.db_conn.session() as conn:
             return conn.execute(

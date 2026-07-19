@@ -2,13 +2,16 @@ import json
 from pathlib import Path
 from typing import Dict, List, Any
 
+from utils.helpers import config_path_for
+
+
 class ConfigValidator:
     """
     Validates structural correctness, completeness, and referential integrity of the config.json.
     """
     def __init__(self, project_root: Path):
         self.project_root = project_root
-        self.config_path = project_root / ".arch" / "config.json"
+        self.config_path = config_path_for(project_root)
 
     def validate(self) -> Dict[str, Any]:
         """

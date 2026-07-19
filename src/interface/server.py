@@ -14,6 +14,8 @@ from db.connection import DbConnection
 from db.repository import Repository
 from engines.embedder import LocalEmbedder
 from utils.progress import resolve_bin_dir
+from utils.session import get_project_root, db_session
+from utils.helpers import CONFIG_DIR_NAME
 
 from interface.tools.query import handle_query
 from interface.tools.context import handle_context
@@ -29,36 +31,10 @@ from interface.tools.compile_context import handle_compile_context
 from interface.tools.analyze import handle_analyze
 
 
-# Resolve project root: env var > explicit arg > CWD
-def _resolve_project_root() -> Path:
-    if os.environ.get("ARCH_PROJECT_ROOT"):
-        return Path(os.environ["ARCH_PROJECT_ROOT"]).resolve()
-    if len(sys.argv) > 2 and not sys.argv[2].startswith("-"):
-        return Path(sys.argv[2]).resolve()
-    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-        return Path(sys.argv[1]).resolve()
-    return Path.cwd().resolve()
-
-
-PROJECT_ROOT = _resolve_project_root()
-ARCH_DIR = PROJECT_ROOT / ".arch"
+PROJECT_ROOT = get_project_root()
+ARCH_DIR = PROJECT_ROOT / CONFIG_DIR_NAME
 DB_PATH = ARCH_DIR / "arch.db"
 get_bin_dir = resolve_bin_dir
-
-
-@contextmanager
-def get_repository():
-    """Context manager that yields a Repository connected to the arch database."""
-    if not DB_PATH.exists():
-        raise FileNotFoundError(
-            f"Arch database not found at {DB_PATH}. Please run 'arch init' first."
-        )
-    db_conn = DbConnection(DB_PATH)
-    repository = Repository(db_conn)
-    try:
-        yield repository, db_conn
-    finally:
-        db_conn.close()
 
 
 mcp = FastMCP("arch")
@@ -83,7 +59,7 @@ def query(text: Union[List[str], str], limit: int = 5) -> str:
         return f"Error: Could not initialize embedding engine: {e}"
 
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_query(text, limit, repository, embedder)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -109,8 +85,11 @@ def context(filepaths: Union[List[str], str]) -> str:
       - A comma-separated filepath string (e.g. 'file1.dart, file2.dart')
       - A list/array of filepaths
     """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_context(filepaths, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -130,8 +109,11 @@ def impact(symbol: str, max_depth: int = 3) -> str:
         that control many downstream targets, to understand what components the change
         might impact and prevent regressions.
     """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_impact(symbol, max_depth, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -152,7 +134,7 @@ def audit() -> str:
         return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
 
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_audit(repository, PROJECT_ROOT)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -171,8 +153,11 @@ def map() -> str:
       - Use map at the start of a task when no information for the project is available.
         It gives a bird's-eye view of the project and module dependencies.
     """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_map(repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -193,8 +178,11 @@ def trace(source: str, sink: str) -> str:
       - Supports cross-language traces: any language -> FFI -> any other language
       - Auto-detects languages from symbol names or file paths
     """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_trace(source, sink, repository, ARCH_DIR, get_bin_dir)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -214,8 +202,11 @@ def report(name: str, format: str = "markdown") -> str:
       - Similar to compile_context, but provides less direct control and a broader view of
         the workspace across different aspects.
     """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_report(name, format, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -245,8 +236,11 @@ def set_fields(
       - Negative Constraint: Do NOT modify the ontology config.json file directly without
         first consulting the user.
     """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_set_fields(target, update, justification, repository, PROJECT_ROOT)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -264,8 +258,11 @@ def clear_pending_audits() -> str:
       - This tool operates on the database's compliance state. Run this tool only when instructed
         by the user's prompt or other skills on how and where to use it.
     """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_clear_pending_audits(repository, PROJECT_ROOT)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -284,8 +281,11 @@ def lookup(target: str) -> str:
       - Use to retrieve symbol definitions, occurrences, and relationships for any target symbol
         or file module before reading or modifying it.
     """
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_lookup(target, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -327,8 +327,11 @@ def compile_context(
     if resolution not in ("full", "signature"):
         return f"Error: Invalid resolution: '{resolution}'. Allowed: full, signature."
 
+    if not DB_PATH.exists():
+        return f"Error: Arch database not found at {DB_PATH}. Please run 'arch init' first."
+
     try:
-        with get_repository() as (repository, db_conn):
+        with db_session(PROJECT_ROOT) as (repository, db_conn):
             return handle_compile_context(
                 symbol, radius, direction, resolution, out_filepath, repository, PROJECT_ROOT
             )

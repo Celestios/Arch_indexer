@@ -9,6 +9,8 @@ from auditor.path_tracer import PathTracer
 from auditor.config_loader import ConfigLoader
 from auditor.field_validator import FieldValidator
 from auditor.edge_weights import EdgeWeightUpdater
+from utils.helpers import matches_filter, find_definition_line, config_path_for, load_config
+from utils.violation_id import ViolationId
 
 
 class Auditor:
@@ -21,7 +23,7 @@ class Auditor:
     def __init__(self, repository: Repository, project_root: Path):
         self.repository = repository
         self.project_root = project_root
-        self.config_path = project_root / ".arch" / "config.json"
+        self.config_path = config_path_for(project_root)
 
         self.config_loader = ConfigLoader(self.config_path)
         self.classifier = SymbolClassifier(repository)
@@ -32,7 +34,7 @@ class Auditor:
 
     def load_config(self) -> Dict[str, Any]:
         """Loads the workspace architectural configuration."""
-        return self.config_loader.load_config()
+        return load_config(self.project_root)
 
     def run_audit(self, filepath_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -122,11 +124,8 @@ class Auditor:
             filepath = source_data["symbol_info"]["filepath"]
             if not filepath:
                 continue
-            if filepath_filter:
-                norm_source_fp = filepath.replace("\\", "/")
-                norm_filter = filepath_filter.replace("\\", "/")
-                if not norm_source_fp.startswith(norm_filter):
-                    continue
+            if not matches_filter(filepath, filepath_filter):
+                continue
 
             prefix_conf = source_data["prefix_conf"]
             auto_fields = prefix_conf.get("automatic_fields", {})
@@ -150,9 +149,7 @@ class Auditor:
         if source_val != forbidden_source or not self.tracer.matches_blocklist(target_sym, blocklist):
             return []
         msg = rule.get("message", f"Package restriction violation: {source_val} cannot depend on {target_sym}")
-        line_number = self.repository.symbols.get_occurrences_for_symbol(target_sym)
-        line_number = next((occ["start_line"] for occ in line_number if occ["filepath"] == filepath), 1)
-        from utils.violation_id import ViolationId
+        line_number = find_definition_line(self.repository, target_sym, filepath)
         violation_id = ViolationId.generate(source_sym, target_sym, "pkg_restrict", forbidden_source)
         rule_id = f"{field_name}_pkg_{forbidden_source}".lower().replace("/", "_").replace(".", "_")
         data = {"violation_id": violation_id, "rule_id": rule_id, "symbol": source_sym,
@@ -172,9 +169,8 @@ class Auditor:
         msg = rule.get("message", f"Dependency violation: {source_val} is not allowed to call {target_val}")
         path = self._trace_propagation_path(source_sym, target_sym, field_name, propagation_sources, field_conf)
         trace_msg = msg + self.tracer.format_path_trace(path)
-        line_number = next((occ["start_line"] for occ in self.repository.symbols.get_occurrences_for_symbol(target_sym) if occ["filepath"] == filepath), 1)
+        line_number = find_definition_line(self.repository, target_sym, filepath)
 
-        from utils.violation_id import ViolationId
         violation_id = ViolationId.generate(source_sym, target_sym, field_name, forbidden_source, forbidden_target)
         rule_id = f"{field_name}_{forbidden_source}_{forbidden_target}".lower().replace("/", "_").replace(".", "_")
         matched_prefix = None
@@ -240,11 +236,8 @@ class Auditor:
             filepath = data["symbol_info"]["filepath"]
             if not filepath:
                 continue
-            if filepath_filter:
-                norm_source_fp = filepath.replace("\\", "/")
-                norm_filter = filepath_filter.replace("\\", "/")
-                if not norm_source_fp.startswith(norm_filter):
-                    continue
+            if not matches_filter(filepath, filepath_filter):
+                continue
 
             for prefix, rule in naming_rules:
                 if filepath.replace("\\", "/").startswith(prefix):
@@ -259,12 +252,7 @@ class Auditor:
                     if not violated:
                         continue
                     msg = rule.get("message", f"Naming convention violation: '{simple_name}' must match constraints for {classification}")
-                    line_number = next((occ["start_line"] for occ in self.repository.symbols.get_occurrences_for_symbol(sym) if occ["filepath"] == filepath and occ["role"] == 1), 1)
-                    if line_number == 1:
-                        occs = self.repository.symbols.get_occurrences_for_symbol(sym)
-                        if occs:
-                            line_number = occs[0]["start_line"]
-                    from utils.violation_id import ViolationId
+                    line_number = find_definition_line(self.repository, sym, filepath)
                     violation_id = ViolationId.generate(sym, "naming", classification)
                     rule_id = f"naming_{classification}".lower().replace("/", "_").replace(".", "_")
                     vdata = {"violation_id": violation_id, "rule_id": rule_id, "symbol": sym,
@@ -279,14 +267,10 @@ class Auditor:
         for f_path, meta in file_metadata.items():
             if not meta.get("pending_audit"):
                 continue
-            if filepath_filter:
-                norm_source_fp = f_path.replace("\\", "/")
-                norm_filter = filepath_filter.replace("\\", "/")
-                if not norm_source_fp.startswith(norm_filter):
-                    continue
+            if not matches_filter(f_path, filepath_filter):
+                continue
             justification_msg = meta.get("justification") or ""
             msg = f"{f_path}: file changed" if "modified" in justification_msg.lower() or "changed" in justification_msg.lower() else f"{f_path}: new file"
-            from utils.violation_id import ViolationId
             violation_id = ViolationId.generate("pending_audit", f_path)
             vdata = {"violation_id": violation_id, "rule_id": "pending_audit", "symbol": None,
                      "filepath": f_path, "line": 1, "message": msg, "origin": "automatic"}

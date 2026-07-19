@@ -1,6 +1,7 @@
 from .wrapper import DartAnalyzerWrapper
 from .database import DartAnalyzerDB
-from .dataflow import DartDataflowTracer, FlowStep
+from .base_tracer import FlowStep
+from .dataflow import DartDataflowTracer
 from .combined_tracer import CombinedDataflowTracer
 from .ffi_detector import DartFfiDetector, DartFfiSurface
 

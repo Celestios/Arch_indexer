@@ -38,6 +38,19 @@ class CodeQlWrapper:
         except Exception:
             return False
 
+    def _resolve_rust_build_command(self, source_root: Path) -> str:
+        """Resolve the Rust build command, detecting Cargo.toml location."""
+        if (source_root / "Cargo.toml").exists():
+            return 'cargo build'
+        include_dirs = load_include_dirs(source_root)
+        cargo_files = [p for p in source_root.glob("**/Cargo.toml")
+                      if include_dirs is None or is_included(str(p.relative_to(source_root)), include_dirs)]
+        if cargo_files:
+            rel_path = cargo_files[0].relative_to(source_root)
+            manifest_path = str(rel_path).replace("\\", "/")
+            return f'cargo build --manifest-path {manifest_path}'
+        return 'cargo build'
+
     def create_database(
         self,
         source_root: Path,
@@ -77,18 +90,7 @@ class CodeQlWrapper:
         if build_command:
             cmd.append(f"--command={build_command}")
         elif language == "rust":
-            if (source_root / "Cargo.toml").exists():
-                cmd.append('--command=cargo build')
-            else:
-                include_dirs = load_include_dirs(source_root)
-                cargo_files = [p for p in source_root.glob("**/Cargo.toml")
-                              if include_dirs is None or is_included(str(p.relative_to(source_root)), include_dirs)]
-                if cargo_files:
-                    rel_path = cargo_files[0].relative_to(source_root)
-                    manifest_path = str(rel_path).replace("\\", "/")
-                    cmd.append(f'--command=cargo build --manifest-path {manifest_path}')
-                else:
-                    cmd.append('--command=cargo build')
+            cmd.append(f'--command={self._resolve_rust_build_command(source_root)}')
 
         print(f"[CodeQL] Creating database at {db_output_dir} for {language}...")
         try:
@@ -142,18 +144,7 @@ class CodeQlWrapper:
             # 3. Determine build command for compiler tracing
             build_command = None
             if language == "rust":
-                if (source_root / "Cargo.toml").exists():
-                    build_command = 'cargo build'
-                else:
-                    include_dirs = load_include_dirs(source_root)
-                    cargo_files = [p for p in source_root.glob("**/Cargo.toml")
-                                  if include_dirs is None or is_included(str(p.relative_to(source_root)), include_dirs)]
-                    if cargo_files:
-                        rel_path = cargo_files[0].relative_to(source_root)
-                        manifest_path = str(rel_path).replace("\\", "/")
-                        build_command = f'cargo build --manifest-path {manifest_path}'
-                    else:
-                        build_command = 'cargo build'
+                build_command = self._resolve_rust_build_command(source_root)
 
             # 4. Run trace-command (compile changes)
             if build_command:

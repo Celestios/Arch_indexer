@@ -1,6 +1,7 @@
 from typing import List
 import fnmatch
 from db.repository import Repository
+from utils.helpers import find_definition_line
 
 class PathTracer:
     """
@@ -27,7 +28,6 @@ class PathTracer:
             line_str = ""
             if filepath:
                 if i < len(path) - 1:
-                    # Find where it calls the next node
                     next_sym = path[i+1]
                     occs = self.repository.symbols.get_occurrences_for_symbol(next_sym)
                     call_line = None
@@ -38,15 +38,7 @@ class PathTracer:
                     if call_line is not None:
                         line_str = f":L{call_line}"
                 else:
-                    # Last node: find its definition line
-                    occs = self.repository.symbols.get_occurrences_for_symbol(sym)
-                    def_line = None
-                    for occ in occs:
-                        if occ["filepath"] == filepath and occ["role"] == 1:
-                            def_line = occ["start_line"]
-                            break
-                    if def_line is None and occs:
-                        def_line = occs[0]["start_line"]
+                    def_line = find_definition_line(self.repository, sym, filepath)
                     if def_line is not None:
                         line_str = f":L{def_line}"
             

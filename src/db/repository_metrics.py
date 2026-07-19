@@ -1,30 +1,15 @@
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List
 from db.connection import DbConnection
+from db.base import BaseRepository
 
 
-class MetricsRepository:
-    """
-    Handles queries for codebase metrics, statistics, and counts.
-    """
-    def __init__(self, db_conn: DbConnection):
-        self.db_conn = db_conn
-
-    def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
-        """Execute a read query and return all rows."""
-        with self.db_conn.session() as conn:
-            return conn.execute(sql, params or ()).fetchall()
-
-    def _execute(self, sql: str, params: Optional[Tuple] = None) -> Any:
-        """Execute a write query and return the result."""
-        with self.db_conn.session() as conn:
-            return conn.execute(sql, params or ())
+class MetricsRepository(BaseRepository):
+    """Handles queries for codebase metrics, statistics, and counts."""
 
     def get_symbol_counts_by_kind(self) -> Dict[str, int]:
         """Returns symbol counts grouped by their declaration kind."""
         with self.db_conn.session() as conn:
-            res = conn.execute(
-                "SELECT kind, COUNT(*) FROM symbols GROUP BY kind"
-            ).fetchall()
+            res = conn.execute("SELECT kind, COUNT(*) FROM symbols GROUP BY kind").fetchall()
             return {r[0]: r[1] for r in res}
 
     def get_repo_totals(self) -> Dict[str, int]:
@@ -45,9 +30,7 @@ class MetricsRepository:
         """Groups symbol counts by their top-level directory prefix."""
         prefix_counts = {}
         with self.db_conn.session() as conn:
-            res = conn.execute(
-                "SELECT filepath FROM symbols WHERE filepath IS NOT NULL"
-            ).fetchall()
+            res = conn.execute("SELECT filepath FROM symbols WHERE filepath IS NOT NULL").fetchall()
             for (fp,) in res:
                 fp_norm = fp.replace("\\", "/")
                 parts = fp_norm.split("/")

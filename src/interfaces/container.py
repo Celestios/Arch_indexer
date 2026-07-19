@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from utils.helpers import CONFIG_DIR_NAME, config_path_for
+
 
 class DependencyContainer:
     """
@@ -20,7 +22,7 @@ class DependencyContainer:
 
     def __init__(self, project_root: Path):
         self.project_root = project_root
-        self.arch_dir = project_root / ".arch"
+        self.arch_dir = project_root / CONFIG_DIR_NAME
         self.db_path = self.arch_dir / "arch.db"
 
         self._repository = None
