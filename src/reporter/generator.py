@@ -9,6 +9,10 @@ class BaseReport(ABC):
     """
     def __init__(self, repository: Repository):
         self.repository = repository
+        self.total_violations = 0
+        self.compliant_files = 0
+        self.violated_files = 0
+        self.score = 1.0
 
     @abstractmethod
     def generate(self) -> Dict[str, Any]:
@@ -25,6 +29,17 @@ class BaseReport(ABC):
         Must be implemented by subclasses.
         """
         ...
+
+    def summary(self) -> dict:
+        return {
+            "total_violations": self.total_violations,
+            "compliant_files": self.compliant_files,
+            "violated_files": self.violated_files,
+            "score": self.score,
+        }
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} score={self.score:.1%}>"
 
     def to_json(self, data: Dict[str, Any]) -> str:
         """

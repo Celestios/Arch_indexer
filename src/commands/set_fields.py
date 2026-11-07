@@ -5,6 +5,15 @@ from auditor.analyzer import Auditor
 from utils.session import workspace_session, resolve_filepath
 
 
+def register(subparsers):
+    p = subparsers.add_parser("set-fields", help="Set manual metadata fields for a file")
+    p.add_argument("filepath", help="Filepath to the target file")
+    p.add_argument("fields_json", help="JSON string of fields to update")
+    p.add_argument("justification", nargs="?", default=None, help="Optional update justification")
+    p.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    p.set_defaults(func=cmd_set_fields)
+
+
 def cmd_set_fields(args):
     """Sets manual fields for a file."""
     with workspace_session(args) as (project_root, arch_dir, repository):

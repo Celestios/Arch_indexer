@@ -43,46 +43,7 @@ class TestBaseReportLSP:
         assert hasattr(ComplianceReport, 'to_json')
 
 
-class TestEngineWrapperLSP:
-    """Verify engine wrappers have consistent interface contracts."""
 
-    def test_both_wrappers_have_is_available(self):
-        from engines.codeql_wrapper import CodeQlWrapper
-        from engines.dart_analyzer.wrapper import DartAnalyzerWrapper
-        assert callable(getattr(CodeQlWrapper, 'is_available', None))
-        assert callable(getattr(DartAnalyzerWrapper, 'is_available', None))
-
-    def test_both_wrappers_have_create_database(self):
-        from engines.codeql_wrapper import CodeQlWrapper
-        from engines.dart_analyzer.wrapper import DartAnalyzerWrapper
-        assert callable(getattr(CodeQlWrapper, 'create_database', None))
-        assert callable(getattr(DartAnalyzerWrapper, 'create_database', None))
-
-    def test_both_wrappers_have_run_query(self):
-        from engines.codeql_wrapper import CodeQlWrapper
-        from engines.dart_analyzer.wrapper import DartAnalyzerWrapper
-        assert callable(getattr(CodeQlWrapper, 'run_query', None))
-        assert callable(getattr(DartAnalyzerWrapper, 'run_query', None))
-
-    def test_both_wrappers_have_decode(self):
-        """Both have decode method (decode_bqrs or decode_results)."""
-        from engines.codeql_wrapper import CodeQlWrapper
-        from engines.dart_analyzer.wrapper import DartAnalyzerWrapper
-        assert callable(getattr(CodeQlWrapper, 'decode_bqrs', None))
-        assert callable(getattr(DartAnalyzerWrapper, 'decode_results', None))
-
-    def test_both_wrappers_have_trace_data_flow(self):
-        from engines.codeql_wrapper import CodeQlWrapper
-        from engines.dart_analyzer.wrapper import DartAnalyzerWrapper
-        assert callable(getattr(CodeQlWrapper, 'trace_data_flow', None))
-        assert callable(getattr(DartAnalyzerWrapper, 'trace_data_flow', None))
-
-    def test_dart_wrapper_has_extract_kinds(self):
-        from engines.dart_analyzer.wrapper import DartAnalyzerWrapper
-        assert callable(getattr(DartAnalyzerWrapper, 'extract_kinds', None))
-
-
-class TestViolationCheckerLSP:
     """Verify all violation checkers have consistent check() interface."""
 
     def test_all_checkers_have_check_method(self):

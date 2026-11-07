@@ -1,4 +1,6 @@
 import sys
+import json
+from pathlib import Path
 
 from setup.initializer import initialize_workspace
 from db.connection import DbConnection
@@ -109,7 +111,6 @@ def test_layer_aggregations(tmp_path):
 def test_auditor_filter(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
-    import json
     config = {
         "lib": {
             "automatic_fields": {
@@ -162,7 +163,7 @@ def test_auditor_filter(tmp_path):
     db_conn.close()
 
 
-def test_map_community_mapping(tmp_path, monkeypatch):
+def test_mcp_tools_lookup(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
     _patch_server_config(monkeypatch, root)
 
@@ -172,66 +173,38 @@ def test_map_community_mapping(tmp_path, monkeypatch):
         conn.execute("""
             INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
             VALUES
-                ('ui_a', 'lib/ui/widget.dart', 'Class', null, null, null),
-                ('ui_b', 'lib/ui/widget.dart', 'Method', null, null, null),
-                ('ui_c', 'lib/ui/widget.dart', 'Method', null, null, null),
-                ('db_a', 'src/db/repo.py', 'Class', null, null, null),
-                ('db_b', 'src/db/repo.py', 'Method', null, null, null),
-                ('db_c', 'src/db/repo.py', 'Method', null, null, null)
+                ('my_service', 'src/service.py', 'Class', 'class MyService', 'Service docstring', null),
+                ('my_helper', 'src/helper.py', 'Function', 'def my_helper()', 'Helper docstring', null)
+        """)
+        conn.execute("""
+            INSERT INTO files (filepath, sha256, language)
+            VALUES ('src/service.py', 'hash123', 'python')
         """)
         conn.execute("""
             INSERT INTO edges (source, target, relation)
-            VALUES 
-                ('ui_a', 'ui_b', 'Calls'),
-                ('ui_b', 'ui_c', 'Calls'),
-                ('db_a', 'db_b', 'Calls'),
-                ('db_b', 'db_c', 'Calls'),
-                ('ui_c', 'db_a', 'Calls')
+            VALUES ('caller_sym', 'my_service', 'Calls'),
+                   ('my_service', 'callee_sym', 'Calls')
         """)
 
-    # Test map output
-    out = mcp_server.map()
-    assert "## Repository Architectural Blueprint Map" in out
-    assert "Detected Architectural Communities" in out
-    assert "Community: `lib/ui/` (3 symbol(s))" in out
-    assert "Community: `src/db/` (3 symbol(s))" in out
-    assert "Inter-Community Call Dependencies" in out
-    assert "`lib/ui/` ──[1 call(s)]──> `src/db/`" in out
+    # 1. Exact symbol match
+    out_exact = mcp_server.lookup("my_service")
+    assert "Symbol:" in out_exact
+    assert "my_service" in out_exact
+    assert "class MyService" in out_exact
+    assert "caller_sym" in out_exact
+    assert "callee_sym" in out_exact
 
-    db_conn.close()
+    # 2. File match
+    out_file = mcp_server.lookup("src/service.py")
+    assert "File Module:" in out_file or "service.py" in out_file
 
+    # 3. Keyword fallback
+    out_kw = mcp_server.lookup("helper")
+    assert "my_helper" in out_kw
 
-def test_query_tool_multi_query(tmp_path, monkeypatch):
-    repository, db_conn, root = setup_workspace(tmp_path)
-    _patch_server_config(monkeypatch, root)
-
-    import src.interface.server as mcp_server
-
-    # Mock the embedder inside the query tool
-    class MockEmbedder:
-        def __init__(self, bin_dir):
-            pass
-        def embed(self, text):
-            return [0.1, 0.2, 0.3]
-
-    monkeypatch.setattr(mcp_server, "LocalEmbedder", MockEmbedder)
-
-    with db_conn.session() as conn:
-        conn.execute("""
-            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, embedding)
-            VALUES ('sym_a', 'src/db.py', 'Class', null, 'doc A', null, [0.1, 0.2, 0.3]::FLOAT[])
-        """)
-
-    # Test query with single string
-    out_single = mcp_server.query("search query")
-    assert 'Search Results for: "search query"' in out_single
-    assert "sym_a" in out_single
-
-    # Test query with list of strings
-    out_multi = mcp_server.query(["first search", "second search"])
-    assert 'Search Results for: "first search"' in out_multi
-    assert 'Search Results for: "second search"' in out_multi
-    assert "sym_a" in out_multi
+    # 4. Unknown target
+    out_none = mcp_server.lookup("non_existent_symbol_xyz")
+    assert "No files or symbols matched" in out_none
 
     db_conn.close()
 
@@ -256,13 +229,21 @@ def test_mcp_tools_context(tmp_path, monkeypatch):
                 ('method_sym', 'lib/ui/widget.dart', 15, 1, 18, 1, 1)
         """)
 
-    # Test context tool
+    # Test context tool with single string
     out = mcp_server.context("lib/ui/widget.dart")
     assert "## File Index: `lib/ui/widget.dart`" in out
     assert "class_sym" in out
     assert "[L10-20]" in out
     assert "method_sym" in out
     assert "[L15-18]" in out
+
+    # Test context tool with list of strings
+    out_multi = mcp_server.context(["lib/ui/widget.dart"])
+    assert "class_sym" in out_multi
+
+    # Test empty file
+    out_empty = mcp_server.context("unindexed_file.py")
+    assert "No indexed symbols found in file" in out_empty
 
     db_conn.close()
 
@@ -291,13 +272,100 @@ def test_mcp_tools_impact(tmp_path, monkeypatch):
     db_conn.close()
 
 
+def test_mcp_tools_impact_class_vs_method(tmp_path, monkeypatch):
+    repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
+
+    import src.interface.server as mcp_server
+
+    with db_conn.session() as conn:
+        # Register a class and its member methods
+        conn.execute("""
+            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
+            VALUES
+                ('pkg/MyClass#', 'src/my_class.py', 'Class', 'class MyClass', 'A demo class', null),
+                ('pkg/MyClass#__init__().', 'src/my_class.py', 'Constructor', 'def __init__(self)', null, null),
+                ('pkg/MyClass#run().', 'src/my_class.py', 'Method', 'def run(self)', 'Runs the task', null),
+                ('pkg/ExternalCaller#execute().', 'src/caller.py', 'Method', 'def execute()', null, null),
+                ('pkg/SubsystemService#do_work().', 'src/service.py', 'Method', 'def do_work()', null, null)
+        """)
+        # ExternalCaller instantiates MyClass and calls run()
+        # MyClass.run() calls SubsystemService.do_work()
+        conn.execute("""
+            INSERT INTO edges (source, target, relation)
+            VALUES 
+                ('pkg/ExternalCaller#execute().', 'pkg/MyClass#__init__().', 'Calls'),
+                ('pkg/ExternalCaller#execute().', 'pkg/MyClass#run().', 'Calls'),
+                ('pkg/MyClass#run().', 'pkg/SubsystemService#do_work().', 'Calls')
+        """)
+
+    # 1. Querying the Class directly produces categorized semantic buckets & guidance
+    out_class = mcp_server.impact("MyClass")
+    assert "## Blast Radius for Class: `pkg.MyClass`" in out_class
+    assert "Contextual Guidance" in out_class
+    assert "To see specific blast radius for method edits, run `impact(\"pkg.MyClass.<method_name>\")`" in out_class
+    assert "### ── Direct Usages (Instantiation & Type References)" in out_class
+    assert "pkg.ExternalCaller.execute()" in out_class
+    assert "[Instantiation]" in out_class
+    assert "### ── Interface Surface (Exposed Callers)" in out_class
+    assert "pkg.MyClass.run" in out_class
+    assert "Called by `pkg.ExternalCaller.execute()`" in out_class
+    assert "### ── Downstream Dependencies (Per Method)" in out_class
+    assert "External Subsystems: `pkg.SubsystemService.do_work()`" in out_class
+
+    # 2. Querying the Method directly produces deterministic upstream/downstream blast radius
+    out_method = mcp_server.impact("MyClass.run")
+    assert "## Blast Radius for: `pkg.MyClass.run()`" in out_method
+    assert "### ── Upstream Callers" in out_method
+    assert "pkg.ExternalCaller.execute()" in out_method
+    assert "### ── Downstream Callees" in out_method
+    assert "pkg.SubsystemService.do_work()" in out_method
+
+    db_conn.close()
+
+
+def test_mcp_tools_compile_context(tmp_path, monkeypatch):
+    repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
+
+    import src.interface.server as mcp_server
+
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
+            VALUES
+                ('root_sym', 'src/core.py', 'Class', 'class RootSym', 'Core root symbol', null),
+                ('child_sym', 'src/child.py', 'Function', 'def child_fn()', 'Child function', null)
+        """)
+        conn.execute("""
+            INSERT INTO edges (source, target, relation)
+            VALUES ('root_sym', 'child_sym', 'Calls')
+        """)
+
+    # Test compile_context tool
+    out = mcp_server.compile_context("root_sym", radius=1, direction="downstream", resolution="signature")
+    assert "# Dynamic Architectural Context Compilation" in out
+    assert "root_sym" in out
+    assert "child_sym" in out
+
+    # Test invalid direction validation
+    out_err_dir = mcp_server.compile_context("root_sym", direction="invalid_dir")
+    assert "Error:" in out_err_dir
+
+    # Test invalid resolution validation
+    out_err_res = mcp_server.compile_context("root_sym", resolution="invalid_res")
+    assert "Error:" in out_err_res
+
+    db_conn.close()
+
+
 def test_mcp_tools_audit(tmp_path, monkeypatch):
     repository, db_conn, root = setup_workspace(tmp_path)
     _patch_server_config(monkeypatch, root)
 
     import src.interface.server as mcp_server
 
-    # Insert a violation manually in DB to verify audit formatting
+    # Insert a violation manually in DB
     with db_conn.session() as conn:
         conn.execute("""
             INSERT INTO compliance_rules (rule_id, description, severity)
@@ -308,8 +376,6 @@ def test_mcp_tools_audit(tmp_path, monkeypatch):
             VALUES ('vi_1', 'rules_test', 'ui_widget', 'lib/ui/widget.dart', 10, 'call violation')
         """)
 
-    # Mock the Auditor.run_audit method to return our manually inserted violation
-    # since we want to test server.py's formatting logic
     def mock_run_audit(self, filepath_filter=None):
         return [{
             "violation_id": "vi_1",
@@ -333,62 +399,6 @@ def test_mcp_tools_audit(tmp_path, monkeypatch):
     db_conn.close()
 
 
-def test_mcp_tools_trace_mocked(tmp_path, monkeypatch):
-    repository, db_conn, root = setup_workspace(tmp_path)
-    _patch_server_config(monkeypatch, root)
-
-    import src.interface.server as mcp_server
-
-    # Create CodeQL DB folder so it exists
-    codeql_db_dir = root / ".arch" / "codeql_db"
-    codeql_db_dir.mkdir(parents=True, exist_ok=True)
-
-    with db_conn.session() as conn:
-        conn.execute("""
-            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
-            VALUES
-                ('source_sym', 'src/source.py', 'Function', null, null, null),
-                ('sink_sym', 'src/sink.py', 'Function', null, null, null)
-        """)
-        conn.execute("""
-            INSERT INTO occurrences (symbol, filepath, start_line, start_col, end_line, end_col, role)
-            VALUES
-                ('source_sym', 'src/source.py', 5, 0, 5, 10, 1),
-                ('sink_sym', 'src/sink.py', 10, 0, 10, 10, 1)
-        """)
-
-    class MockCodeQlWrapper:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def is_available(self):
-            return True
-
-        def run_query(self, db_dir, ql_file, bqrs_file):
-            return True
-
-        def decode_bqrs(self, bqrs_file, json_file):
-            return {"tuples": [[{"value": "source_sym"}, {"value": "sink_sym"}]]}
-
-    # Inject mock
-    # Add a mock class to engines.codeql_wrapper
-    import engines.codeql_wrapper
-    monkeypatch.setattr(engines.codeql_wrapper, "CodeQlWrapper", MockCodeQlWrapper)
-
-    # Success case
-    out = mcp_server.trace("source_sym", "sink_sym")
-    assert "## Data Flow Trace: Path Found" in out
-    assert "source_sym" in out
-    assert "sink_sym" in out
-    assert "src/source.py:L5" in out
-
-    # Path not found case
-    out_empty = mcp_server.trace("none", "none")
-    assert "No flow path found" in out_empty
-
-    db_conn.close()
-
-
 def test_mcp_tools_database_missing(tmp_path, monkeypatch):
     import src.interface.server as mcp_server
     server_config = sys.modules["interface.server_config"]
@@ -398,134 +408,9 @@ def test_mcp_tools_database_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(server_config, "_resolved", {"project_root": tmp_path})
     monkeypatch.setattr(server_config, "get_db_path", lambda: non_existent)
 
-    # All tools should return a clean error string instead of crashing
-    assert "database not found" in mcp_server.query("search query")
-    assert "database not found" in mcp_server.context("lib/file.dart")
-    assert "database not found" in mcp_server.impact("symbol")
-    assert "database not found" in mcp_server.audit()
-    assert "database not found" in mcp_server.map()
-    assert "database not found" in mcp_server.trace("src", "sink")
-    assert "database not found" in mcp_server.report("overview")
-
-
-def test_map_tool_empty_database(tmp_path, monkeypatch):
-    repository, db_conn, root = setup_workspace(tmp_path)
-    _patch_server_config(monkeypatch, root)
-
-    import src.interface.server as mcp_server
-
-    out = mcp_server.map()
-    assert "Totals" in out
-    assert "Files Indexed**: 0" in out
-    assert "Symbols Registered**: 0" in out
-    assert "No communities detected" in out
-
-    db_conn.close()
-
-
-def test_context_tool_empty_file(tmp_path, monkeypatch):
-    repository, db_conn, root = setup_workspace(tmp_path)
-    _patch_server_config(monkeypatch, root)
-
-    import src.interface.server as mcp_server
-
-    out = mcp_server.context("unindexed_file.py")
-    assert "No indexed symbols found in file" in out
-
-    db_conn.close()
-
-
-def test_mcp_tools_report(tmp_path, monkeypatch):
-    repository, db_conn, root = setup_workspace(tmp_path)
-    _patch_server_config(monkeypatch, root)
-
-    import src.interface.server as mcp_server
-
-    # Add a mock violation
-    with db_conn.session() as conn:
-        conn.execute("""
-            INSERT INTO compliance_rules (rule_id, description, severity)
-            VALUES ('test_rule', 'desc', 'CRITICAL')
-        """)
-        conn.execute("""
-            INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message)
-            VALUES ('v_id', 'test_rule', 'sym_a', 'src/db.py', 10, 'error message')
-        """)
-
-    # Test report tool
-    out = mcp_server.report("compliance")
-    assert "Compliance Violations Report" in out
-    assert "sym_a" in out
-
-    db_conn.close()
-
-
-def test_mcp_tools_manual_status_and_fields(tmp_path, monkeypatch):
-    repository, db_conn, root = setup_workspace(tmp_path)
-
-    import json
-    config = {
-        "lib/ui": {
-            "automatic_fields": {
-                "layer": {
-                    "values": ["Presentation", "Domain"],
-                    "default": "Domain"
-                }
-            },
-            "manual_fields": {
-                "pattern": {
-                    "values": ["Controller", "Service", "None"],
-                    "default": "None"
-                }
-            }
-        }
-    }
-    with open(root / ".arch" / "config.json", "w") as f:
-        json.dump(config, f)
-
-    _patch_server_config(monkeypatch, root)
-
-    import src.interface.server as mcp_server
-
-    # Insert a file in the DB
-    repository.files.upsert_file("lib/ui/widget.dart", "sha123", "dart")
-
-    # 1. Test set_fields status (COMPLIANT)
-    out_status = mcp_server.set_fields(target="lib/ui/widget.dart", update="status:COMPLIANT", justification="Approved legacy module")
-    assert "Successfully updated manual fields" in out_status
-
-    # Check database
-    file_info = repository.files.get_file("lib/ui/widget.dart")
-    assert file_info["manual_status"] == "COMPLIANT"
-    assert file_info["justification"] == "Approved legacy module"
-
-    # 2. Test set_fields status (VIOLATION)
-    out_violation = mcp_server.set_fields(target="lib/ui/widget.dart", update="status:VIOLATION", justification="Needs refactoring")
-    assert "Successfully updated manual fields" in out_violation
-
-    # Check manual violation is inserted
-    all_violations = repository.compliance.get_violations()
-    manual_violations = [v for v in all_violations if v["origin"] == "manual"]
-    assert len(manual_violations) == 1
-    assert manual_violations[0]["message"] == "Needs refactoring"
-
-    # 3. Test set_fields manual field
-    out_fields = mcp_server.set_fields(target="lib/ui/widget.dart", update="pattern:Controller", justification="Set annotations")
-    assert "Successfully updated manual fields" in out_fields
-
-    # Check database
-    file_info_updated = repository.files.get_file("lib/ui/widget.dart")
-    import json
-    m_fields = json.loads(file_info_updated["manual_fields"])
-    assert m_fields["pattern"] == "Controller"
-
-    # Test ontology validation failure
-    out_auto = mcp_server.set_fields(target="lib/ui/widget.dart", update="layer:Presentation")
-    assert "Ontology Validation Error" in out_auto
-
-    # 4. Test lookup (details mode)
-    out_details = mcp_server.lookup(target="lib/ui/widget.dart")
-    assert "File Module:" in out_details
-    assert "Controller" in out_details
-
-    db_conn.close()
+    # All 5 tools should return clean error string instead of crashing
+    assert "database not found" in mcp_server.lookup("target").lower()
+    assert "database not found" in mcp_server.context("lib/file.dart").lower()
+    assert "database not found" in mcp_server.impact("symbol").lower()
+    assert "database not found" in mcp_server.compile_context("symbol").lower()
+    assert "database not found" in mcp_server.audit().lower()

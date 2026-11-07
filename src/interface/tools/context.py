@@ -1,5 +1,6 @@
 from interface.formatters import format_context_results
 from interface.validators import validate_filepaths
+from utils.helpers import demangle_scip_symbol
 
 
 def handle_context(filepaths, repository) -> str:
@@ -34,6 +35,7 @@ def handle_context(filepaths, repository) -> str:
             if sym_name not in symbol_to_lines or role == 1:
                 effective_end = end_line if end_line > start_line else start_line
                 symbol_to_lines[sym_name] = (start_line, effective_end)
+                symbol_to_lines[demangle_scip_symbol(sym_name)] = (start_line, effective_end)
 
         out_md.append(format_context_results(fp, symbols, symbol_to_lines))
 

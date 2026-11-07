@@ -12,11 +12,6 @@ IS_WINDOWS = sys.platform == "win32"
 CONFIG_DIR_NAME = ".arch"
 CONFIG_FILE_NAME = "config.json"
 
-CODEQL_LANG_MAP = {
-    "rust": "rust", "go": "go", "java": "java", "python": "python",
-    "typescript": "javascript",
-}
-
 
 def config_path_for(project_root: Path) -> Path:
     """Return the canonical path to .arch/config.json."""
@@ -89,3 +84,115 @@ def load_config(project_root: Path) -> Dict[str, Any]:
             return json.load(f)
     except Exception:
         return {}
+
+
+def demangle_scip_symbol(sym: Optional[str]) -> str:
+    """Demangle a SCIP symbol into a clean, human-readable identifier.
+    Strips package prefixes (e.g. 'scip-python python Arch_indexer 0.1.0 '),
+    backticks, and converts SCIP descriptor delimiters to clean dot notation.
+    """
+    if not sym:
+        return ""
+    if sym.startswith("local "):
+        return sym
+
+    parts = sym.split(" ", 4)
+    if len(parts) == 5 and (parts[0].startswith("scip-") or "/" in parts[4] or "#" in parts[4] or "`" in parts[4]):
+        descriptor = parts[4]
+    else:
+        descriptor = sym
+
+    # Strip backticks
+    s = descriptor.replace("`", "")
+
+    # Convert SCIP descriptor delimiters:
+    # / -> .
+    # # -> .
+    s = s.replace("/", ".").replace("#", ".")
+    while s.endswith(".") or s.endswith(":"):
+        s = s[:-1]
+    return s
+
+
+def infer_scip_kind(sym: Optional[str]) -> str:
+    """Infer symbol kind from SCIP symbol string."""
+    if not sym:
+        return "Symbol"
+    if sym.endswith(")") and not sym.endswith("()"):
+        return "Parameter"
+    if sym.endswith("/__init__:") or sym.endswith("/"):
+        return "Module"
+    if sym.endswith("#") or sym.endswith("#."):
+        return "Class"
+    if sym.endswith("().") or sym.endswith("()"):
+        if "#" in sym:
+            if "__init__" in sym or "constructor" in sym:
+                return "Constructor"
+            return "Method"
+        return "Function"
+    if sym.endswith("."):
+        return "Field"
+    clean = demangle_scip_symbol(sym)
+    name = clean.rsplit(".", 1)[-1] if "." in clean else clean
+    if name.endswith("()"):
+        return "Function"
+    if "." in clean:
+        return "Method"
+    return "Symbol"
+
+
+def sanitize_docstring(doc: Optional[str]) -> str:
+    """Sanitize docstrings so they do not break Markdown rendering."""
+    if not doc:
+        return ""
+    return doc.replace("```", "'''")
+
+
+def resolve_symbol_in_repo(repository, target: str) -> Optional[tuple]:
+    """Resolve a target string to an exact symbol tuple from the database.
+    Tries exact match, dot-to-delimiter patterns, and priority-scored candidates
+    (preferring production src/ over tests/ and excluding parameter definitions).
+    Returns (symbol, filepath, kind, signature, docstring, body_hash) or None.
+    """
+    target_clean = target.strip()
+    if not target_clean:
+        return None
+
+    # 1. Exact match
+    exact = repository.symbols.get_symbol_exact(target_clean)
+    if exact:
+        return exact
+
+    # 2. Match by substring/keyword in DuckDB
+    t = target_clean[:-2] if target_clean.endswith("()") else target_clean
+    patterns = [f"%{t}%"]
+    if "." in t:
+        parts = [p for p in t.split(".") if p]
+        patterns.append("%" + "%".join(parts) + "%")
+
+    with repository.db_conn.session() as conn:
+        for p in patterns:
+            rows = conn.execute(
+                "SELECT symbol, filepath, kind, signature, docstring, body_hash FROM symbols WHERE symbol LIKE ? LIMIT 50",
+                (p,)
+            ).fetchall()
+            if rows:
+                candidates = [
+                    r for r in rows
+                    if not r[0].startswith("local ")
+                    and not (r[0].endswith(")") and not r[0].endswith("()"))
+                ]
+                if candidates:
+                    def score(c):
+                        dem = demangle_scip_symbol(c[0])
+                        dem_no_parens = dem[:-2] if dem.endswith("()") else dem
+                        is_test = "tests" in (c[1] or "").replace("\\", "/")
+                        exact = (dem == t or dem_no_parens == t or dem.endswith("." + t) or dem_no_parens.endswith("." + t))
+                        # Priority: exact demangled match > production code > shorter symbol name
+                        return (0 if exact else 1, 1 if is_test else 0, len(c[0]))
+
+                    candidates.sort(key=score)
+                    return candidates[0]
+
+    return None
+

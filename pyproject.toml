@@ -6,12 +6,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
-    "mcp>=0.1.0",
+    "mcp>=0.1.0,<2",
     "duckdb>=1.0.0",
     "protobuf>=4.21.0,<5",
-    "onnxruntime>=1.16.0",
-    "numpy>=1.24.0",
-    "tokenizers>=0.13.0",
+    "watchdog>=3.0.0",
     "pytest>=7.0.0",
 ]
 
@@ -25,5 +23,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-norecursedirs = ["archive"]
+testpaths = ["tests"]
+norecursedirs = ["archive", ".kilo", ".venv", ".git"]
 

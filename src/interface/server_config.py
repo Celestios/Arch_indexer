@@ -27,8 +27,3 @@ def get_arch_dir() -> Path:
 
 def get_db_path() -> Path:
     return get_arch_dir() / "arch.db"
-
-
-def get_bin_dir() -> Path:
-    from utils.progress import resolve_bin_dir
-    return resolve_bin_dir()

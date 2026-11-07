@@ -34,8 +34,15 @@ def _find_cargo_root(project_dir: Path) -> Path:
     for p in project_dir.rglob("Cargo.toml"):
         if "target" in str(p) or ".arch" in str(p):
             continue
-        if include_dirs is not None and not is_included(str(p.relative_to(project_dir)), include_dirs):
-            continue
+        if include_dirs is not None:
+            rel = str(p.relative_to(project_dir))
+            cargo_dir_rel = str(p.parent.relative_to(project_dir)).replace("\\", "/")
+            is_parent = any(
+                str(Path(inc)).replace("\\", "/").startswith(cargo_dir_rel + "/")
+                for inc in include_dirs
+            )
+            if not is_included(rel, include_dirs) and not is_parent:
+                continue
         return p.parent
     return project_dir
 
@@ -83,15 +90,36 @@ def index_dart(project_dir: Path) -> Optional[Path]:
         pubspec_dir = pubspecs[0].parent
         print(f"[SCIP] Using pubspec at {pubspec_dir}")
 
+    # Check if scip_dart is already activated globally
+    is_activated = False
     try:
-        subprocess.run(
-            ["dart", "pub", "global", "activate", "scip_dart"],
-            cwd=str(pubspec_dir), check=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            shell=IS_WINDOWS
+        res = subprocess.run(
+            ["dart", "pub", "global", "list"],
+            cwd=str(pubspec_dir),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, shell=IS_WINDOWS
         )
-    except subprocess.CalledProcessError as e:
-        print(f"Warning: Failed to activate scip_dart: {e}", file=sys.stderr)
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                parts = line.strip().split()
+                if parts and parts[0] == "scip_dart":
+                    is_activated = True
+                    break
+    except Exception:
+        pass
+
+    if not is_activated:
+        try:
+            res = subprocess.run(
+                ["dart", "pub", "global", "activate", "scip_dart"],
+                cwd=str(pubspec_dir),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, shell=IS_WINDOWS
+            )
+            if res.returncode != 0:
+                print(f"Warning: Failed to activate scip_dart. Output:\n{res.stderr or res.stdout}", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Failed to run dart pub global activate scip_dart: {e}", file=sys.stderr)
 
     try:
         rc = run_with_scroll(

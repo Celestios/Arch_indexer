@@ -3,8 +3,7 @@ from pathlib import Path
 from setup.initializer import initialize_workspace, DEFAULT_CONFIG_JSON
 from db.connection import DbConnection
 from db.repository import Repository
-from engines.ffi_matcher import FfiMatch
-from engines.ffi_linker import FfiLinker
+from engines.ffi_linker import FfiLinker, FfiMatch
 import pytest
 
 

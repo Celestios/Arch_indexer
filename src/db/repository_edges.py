@@ -77,6 +77,19 @@ class EdgesRepository(BaseRepository):
                 (filepaths, filepaths)
             )
 
+    def delete_orphaned_edges(self) -> int:
+        """Delete edges where source or target symbol no longer exists in the symbols table.
+        Returns the number of orphaned edges deleted."""
+        with self.db_conn.session() as conn:
+            res = conn.execute(
+                """
+                DELETE FROM edges
+                WHERE source NOT IN (SELECT symbol FROM symbols)
+                   OR target NOT IN (SELECT symbol FROM symbols)
+                """
+            )
+            return res.rowcount if res.rowcount else 0
+
     def get_transitive_closure(self, symbol: str, max_depth: int = 3) -> Dict[str, List[Dict[str, Any]]]:
         """Computes the transitive closure of callers (upstream) and callees (downstream)."""
         upstream = []

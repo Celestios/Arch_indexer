@@ -4,6 +4,12 @@ from auditor.validator import ConfigValidator
 from utils.session import get_project_root
 
 
+def register(subparsers):
+    p = subparsers.add_parser("analyze", help="Validate configuration completeness and sanity")
+    p.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    p.set_defaults(func=cmd_analyze)
+
+
 def cmd_analyze(args):
     """Validates the architectural configuration ontology (config.json) completeness and sanity."""
     project_root = get_project_root(args)

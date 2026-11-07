@@ -150,7 +150,7 @@ def test_deleted_file_cleanup(tmp_path):
     widget_path.parent.mkdir(parents=True, exist_ok=True)
     widget_path.write_text("class Widget {}")
 
-    ScipWrapper.ingest_index(repository, parsed_data, embedder=None, project_root=root)
+    ScipWrapper.ingest_index(repository, parsed_data, project_root=root)
 
     # Verify widget.dart and main.rs exist, but button.dart was cleaned up
     assert repository.files.get_file('lib/ui/widget.dart') is not None

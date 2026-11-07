@@ -20,8 +20,7 @@ CREATE TABLE IF NOT EXISTS symbols (
     kind VARCHAR NOT NULL, -- Class, Struct, Function, Method, etc.
     signature TEXT,
     docstring TEXT,
-    body_hash VARCHAR, -- AST body hash to skip vector/edge update if unchanged
-    embedding FLOAT[], -- Vector embeddings space for semantic lookup (flexible dimensions)
+    body_hash VARCHAR, -- AST body hash to skip edge update if unchanged
     connection_weight INTEGER DEFAULT 0
 );
 

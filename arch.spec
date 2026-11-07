@@ -32,6 +32,7 @@ a = Analysis(
         'duckdb', 'duckdb.sqltypes',
         'psutil', 'httpx_sse', 'httpx_ws',
         'pydantic_settings', 'sse_starlette',
+        'utils.single_instance',
     ],
     hookspath=[],
     hooksconfig={},

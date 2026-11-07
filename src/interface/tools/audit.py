@@ -1,4 +1,5 @@
 from auditor.analyzer import Auditor
+from utils.helpers import demangle_scip_symbol
 
 
 def handle_audit(repository, project_root) -> str:
@@ -22,7 +23,9 @@ def handle_audit(repository, project_root) -> str:
     for i, v in enumerate(all_violations, 1):
         md.append(f"{i}. **[{v['rule_id']}]** (`{v['filepath']}:L{v['line']}`)")
         if v["symbol"]:
-            md.append(f"   - Symbol: `{v['symbol']}`")
+            clean_sym = demangle_scip_symbol(v["symbol"])
+            md.append(f"   - Symbol: `{clean_sym}`")
         md.append(f"   - {v['message']}")
         md.append("")
     return "\n".join(md)
+

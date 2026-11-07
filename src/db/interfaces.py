@@ -62,7 +62,7 @@ class SymbolsRepositoryInterface(Protocol):
     def upsert_symbol(
         self, symbol: str, filepath: Optional[str], kind: str,
         signature: Optional[str], docstring: Optional[str],
-        body_hash: Optional[str], embedding: Optional[List[float]] = None,
+        body_hash: Optional[str],
         connection_weight: int = 0
     ) -> None: ...
 
@@ -89,9 +89,6 @@ class SymbolsRepositoryInterface(Protocol):
 
     @abstractmethod
     def get_symbols_in_file(self, filepath: str) -> List[Dict[str, Any]]: ...
-
-    @abstractmethod
-    def semantic_search(self, query_embedding: List[float], limit: int = 5) -> List[Dict[str, Any]]: ...
 
     @abstractmethod
     def get_symbols_metadata_batch(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]: ...

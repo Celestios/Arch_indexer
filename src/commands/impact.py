@@ -5,6 +5,14 @@ from db.repository import Repository
 from utils.session import get_project_root
 
 
+def register(subparsers):
+    p = subparsers.add_parser("impact", help="Perform blast radius / transitive dependency analysis for a symbol")
+    p.add_argument("symbol", help="Target symbol name")
+    p.add_argument("--max-depth", type=int, default=3, help="Maximum traversal depth (default: 3)")
+    p.add_argument("project_root", nargs="?", default=".", help="Project root directory")
+    p.set_defaults(func=cmd_impact)
+
+
 def cmd_impact(args):
     """Performs blast radius analysis for a symbol by computing its transitive callers and callees."""
     project_root = get_project_root(args)

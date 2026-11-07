@@ -78,7 +78,7 @@ class Auditor:
                 config, filepath_filter, propagation_sources
             ))
 
-        self._recompute_file_statuses(violations)
+        self._recompute_file_statuses(violations, filepath_filter)
         print(f"[Auditor] Completed audit. Found {len(violations)} architectural violations.")
         return violations
 
@@ -128,12 +128,23 @@ class Auditor:
     def _fetch_all_edges(self) -> List[Dict[str, Any]]:
         return self.repository.edges.get_all_edges_with_relation()
 
-    def _recompute_file_statuses(self, violations):
-        file_metadata = self.repository.files.get_all_files_metadata()
+    def _recompute_file_statuses(self, violations, filepath_filter: Optional[str] = None):
         violations_by_file = {}
         for v in violations:
             violations_by_file.setdefault(v["filepath"], []).append(v.get("origin", "automatic"))
-        for f_path in file_metadata.keys():
+
+        if filepath_filter:
+            files_to_update = set()
+            for f_path in violations_by_file.keys():
+                files_to_update.add(f_path)
+            file_metadata = self.repository.files.get_all_files_metadata()
+            for f_path in file_metadata.keys():
+                if f_path.startswith(filepath_filter):
+                    files_to_update.add(f_path)
+        else:
+            files_to_update = set(self.repository.files.get_all_files_metadata().keys())
+
+        for f_path in files_to_update:
             v_origins = violations_by_file.get(f_path, [])
             new_status = "COMPLIANT" if not v_origins or all(o != "automatic" for o in v_origins) else "VIOLATION_DETECTED"
             self.repository.files.update_file_status(f_path, new_status)

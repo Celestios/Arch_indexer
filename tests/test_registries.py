@@ -8,10 +8,14 @@ class TestLanguageRegistry:
     def setup_method(self):
         from engines.registry import LanguageRegistry
         LanguageRegistry.clear()
-        # Re-register built-in languages (backend required for list_languages)
-        LanguageRegistry.register("rust", backend=object, extensions=[".rs"], tool_names=["Cargo.toml"])
-        LanguageRegistry.register("dart", backend=object, extensions=[".dart"], tool_names=["pubspec.yaml"])
-        LanguageRegistry.register("python", backend=object, extensions=[".py"], tool_names=["pyproject.toml"])
+        # Re-register built-in languages
+        LanguageRegistry.register("rust", extensions=[".rs"], tool_names=["Cargo.toml"])
+        LanguageRegistry.register("dart", extensions=[".dart"], tool_names=["pubspec.yaml"])
+        LanguageRegistry.register("python", extensions=[".py"], tool_names=["pyproject.toml"])
+
+    def teardown_method(self):
+        from engines.registry import LanguageRegistry
+        LanguageRegistry.register_defaults()
 
     def test_register_language(self):
         from engines.registry import LanguageRegistry

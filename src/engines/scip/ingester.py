@@ -1,10 +1,10 @@
 import sys
 import json
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional
 
 from engines.scip.utils import print_progress
+from utils.helpers import ext_to_lang
 
 try:
     from engines import scip_pb2
@@ -21,7 +21,7 @@ class IndexIngester:
     """Handles incremental ingestion of parsed SCIP data into the database."""
 
     @staticmethod
-    def ingest_index(repository, parsed_data: Dict[str, Any], embedder: Optional[Any] = None,
+    def ingest_index(repository, parsed_data: Dict[str, Any],
                      project_root: Optional[Path] = None, force: bool = False,
                      config: Optional[Dict[str, Any]] = None):
         """
@@ -46,7 +46,7 @@ class IndexIngester:
         languages_in_index = set()
         for fp in file_list:
             ext = Path(fp).suffix.lower()
-            lang = "rust" if ext == ".rs" else ("dart" if ext == ".dart" else "unknown")
+            lang = ext_to_lang(ext)
             languages_in_index.add(lang)
 
         db_files = repository.files.get_all_files_metadata()
@@ -119,11 +119,18 @@ class IndexIngester:
                     if res:
                         existing_symbols_count = res[0]
 
-            if not force and len(deleted_files) == 0 and existing_symbols_count > 0 and new_symbols_count < existing_symbols_count:
-                raise ValueError(
-                    f"Shrink Guard: New index has {new_symbols_count} symbols, but database has {existing_symbols_count} existing symbols for {languages_in_index}. "
-                    "Refusing to overwrite. This might be due to a failed SCIP extraction. Pass force=True to override."
+            if not force and len(deleted_files) == 0 and existing_symbols_count > 0:
+                is_suspicious_shrink = (
+                    new_symbols_count == 0 or (
+                        new_symbols_count < existing_symbols_count * 0.90
+                        and (existing_symbols_count - new_symbols_count) > 50
+                    )
                 )
+                if is_suspicious_shrink:
+                    raise ValueError(
+                        f"Shrink Guard: New index has {new_symbols_count} symbols, but database has {existing_symbols_count} existing symbols for {languages_in_index}. "
+                        "Refusing to overwrite. This might be due to a failed SCIP extraction. Pass force=True to override."
+                    )
 
         for fp in deleted_files:
             print(f"[SCIP Ingest] Cleaning up deleted file from database: {fp}")
@@ -138,7 +145,7 @@ class IndexIngester:
                 sha256_val = ChangeTracker.calculate_sha256(abs_path)
 
             ext = Path(fp).suffix.lower()
-            lang = "rust" if ext == ".rs" else ("dart" if ext == ".dart" else "unknown")
+            lang = ext_to_lang(ext)
             files_to_ingest.append({"filepath": fp, "sha256": sha256_val, "language": lang})
 
         repository.files.upsert_files_bulk(files_to_ingest)
@@ -147,10 +154,15 @@ class IndexIngester:
             print("[SCIP Ingest] No files changed. Skipping symbol/occurrence/edge ingestion.")
             return
 
-        # 1b. Delete old symbols and occurrences for changed files before re-ingesting
+        # 1b. Delete old edges, symbols, and occurrences for changed files before re-ingesting.
+        # Order matters: edges first (delete_edges_for_file uses a subquery against symbols),
+        # then occurrences, then symbols.
+        for fp in changed_files:
+            repository.edges.delete_edges_for_file(fp)
+        for fp in changed_files:
+            repository.symbols.delete_occurrences_for_file(fp)
         for fp in changed_files:
             repository.symbols.delete_symbols_for_file(fp)
-            repository.symbols.delete_occurrences_for_file(fp)
 
         # 2. Ingest symbols (only changed files + all external symbols)
         changed_set = set(changed_files)
@@ -163,44 +175,23 @@ class IndexIngester:
         if changed_files:
             existing_symbols = repository.symbols.get_symbols_by_filepaths(changed_files)
 
-        items = list(filtered_symbols.items())
-
-        def process_symbol(item):
-            sym_id, sym = item
-            if sym_id in existing_symbols:
-                existing = existing_symbols[sym_id]
-                if (existing["body_hash"] == sym["body_hash"] and
-                    existing["kind"] == sym["kind"] and
-                    existing["signature"] == sym.get("signature") and
-                    existing["docstring"] == sym["docstring"]):
-                    return None
-            embedding = None
-            if embedder and sym["docstring"]:
-                try:
-                    embedding = embedder.embed(sym["docstring"])
-                except Exception as e:
-                    print(f"Warning: Failed to generate embedding for {sym_id}: {e}", file=sys.stderr)
-            return {
+        symbols_to_ingest = [
+            {
                 "symbol": sym["symbol"],
                 "filepath": sym["filepath"],
                 "kind": sym["kind"],
                 "signature": sym["signature"],
                 "docstring": sym["docstring"],
                 "body_hash": sym["body_hash"],
-                "embedding": embedding
             }
-
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(process_symbol, item): idx for idx, item in enumerate(items)}
-            completed = 0
-            results = [None] * len(items)
-            for future in as_completed(futures):
-                original_idx = futures[future]
-                results[original_idx] = future.result()
-                completed += 1
-                if completed % 100 == 0 or completed == total_symbols:
-                    print_progress(completed, total_symbols, prefix="[SCIP Ingest] Symbols")
-            symbols_to_ingest = [r for r in results if r is not None]
+            for sym_id, sym in filtered_symbols.items()
+            if sym_id not in existing_symbols or (
+                existing_symbols[sym_id]["body_hash"] != sym["body_hash"]
+                or existing_symbols[sym_id]["kind"] != sym["kind"]
+                or existing_symbols[sym_id]["signature"] != sym.get("signature")
+                or existing_symbols[sym_id]["docstring"] != sym["docstring"]
+            )
+        ]
 
         skipped = total_symbols - len(symbols_to_ingest)
         if skipped > 0:
@@ -228,8 +219,6 @@ class IndexIngester:
                           if filtered_symbols.get(e["source"], {}).get("filepath") in changed_set
                           or filtered_symbols.get(e["target"], {}).get("filepath") in changed_set]
         total_edges = len(filtered_edges)
-        for fp in changed_files:
-            repository.edges.delete_edges_for_file(fp)
         print(f"[SCIP Ingest] Ingesting {total_edges} edges from changed files...")
 
         if config is None:
@@ -264,7 +253,13 @@ class IndexIngester:
 
         repository.edges.add_edges_bulk(edges_to_ingest)
 
-        # 5. Recalculate connection weights for symbols
+        # 5. Clean up any orphaned edges and occurrences left over from prior index runs
+        orphaned_edges = repository.edges.delete_orphaned_edges()
+        orphaned_occurrences = repository.symbols.delete_orphaned_occurrences()
+        if orphaned_edges or orphaned_occurrences:
+            print(f"[SCIP Ingest] Cleaned up {orphaned_edges} orphaned edges, {orphaned_occurrences} orphaned occurrences")
+
+        # 6. Recalculate connection weights for symbols
         print("[SCIP Ingest] Recalculating symbol connection weights...")
         repository.symbols.recalculate_connection_weights()
 

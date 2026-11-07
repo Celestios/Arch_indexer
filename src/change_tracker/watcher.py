@@ -8,9 +8,8 @@ from db.connection import DbConnection
 from db.repository import Repository
 from engines.scip_wrapper import ScipWrapper
 from auditor.analyzer import Auditor
-from engines.embedder import LocalEmbedder
+from engines.ffi_linker import FfiLinker
 from utils.exclusions import load_include_dirs, is_included
-from utils.progress import resolve_bin_dir
 
 _WATCHED_EXTENSIONS = {".rs", ".dart"}
 
@@ -31,13 +30,6 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
     if not db_path.exists():
         print(f"Error: Database not found at {db_path}. Please run 'arch init' first.", file=sys.stderr)
         return
-
-    bin_dir = resolve_bin_dir()
-    embedder = None
-    try:
-        embedder = LocalEmbedder(bin_dir)
-    except Exception:
-        pass
 
     last_trigger: float = 0.0
     pending: bool = False
@@ -105,7 +97,7 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
                         index_path = ScipWrapper.run_indexer(project_root, lang)
                         if index_path:
                             parsed = ScipWrapper.parse_index(index_path, project_root)
-                            ScipWrapper.ingest_index(repository, parsed, embedder, project_root)
+                            ScipWrapper.ingest_index(repository, parsed, project_root=project_root)
                             indexed_any = True
                     
                     if indexed_any:
@@ -121,53 +113,12 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
                     else:
                         print("[arch watch] Re-indexing failed.")
 
-                    # Re-run FFI linking if multiple languages present
+                    # Re-run FFI bridge linking
                     try:
-                        from engines.ffi_extractor import FfiExtractor
-                        from engines.ffi_matcher import FfiMatcher
-                        from engines.ffi_linker import FfiLinker
-
-                        # Create backends for FFI extraction (language-agnostic)
-                        dart_wrapper = None
-                        codeql_wrappers = {}
-                        try:
-                            from engines.dart_analyzer import DartAnalyzerWrapper
-                            dart_wrapper = DartAnalyzerWrapper(arch_dir)
-                            if not dart_wrapper.is_available():
-                                dart_wrapper = None
-                        except ImportError:
-                            pass
-
-                        try:
-                            from engines.codeql_wrapper import CodeQlWrapper
-                            codeql = CodeQlWrapper(bin_dir)
-                            if codeql.is_available():
-                                # Add wrapper for each language with a database
-                                for db_entry in arch_dir.iterdir():
-                                    if db_entry.is_dir() and db_entry.name.startswith("codeql_db"):
-                                        lang = db_entry.name.replace("codeql_db_", "").replace("codeql_db", "")
-                                        if not lang:
-                                            lang = "generic"
-                                        codeql_wrappers[lang] = codeql
-                        except Exception:
-                            pass
-
-                        extractor = FfiExtractor(codeql_wrappers=codeql_wrappers, dart_analyzer=dart_wrapper)
-                        surfaces = extractor.extract_all(project_root)
-                        if surfaces:
-                            matcher = FfiMatcher()
-                            by_lang = {}
-                            for s in surfaces:
-                                by_lang.setdefault(s.language, []).append(s)
-                            lang_keys = list(by_lang.keys())
-                            all_matches = []
-                            for i in range(len(lang_keys)):
-                                for j in range(i + 1, len(lang_keys)):
-                                    all_matches.extend(matcher.match(by_lang[lang_keys[i]], by_lang[lang_keys[j]]))
-                            if all_matches:
-                                linker = FfiLinker(repository)
-                                linker.link(all_matches)
-                                print("[Watcher] FFI cross-language edges updated.")
+                        linker = FfiLinker(repository)
+                        edges_created = linker.link_scip_bridges()
+                        if edges_created:
+                            print(f"[Watcher] FFI cross-language edges updated ({edges_created} edges).")
                     except Exception as e:
                         print(f"[Watcher] FFI re-linking skipped: {e}")
                 except Exception as ex:

@@ -6,6 +6,7 @@ def test_initialize_creates_arch_dir(tmp_path):
     arch_dir = initialize_workspace(tmp_path)
     assert arch_dir.exists()
     assert (arch_dir / "config.json").exists()
+    assert (arch_dir / "config_guide.md").exists()
     assert (arch_dir / "arch.db").exists()
 
 
@@ -14,11 +15,14 @@ def test_initialize_preserves_existing_config(tmp_path):
     arch_dir.mkdir()
     config = arch_dir / "config.json"
     config.write_text('{"custom": true}')
+    guide = arch_dir / "config_guide.md"
+    guide.write_text("custom guide")
 
     initialize_workspace(tmp_path)
 
     data = json.loads(config.read_text())
     assert data == {"custom": True}
+    assert guide.read_text() == "custom guide"
 
 
 def test_initialize_loads_compliance_rules(tmp_path):

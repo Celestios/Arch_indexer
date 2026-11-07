@@ -1,32 +1,28 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Optional, Set
 
 
 class LanguageRegistry:
     """
-    Registry for language backends. New languages added by registration.
-    Replaces hardcoded extension→language mappings in helpers.py, compiler.py, scip_wrapper.py.
+    Registry for language backends and extension mappings.
+    Replaces hardcoded extension->language mappings.
     """
     
-    _backends: Dict[str, Type] = {}
+    _languages: Set[str] = set()
     _extension_map: Dict[str, str] = {}
     _name_map: Dict[str, str] = {}  # tool name → language (e.g., "rust-analyzer" → "rust")
     
     @classmethod
-    def register(cls, language: str, backend: Type = None, 
-                 extensions: List[str] = None, tool_names: List[str] = None) -> None:
-        """Register a language backend with its file extensions and tool names."""
-        if backend is not None:
-            cls._backends[language] = backend
+    def register(cls, language: str,
+                 extensions: Optional[List[str]] = None,
+                 tool_names: Optional[List[str]] = None,
+                 **kwargs) -> None:
+        """Register a language with its file extensions and tool names."""
+        cls._languages.add(language)
         for ext in (extensions or []):
             cls._extension_map[ext] = language
         for name in (tool_names or []):
             cls._name_map[name] = language
-    
-    @classmethod
-    def get_backend(cls, language: str) -> Optional[Type]:
-        """Get the backend class for a language."""
-        return cls._backends.get(language)
     
     @classmethod
     def detect_language(cls, filepath: str) -> Optional[str]:
@@ -46,88 +42,94 @@ class LanguageRegistry:
     @classmethod
     def list_languages(cls) -> List[str]:
         """List all registered languages."""
-        return list(cls._backends.keys())
+        return sorted(list(cls._languages))
     
     @classmethod
     def clear(cls) -> None:
         """Clear all registrations (for testing)."""
-        cls._backends.clear()
+        cls._languages.clear()
         cls._extension_map.clear()
         cls._name_map.clear()
+    @classmethod
+    def register_defaults(cls) -> None:
+        """Register all built-in languages."""
+        cls.clear()
+        cls.register(
+            "rust",
+            extensions=[".rs"],
+            tool_names=["Cargo.toml", "rust-analyzer"]
+        )
+        cls.register(
+            "dart",
+            extensions=[".dart"],
+            tool_names=["pubspec.yaml", "dart"]
+        )
+        cls.register(
+            "python",
+            extensions=[".py"],
+            tool_names=["setup.py", "pyproject.toml", "requirements.txt"]
+        )
+        cls.register(
+            "go",
+            extensions=[".go"],
+            tool_names=["go.mod"]
+        )
+        cls.register(
+            "typescript",
+            extensions=[".ts", ".tsx"],
+            tool_names=["tsconfig.json", "package.json"]
+        )
+        cls.register(
+            "javascript",
+            extensions=[".js", ".jsx"],
+            tool_names=["package.json"]
+        )
+        cls.register(
+            "java",
+            extensions=[".java"],
+            tool_names=["pom.xml", "build.gradle"]
+        )
+        cls.register(
+            "cpp",
+            extensions=[".cpp", ".cxx", ".cc", ".hpp", ".hxx"]
+        )
+        cls.register(
+            "c",
+            extensions=[".c"]
+        )
+        cls.register(
+            "csharp",
+            extensions=[".cs"],
+            tool_names=["*.csproj"]
+        )
+        cls.register(
+            "ruby",
+            extensions=[".rb"],
+            tool_names=["Gemfile"]
+        )
+        cls.register(
+            "php",
+            extensions=[".php"],
+            tool_names=["composer.json"]
+        )
+        cls.register(
+            "html",
+            extensions=[".html", ".htm"]
+        )
+        cls.register(
+            "css",
+            extensions=[".css", ".scss", ".less"]
+        )
+        cls.register(
+            "bash",
+            extensions=[".sh", ".bash"]
+        )
+        cls.register(
+            "powershell",
+            extensions=[".ps1", ".psm1"]
+        )
 
 
 # Register built-in languages
-LanguageRegistry.register(
-    "rust",
-    extensions=[".rs"],
-    tool_names=["Cargo.toml", "rust-analyzer"]
-)
-LanguageRegistry.register(
-    "dart",
-    extensions=[".dart"],
-    tool_names=["pubspec.yaml", "dart"]
-)
-LanguageRegistry.register(
-    "python",
-    extensions=[".py"],
-    tool_names=["setup.py", "pyproject.toml", "requirements.txt"]
-)
-LanguageRegistry.register(
-    "go",
-    extensions=[".go"],
-    tool_names=["go.mod"]
-)
-LanguageRegistry.register(
-    "typescript",
-    extensions=[".ts", ".tsx"],
-    tool_names=["tsconfig.json", "package.json"]
-)
-LanguageRegistry.register(
-    "javascript",
-    extensions=[".js", ".jsx"],
-    tool_names=["package.json"]
-)
-LanguageRegistry.register(
-    "java",
-    extensions=[".java"],
-    tool_names=["pom.xml", "build.gradle"]
-)
-LanguageRegistry.register(
-    "cpp",
-    extensions=[".cpp", ".cxx", ".cc", ".hpp", ".hxx"]
-)
-LanguageRegistry.register(
-    "c",
-    extensions=[".c"]
-)
-LanguageRegistry.register(
-    "csharp",
-    extensions=[".cs"],
-    tool_names=["*.csproj"]
-)
-LanguageRegistry.register(
-    "ruby",
-    extensions=[".rb"],
-    tool_names=["Gemfile"]
-)
-LanguageRegistry.register(
-    "php",
-    extensions=[".php"],
-    tool_names=["composer.json"]
-)
-LanguageRegistry.register(
-    "html",
-    extensions=[".html", ".htm"]
-)
-LanguageRegistry.register(
-    "css",
-    extensions=[".css", ".scss", ".less"]
-)
-LanguageRegistry.register(
-    "bash",
-    extensions=[".sh", ".bash"]
-)
-LanguageRegistry.register(
-    "powershell",
-    extensions=[".ps1", ".psm1"]
-)
+LanguageRegistry.register_defaults()
+

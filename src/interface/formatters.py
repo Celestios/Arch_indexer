@@ -1,64 +1,37 @@
 from typing import Any, Dict, List, Optional, Tuple
+from utils.helpers import demangle_scip_symbol, sanitize_docstring, infer_scip_kind
 
 
-def _infer_kind(sym_name: str) -> str:
-    """Infer symbol kind from its name."""
-    name = sym_name.rsplit("/", 1)[-1] if "/" in sym_name else sym_name
-    if name.endswith("#") or name.endswith("#."):
-        return "Class"
-    if name.endswith("()") or name.endswith(".()"):
-        return "Function"
-    if ".__init__()" in name or ".constructor()" in name:
-        return "Constructor"
-    if "." in name and not name.endswith("#"):
-        return "Method"
-    return "Symbol"
-
-
-def format_query_results(
-    q: str,
-    keyword_symbols: List[tuple],
-    file_matches: List[tuple],
-    semantic_results: List[Dict[str, Any]],
-) -> str:
-    """Format query search results for a single query as markdown."""
-    md = []
-    md.append(f'## Search Results for: "{q}"\n')
-
-    md.append("### 1. Symbol Name Matches (Keyword Search)")
-    if not keyword_symbols:
-        md.append("*No matching symbols found by name.*\n")
-    else:
-        for idx, row in enumerate(keyword_symbols, 1):
-            md.append(f"{idx}. **{row[0]}**")
-            if row[3]:
-                md.append(f"   - **Signature**: `{row[3]}`")
-        md.append("")
-
-    md.append("### 2. Semantic Docstring Matches")
-    if not semantic_results:
-        md.append("*No semantically matching symbols found in docstrings.*\n")
-    else:
-        for idx, res in enumerate(semantic_results, 1):
-            md.append(f"{idx}. **{res['symbol']}** (Similarity: {res['similarity']:.2f})")
-            md.append(f"   - **File**: `{res['filepath']}`")
-            md.append(f"   - **Kind**: `{res['kind']}`")
-            if res["docstring"]:
-                doc = res["docstring"].strip().replace("\n", "\n     ")
-                md.append(f"   - **Doc**: {doc}")
-        md.append("")
-
-    md.append("### 3. Filepath Matches")
-    if not file_matches:
-        md.append("*No matching files found by path.*\n")
-    else:
-        for idx, row in enumerate(file_matches, 1):
-            md.append(f"{idx}. **{row[0]}**")
-            md.append(f"   - **Language**: `{row[1]}`")
-            md.append(f"   - **Audit Status**: `{row[2]}`")
-        md.append("")
-
-    return "\n".join(md)
+def _clean_doc_summary(doc: Optional[str]) -> str:
+    """Extract a meaningful single-line summary from docstrings, skipping code fences and signatures."""
+    if not doc:
+        return ""
+    lines = [line.strip() for line in doc.strip().split("\n")]
+    in_fence = False
+    fence_char = None
+    for l in lines:
+        if not l:
+            continue
+        if l.startswith("```") or l.startswith("'''") or l.startswith('"""'):
+            tag = l[:3]
+            if not in_fence:
+                in_fence = True
+                fence_char = tag
+                # Check if closed on same line (e.g. ```text```)
+                if len(l) > 3 and l.endswith(tag):
+                    in_fence = False
+                continue
+            elif in_fence and tag == fence_char:
+                in_fence = False
+                continue
+        if in_fence:
+            continue
+        if l.startswith("class ") or l.startswith("def ") or l.endswith(":"):
+            continue
+        return l
+    # Fallback if everything was inside a fence
+    content_lines = [l for l in lines if l and not l.startswith("```") and not l.startswith("'''") and not l.startswith('"""')]
+    return content_lines[0] if content_lines else ""
 
 
 def format_context_results(
@@ -74,22 +47,39 @@ def format_context_results(
     methods_and_funcs = []
 
     for sym in symbols:
-        sym_name = sym["symbol"]
+        raw_name = sym["symbol"]
+        if raw_name.startswith("local "):
+            continue
+
+        kind = sym.get("kind", "UnspecifiedKind")
+        if kind == "UnspecifiedKind" or not kind or (raw_name.endswith(")") and not raw_name.endswith("()")):
+            kind = infer_scip_kind(raw_name)
+
+        if kind.lower() in ("module", "package", "parameter") or raw_name.endswith("/__init__:") or raw_name.endswith("/"):
+            continue
+
+        clean_name = demangle_scip_symbol(raw_name)
+
         line_range = ""
-        if sym_name in symbol_to_lines:
-            start_line, end_line = symbol_to_lines[sym_name]
-            line_range = f"L{start_line}-{end_line}"
+        if raw_name in symbol_to_lines:
+            start_line, end_line = symbol_to_lines[raw_name]
+            line_range = f"L{start_line}-{end_line}" if start_line != end_line else f"L{start_line}"
+        elif clean_name in symbol_to_lines:
+            start_line, end_line = symbol_to_lines[clean_name]
+            line_range = f"L{start_line}-{end_line}" if start_line != end_line else f"L{start_line}"
 
         sym_data = {
-            "symbol": sym_name,
+            "symbol": clean_name,
             "signature": sym["signature"],
-            "docstring": sym["docstring"],
+            "docstring": sanitize_docstring(sym["docstring"]),
             "line_range": line_range,
-            "kind": sym["kind"],
+            "kind": kind,
         }
 
-        if sym["kind"].lower() in ("class", "struct", "interface"):
+        if kind.lower() in ("class", "struct", "interface"):
             classes.append(sym_data)
+        elif kind.lower() in ("field", "variable") and not sym.get("signature"):
+            continue
         else:
             methods_and_funcs.append(sym_data)
 
@@ -100,8 +90,8 @@ def format_context_results(
         for cl in classes:
             range_str = f" [{cl['line_range']}]" if cl["line_range"] else ""
             md.append(f"- **{cl['symbol']}**{range_str} ({cl['kind']})")
-            if cl["docstring"]:
-                doc = cl["docstring"].strip().split("\n")[0]
+            doc = _clean_doc_summary(cl["docstring"])
+            if doc:
                 md.append(f"  * {doc}")
         md.append("")
 
@@ -112,8 +102,8 @@ def format_context_results(
             md.append(f"- **{mf['symbol']}**{range_str}")
             if mf["signature"]:
                 md.append(f"  * *Signature*: `{mf['signature']}`")
-            if mf["docstring"]:
-                doc = mf["docstring"].strip().split("\n")[0]
+            doc = _clean_doc_summary(mf["docstring"])
+            if doc:
                 md.append(f"  * *Docstring*: {doc}")
         md.append("")
 
@@ -126,31 +116,41 @@ def format_lookup_symbol(
     edges: List[tuple],
 ) -> str:
     """Format lookup results for a code symbol as markdown."""
+    clean_symbol = demangle_scip_symbol(exact_symbol[0])
     md = []
-    md.append(f"## Code Symbol: `{exact_symbol[0]}`\n")
+    md.append(f"## Code Symbol: `{clean_symbol}`\n")
     md.append(f"- **Filepath**: `{exact_symbol[1] or 'External / Third-party'}`")
     md.append(f"- **Kind**: `{exact_symbol[2]}`")
     md.append(f"- **Signature**: `{exact_symbol[3] or 'None'}`")
-    doc = exact_symbol[4].strip() if exact_symbol[4] else "No docstring available."
+    doc = sanitize_docstring(exact_symbol[4]).strip() if exact_symbol[4] else "No docstring available."
     md.append(f"- **Docstring**:\n  {doc.replace(chr(10), chr(10) + '  ')}\n")
 
     if occurrences:
         md.append("### Symbol Occurrences")
         md.append("| Filepath | Line Range | Role (Definition=1, Ref=2) |")
         md.append("| :--- | :--- | :--- |")
+        seen_occ = set()
         for o in occurrences:
-            role_map = {0: "Reference", 1: "Definition", 2: "Declaration"}
-            role_label = role_map.get(o[3], f"Unknown ({o[3]})")
+            role_label = "Definition" if (o[3] & 1) else "Reference"
             line_str = f"L{o[1]}" if o[1] == o[2] else f"L{o[1]}-{o[2]}"
-            md.append(f"| `{o[0]}` | {line_str} | {role_label} |")
+            norm_fp = str(o[0]).replace("\\", "/")
+            occ_key = (norm_fp, line_str, role_label)
+            if occ_key in seen_occ:
+                continue
+            seen_occ.add(occ_key)
+            md.append(f"| `{norm_fp}` | {line_str} | {role_label} |")
         md.append("")
 
-    if edges:
+    # Filter out local edges
+    clean_edges = [e for e in edges if not str(e[0]).startswith("local ") and not str(e[1]).startswith("local ")]
+    if clean_edges:
         md.append("### Call Graph Relationships")
         md.append("| Source (Caller) | Target (Callee) | Relation |")
         md.append("| :--- | :--- | :--- |")
-        for e in edges:
-            md.append(f"| `{e[0]}` | `{e[1]}` | `{e[2]}` |")
+        for e in clean_edges:
+            src = demangle_scip_symbol(e[0])
+            tgt = demangle_scip_symbol(e[1])
+            md.append(f"| `{src}` | `{tgt}` | `{e[2]}` |")
         md.append("")
 
     return "\n".join(md)
@@ -170,13 +170,17 @@ def format_lookup_file(
         md.append(f"- **Manual Fields**: `{exact_file[7]}`")
     md.append("")
 
-    if file_symbols:
+    # Filter out local symbols
+    non_local_symbols = [s for s in file_symbols if not str(s[0]).startswith("local ")]
+    if non_local_symbols:
         md.append("### Symbols Declared in File")
         md.append("| Symbol | Kind |")
         md.append("| :--- | :--- |")
-        for s in file_symbols:
-            kind = _infer_kind(s[0]) if s[1] == "UnspecifiedKind" else s[1]
-            md.append(f"| `{s[0]}` | {kind} |")
+        for s in non_local_symbols:
+            clean_s = demangle_scip_symbol(s[0])
+            kind = infer_scip_kind(s[0]) if s[1] == "UnspecifiedKind" else s[1]
+            md.append(f"| `{clean_s}` | {kind} |")
         md.append("")
 
     return "\n".join(md)
+

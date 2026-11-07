@@ -45,15 +45,14 @@ ON CONFLICT (filepath) DO UPDATE SET
 """
 
 UPSERT_SYMBOL_SQL = """
-INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, embedding, connection_weight)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, connection_weight)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (symbol) DO UPDATE SET
     filepath = excluded.filepath,
     kind = excluded.kind,
     signature = excluded.signature,
     docstring = excluded.docstring,
     body_hash = excluded.body_hash,
-    embedding = excluded.embedding,
     connection_weight = excluded.connection_weight
 """
 

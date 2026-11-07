@@ -14,12 +14,11 @@ class SymbolsRepository(BaseRepository):
         signature: Optional[str],
         docstring: Optional[str],
         body_hash: Optional[str],
-        embedding: Optional[List[float]] = None,
         connection_weight: int = 0
     ):
         """Inserts or replaces a code symbol declaration in the database."""
         with self.db_conn.session() as conn:
-            conn.execute(UPSERT_SYMBOL_SQL, (symbol, filepath, kind, signature, docstring, body_hash, embedding, connection_weight))
+            conn.execute(UPSERT_SYMBOL_SQL, (symbol, filepath, kind, signature, docstring, body_hash, connection_weight))
 
     def get_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Retrieves details of a registered symbol declaration."""
@@ -113,7 +112,6 @@ class SymbolsRepository(BaseRepository):
                 sym["signature"],
                 sym["docstring"],
                 sym["body_hash"],
-                sym.get("embedding"),
                 sym.get("connection_weight", 0)
             )
             for sym in symbols_list
@@ -174,36 +172,6 @@ class SymbolsRepository(BaseRepository):
                 for r in res
             ]
 
-    def semantic_search(self, query_embedding: List[float], limit: int = 5) -> List[Dict[str, Any]]:
-        """Runs a cosine similarity vector search over the docstrings of code symbols."""
-        with self.db_conn.session() as conn:
-            res = conn.execute(
-                """
-                SELECT 
-                    symbol, 
-                    filepath, 
-                    kind, 
-                    signature, 
-                    docstring,
-                    list_cosine_similarity(embedding, ?::FLOAT[]) as similarity
-                FROM symbols
-                WHERE embedding IS NOT NULL
-                ORDER BY similarity DESC
-                LIMIT ?
-                """,
-                (query_embedding, limit)
-            ).fetchall()
-            return [
-                {
-                    "symbol": r[0],
-                    "filepath": r[1],
-                    "kind": r[2],
-                    "signature": r[3],
-                    "docstring": r[4],
-                    "similarity": r[5]
-                }
-                for r in res
-            ]
 
     def get_symbols_metadata_batch(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         """Retrieves symbol metadata and definition occurrences in bulk."""
@@ -264,6 +232,18 @@ class SymbolsRepository(BaseRepository):
     def delete_occurrences_for_files(self, filepaths: List[str]):
         """Delete all occurrences in multiple files."""
         self._delete_by_filepaths("occurrences", filepaths)
+
+    def delete_orphaned_occurrences(self) -> int:
+        """Delete occurrences where the referenced symbol no longer exists in the symbols table.
+        Returns the number of orphaned occurrences deleted."""
+        with self.db_conn.session() as conn:
+            res = conn.execute(
+                """
+                DELETE FROM occurrences
+                WHERE symbol NOT IN (SELECT symbol FROM symbols)
+                """
+            )
+            return res.rowcount if res.rowcount else 0
 
     def recalculate_connection_weights(self):
         """Recalculates connection weights for all symbols in the database."""
@@ -364,13 +344,3 @@ class SymbolsRepository(BaseRepository):
                 for r in res
             ]
 
-    def update_kinds_from_codeql(self, kind_map):
-        """Bulk update symbol kinds from CodeQL extraction results."""
-        if not kind_map:
-            return
-        with self.db_conn.session() as conn:
-            for symbol, kind in kind_map.items():
-                conn.execute(
-                    "UPDATE symbols SET kind = ? WHERE symbol = ?",
-                    (kind, symbol)
-                )

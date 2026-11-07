@@ -2,11 +2,51 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from utils.exclusions import load_include_dirs, is_included
+from utils.helpers import infer_scip_kind
 
 try:
     from engines import scip_pb2
 except ImportError:
     import scip_pb2
+
+
+def _detect_scip_run_dir(scip_file: Path, project_root: Path, metadata_uri: Optional[str]) -> Path:
+    # 1. Try to parse from metadata URI
+    if metadata_uri:
+        from urllib.parse import unquote
+        try:
+            if metadata_uri.startswith("file://"):
+                path_str = metadata_uri[7:]
+            elif metadata_uri.startswith("file:/"):
+                path_str = metadata_uri[6:]
+            else:
+                path_str = None
+
+            if path_str:
+                path_str = unquote(path_str).replace("\\", "/")
+                if path_str.startswith("/") and len(path_str) > 2 and path_str[2] == ":":
+                    path_str = path_str[1:]
+                run_dir = Path(path_str)
+                if run_dir != Path(".") and run_dir.exists():
+                    return run_dir
+        except Exception:
+            pass
+
+    # 2. Fallback based on scip_file name and project_root structure
+    if "rust" in scip_file.name:
+        if (project_root / "rust" / "Cargo.toml").exists():
+            return project_root / "rust"
+        for p in project_root.rglob("Cargo.toml"):
+            if "target" not in str(p) and ".arch" not in str(p):
+                return p.parent
+    elif "dart" in scip_file.name:
+        if (project_root / "pubspec.yaml").exists():
+            return project_root
+        for p in project_root.rglob("pubspec.yaml"):
+            if ".dart_tool" not in str(p) and "dart_analyzer" not in str(p):
+                return p.parent
+
+    return project_root
 
 
 class ScipParser:
@@ -36,6 +76,10 @@ class ScipParser:
             raw = raw.replace(b'\xed\xb0\x80', b'___')
             raw = raw.replace(b'\xed\xbf\xbf', b'___')
             index.ParseFromString(raw)
+
+        scip_run_dir = None
+        if project_root:
+            scip_run_dir = _detect_scip_run_dir(scip_file, project_root, index.metadata.project_root)
 
         parsed_data = {
             "metadata": {
@@ -67,9 +111,17 @@ class ScipParser:
         # 2. First pass: Extract local symbol definitions & hover/docstrings
         for document in index.documents:
             filepath = document.relative_path
-            if include_dirs and not is_included(filepath, include_dirs):
+            resolved_filepath = filepath
+            if project_root and scip_run_dir:
+                try:
+                    abs_path = scip_run_dir / filepath
+                    resolved_filepath = str(abs_path.relative_to(project_root)).replace("\\", "/")
+                except ValueError:
+                    pass
+
+            if include_dirs and not is_included(resolved_filepath, include_dirs):
                 continue
-            parsed_data["files"].append(filepath)
+            parsed_data["files"].append(resolved_filepath)
 
             symbol_metadata = {}
             for sym_info in document.symbols:
@@ -87,6 +139,15 @@ class ScipParser:
                 is_definition = bool(occ.symbol_roles & 1)
 
                 r = occ.range
+                if is_definition:
+                    enc = getattr(occ, "enclosing_range", None)
+                    if enc is not None:
+                        try:
+                            if len(enc) in (3, 4):
+                                r = enc
+                        except (TypeError, AttributeError):
+                            pass
+
                 if len(r) == 3:
                     start_line, start_col, end_line, end_col = r[0], r[1], r[0], r[2]
                 elif len(r) == 4:
@@ -96,7 +157,7 @@ class ScipParser:
 
                 parsed_data["occurrences"].append({
                     "symbol": symbol,
-                    "filepath": filepath,
+                    "filepath": resolved_filepath,
                     "start_line": start_line + 1,
                     "start_col": start_col,
                     "end_line": end_line + 1,
@@ -106,11 +167,14 @@ class ScipParser:
 
                 if is_definition and not symbol.startswith("local "):
                     meta = symbol_metadata.get(symbol, {"docs": "", "kind": "UnspecifiedKind"})
+                    kind = meta["kind"]
+                    if kind == "UnspecifiedKind" or not kind:
+                        kind = infer_scip_kind(symbol)
 
                     parsed_data["symbols"][symbol] = {
                         "symbol": symbol,
-                        "filepath": filepath,
-                        "kind": meta["kind"],
+                        "filepath": resolved_filepath,
+                        "kind": kind,
                         "signature": None,
                         "docstring": meta["docs"],
                         "body_hash": None
@@ -119,7 +183,11 @@ class ScipParser:
         # 3. Second pass: Extract call & reference edges
         occurrences_by_file = {}
         for occ in parsed_data["occurrences"]:
-            if (occ["role"] & 1) and occ["symbol"] in parsed_data["symbols"]:
+            sym = occ["symbol"]
+            if (occ["role"] & 1) and sym in parsed_data["symbols"]:
+                # Exclude parameters and fields as enclosing callers
+                if sym.endswith(")") or (sym.endswith(".") and not sym.endswith("().")):
+                    continue
                 fp = occ["filepath"]
                 if fp not in occurrences_by_file:
                     occurrences_by_file[fp] = []
@@ -130,13 +198,26 @@ class ScipParser:
 
         for document in index.documents:
             filepath = document.relative_path
-            file_defs = occurrences_by_file.get(filepath, [])
+            resolved_filepath = filepath
+            if project_root and scip_run_dir:
+                try:
+                    abs_path = scip_run_dir / filepath
+                    resolved_filepath = str(abs_path.relative_to(project_root)).replace("\\", "/")
+                except ValueError:
+                    pass
+
+            file_defs = occurrences_by_file.get(resolved_filepath, [])
 
             for occ in document.occurrences:
                 symbol = occ.symbol
                 is_reference = not bool(occ.symbol_roles & 1)
 
-                if not is_reference or symbol.startswith("local ") or symbol not in parsed_data["symbols"]:
+                if (
+                    not is_reference
+                    or symbol.startswith("local ")
+                    or symbol.endswith(")")
+                    or symbol not in parsed_data["symbols"]
+                ):
                     continue
 
                 ref_line = occ.range[0] + 1
@@ -147,7 +228,12 @@ class ScipParser:
                         caller_symbol = def_occ["symbol"]
                         break
 
-                if caller_symbol and caller_symbol != symbol:
+                if (
+                    caller_symbol
+                    and caller_symbol != symbol
+                    and not caller_symbol.startswith("local ")
+                    and not symbol.startswith("local ")
+                ):
                     parsed_data["edges"].append({
                         "source": caller_symbol,
                         "target": symbol,
@@ -155,3 +241,4 @@ class ScipParser:
                     })
 
         return parsed_data
+

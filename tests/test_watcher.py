@@ -58,9 +58,9 @@ def test_connection_weights_recalculation(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
     
     # Insert symbols
-    repository.symbols.upsert_symbol("sym_a", "lib/a.dart", "Function", "void a()", "docs a", "hash_a", None, 0)
-    repository.symbols.upsert_symbol("sym_b", "lib/b.dart", "Function", "void b()", "docs b", "hash_b", None, 0)
-    repository.symbols.upsert_symbol("sym_c", "lib/c.dart", "Function", "void c()", "docs c", "hash_c", None, 0)
+    repository.symbols.upsert_symbol("sym_a", "lib/a.dart", "Function", "void a()", "docs a", "hash_a", 0)
+    repository.symbols.upsert_symbol("sym_b", "lib/b.dart", "Function", "void b()", "docs b", "hash_b", 0)
+    repository.symbols.upsert_symbol("sym_c", "lib/c.dart", "Function", "void c()", "docs c", "hash_c", 0)
 
     # Insert edges
     repository.edges.add_edge("sym_a", "sym_b", "Calls", 1.0)
@@ -111,17 +111,43 @@ def test_shrink_guard(tmp_path):
     }
 
     try:
-        ScipWrapper.ingest_index(repository, parsed_data, embedder=None, project_root=root, force=False)
+        ScipWrapper.ingest_index(repository, parsed_data, project_root=root, force=False)
         assert False, "Should raise ValueError due to shrink guard"
     except ValueError as e:
         assert "Shrink Guard" in str(e)
 
     # 3. Try to ingest empty parsed data with force (should succeed and delete everything)
-    ScipWrapper.ingest_index(repository, parsed_data, embedder=None, project_root=root, force=True)
+    ScipWrapper.ingest_index(repository, parsed_data, project_root=root, force=True)
     
     # Verify no symbols left
     with repository.db_conn.session() as conn:
         count = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
         assert count == 0
+
+    # 4. Verify minor drop is tolerated (e.g. 100 symbols -> 99 symbols)
+    symbols_100 = [
+        {"symbol": f"sym_{i}", "filepath": "lib/a.dart", "kind": "Function", "signature": "", "docstring": "", "body_hash": "", "connection_weight": 0}
+        for i in range(100)
+    ]
+    repository.symbols.upsert_symbols_bulk(symbols_100)
+    
+    # Change the file content so its hash changes and it gets re-ingested
+    a_file.write_text("void a() { int x; }")
+    
+    parsed_data_99 = {
+        "occurrences": [],
+        "symbols": {
+            f"sym_{i}": {"symbol": f"sym_{i}", "filepath": "lib/a.dart", "kind": "Function", "signature": "", "docstring": "", "body_hash": ""}
+            for i in range(99)
+        },
+        "edges": [],
+        "files": ["lib/a.dart"]
+    }
+    # This should succeed without raising ValueError
+    ScipWrapper.ingest_index(repository, parsed_data_99, project_root=root, force=False)
+    
+    with repository.db_conn.session() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+        assert count == 99
 
     db_conn.close()

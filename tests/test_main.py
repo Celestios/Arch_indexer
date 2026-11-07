@@ -37,7 +37,7 @@ def test_cmd_init_creates_workspace(tmp_path, monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert "Workspace folder initialized" in captured.out
-    assert "No supported toolchains detected" in captured.out or "Indexer" in captured.out
+    assert "No supported languages detected" in captured.out or "Indexer" in captured.out
 
 
 def test_cmd_audit_no_violations(tmp_path, capsys):

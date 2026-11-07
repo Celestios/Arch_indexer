@@ -16,8 +16,21 @@ def load_include_dirs(project_root: Path) -> Optional[Set[str]]:
     return set(dirs) if dirs else None
 
 
+DEFAULT_EXCLUDED_DIRS = {
+    ".git", ".arch", ".venv", "venv", "node_modules", "bin", "__pycache__", "dist", "build"
+}
+
+
+def is_excluded(rel_path: str) -> bool:
+    """Check if a path falls into common ignored directories."""
+    parts = Path(rel_path).parts
+    return any(p in DEFAULT_EXCLUDED_DIRS for p in parts)
+
+
 def is_included(rel_path: str, include_dirs: Set[str]) -> bool:
-    """Check if a relative path is within one of the included directories."""
+    """Check if a relative path is within one of the included directories and not excluded."""
+    if is_excluded(rel_path):
+        return False
     parts = Path(rel_path).parts
     for inc in include_dirs:
         inc_parts = tuple(Path(inc).parts)
@@ -32,13 +45,17 @@ def filter_paths(paths, project_root: Path, include_dirs: Optional[Set[str]] = N
     if include_dirs is None:
         include_dirs = load_include_dirs(project_root)
     for p in paths:
-        if include_dirs is None:
-            yield p
-            continue
         try:
             rel = p.relative_to(project_root)
         except ValueError:
+            if not is_excluded(str(p)):
+                yield p
+            continue
+        if is_excluded(str(rel)):
+            continue
+        if include_dirs is None:
             yield p
             continue
         if is_included(str(rel), include_dirs):
             yield p
+

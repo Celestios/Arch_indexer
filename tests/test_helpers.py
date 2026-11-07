@@ -2,7 +2,7 @@
 import pytest
 from utils.helpers import (
     ViolationId, matches_filter, find_definition_line, ext_to_lang,
-    IS_WINDOWS, config_path_for, load_config, CODEQL_LANG_MAP,
+    IS_WINDOWS, config_path_for, load_config,
 )
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -68,11 +68,3 @@ class TestFindDefinitionLine:
         repo = MagicMock()
         repo.symbols.get_occurrences_for_symbol.return_value = []
         assert find_definition_line(repo, "sym", "foo.py") == 1
-
-
-class TestCodeqlLangMap:
-    def test_rust(self):
-        assert CODEQL_LANG_MAP["rust"] == "rust"
-
-    def test_typescript(self):
-        assert CODEQL_LANG_MAP["typescript"] == "javascript"

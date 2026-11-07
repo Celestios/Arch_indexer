@@ -160,12 +160,11 @@ class ScipWrapper:
         return weight
 
     @staticmethod
-    def ingest_index(repository, parsed_data, embedder=None, project_root=None, force=False, config=None):
+    def ingest_index(repository, parsed_data, project_root=None, force=False, config=None):
         """
         Ingests the parsed symbols, occurrences, and edges into the database.
-        Optionally uses an embedder to compute vector representations for symbol docstrings.
         Uses incremental ingestion: only processes files whose content has changed.
         """
         return IndexIngester.ingest_index(
-            repository, parsed_data, embedder, project_root, force, config
+            repository, parsed_data, project_root, force, config
         )

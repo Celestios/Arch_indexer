@@ -3,54 +3,15 @@ import pytest
 from pathlib import Path
 
 
-class TestLanguageBackendProtocol:
-    """Verify LanguageBackend protocol is satisfied by engine wrappers."""
+class TestIndexerBackendProtocol:
+    """Verify IndexerBackend protocol is satisfied by ScipWrapper."""
 
-    def test_codeql_wrapper_satisfies_protocol(self):
-        from engines.base import LanguageBackend
-        from engines.codeql_wrapper import CodeQlWrapper
-        # CodeQlWrapper has is_available, create_database — satisfies LanguageBackend
-        assert hasattr(CodeQlWrapper, 'is_available')
-        assert hasattr(CodeQlWrapper, 'create_database')
+    def test_scip_wrapper_satisfies_protocol(self):
+        from engines.base import IndexerBackend
+        from engines.scip_wrapper import ScipWrapper
+        assert hasattr(ScipWrapper, 'detect_languages')
+        assert hasattr(ScipWrapper, 'run_indexer')
 
-    def test_dart_analyzer_satisfies_protocol(self):
-        from engines.dart_analyzer.wrapper import DartAnalyzerWrapper
-        assert hasattr(DartAnalyzerWrapper, 'is_available')
-        assert hasattr(DartAnalyzerWrapper, 'create_database')
-
-
-class TestQueryEngineProtocol:
-    """Verify QueryEngine protocol methods exist."""
-
-    def test_codeql_has_query_methods(self):
-        from engines.codeql_wrapper import CodeQlWrapper
-        assert hasattr(CodeQlWrapper, 'run_query')
-        assert hasattr(CodeQlWrapper, 'decode_bqrs')
-
-    def test_dart_analyzer_has_query_methods(self):
-        from engines.dart_analyzer.wrapper import DartAnalyzerWrapper
-        assert hasattr(DartAnalyzerWrapper, 'run_query')
-        assert hasattr(DartAnalyzerWrapper, 'decode_results')
-
-
-class TestDataFlowTracerProtocol:
-    """Verify DataFlowTracer protocol methods exist."""
-
-    def test_codeql_has_trace_data_flow(self):
-        from engines.codeql_wrapper import CodeQlWrapper
-        assert hasattr(CodeQlWrapper, 'trace_data_flow')
-
-    def test_dart_analyzer_has_trace_data_flow(self):
-        from engines.dart_analyzer.wrapper import DartAnalyzerWrapper
-        assert hasattr(DartAnalyzerWrapper, 'trace_data_flow')
-
-
-class TestEmbedderProtocol:
-    """Verify EmbedderInterface protocol methods exist."""
-
-    def test_local_embedder_has_embed(self):
-        from engines.embedder import LocalEmbedder
-        assert hasattr(LocalEmbedder, 'embed')
 
 
 class TestClassifierProtocol:
@@ -103,7 +64,7 @@ class TestRepositoryInterfaces:
         from db.repository_symbols import SymbolsRepository
         required = ['get_symbol', 'upsert_symbol', 'get_symbols_by_filepaths',
                      'get_occurrences_for_symbol', 'upsert_symbols_bulk',
-                     'get_symbols_in_file', 'semantic_search',
+                     'get_symbols_in_file',
                      'delete_symbols_for_file', 'delete_occurrences_for_file',
                      'recalculate_connection_weights', 'get_all_symbols',
                      'get_all_symbols_with_metadata']
