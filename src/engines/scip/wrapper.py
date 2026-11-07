@@ -117,6 +117,8 @@ class ScipWrapper:
         best_prefix = ""
         best_conf = None
         for prefix, prefix_conf in config.items():
+            if not isinstance(prefix_conf, dict):
+                continue
             if norm_path.startswith(prefix) and len(prefix) > len(best_prefix):
                 best_prefix = prefix
                 best_conf = prefix_conf

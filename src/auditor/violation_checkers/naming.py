@@ -19,6 +19,8 @@ class NamingViolationChecker:
         violations = []
         naming_rules = []
         for prefix, prefix_conf in config.items():
+            if not isinstance(prefix_conf, dict):
+                continue
             rules = prefix_conf.get("rules", [])
             for r in rules:
                 if r.get("rule_type") == "naming_convention":

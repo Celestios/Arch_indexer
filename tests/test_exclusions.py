@@ -1,6 +1,13 @@
 from pathlib import Path
 from unittest.mock import patch
-from utils.exclusions import load_include_dirs, is_included, filter_paths
+from utils.exclusions import (
+    load_include_dirs,
+    load_exclude_patterns,
+    matches_glob,
+    is_included,
+    is_excluded,
+    filter_paths
+)
 
 
 class TestLoadIncludeDirs:
@@ -84,3 +91,51 @@ class TestFilterPaths:
         file = tmp_path / "src" / "main.py"
         result = list(filter_paths([file], tmp_path, {"lib/"}))
         assert result == []
+
+
+class TestLoadExcludePatterns:
+    @patch("utils.exclusions.load_config")
+    def test_load_exclude_patterns_list(self, mock_load):
+        mock_load.return_value = {"exclude": ["lib/src/**", "**/tests/**"]}
+        patterns = load_exclude_patterns(Path("/project"))
+        assert patterns == ["lib/src/**", "**/tests/**"]
+
+    @patch("utils.exclusions.load_config")
+    def test_load_exclude_patterns_string(self, mock_load):
+        mock_load.return_value = {"exclude": "lib/src/**"}
+        patterns = load_exclude_patterns(Path("/project"))
+        assert patterns == ["lib/src/**"]
+
+    @patch("utils.exclusions.load_config")
+    def test_load_exclude_patterns_empty(self, mock_load):
+        mock_load.return_value = {}
+        patterns = load_exclude_patterns(Path("/project"))
+        assert patterns == []
+
+
+class TestMatchesGlob:
+    def test_glob_double_star(self):
+        assert matches_glob("lib/src/domain/types.dart", "lib/src/**") is True
+        assert matches_glob("lib/features/auth.dart", "lib/src/**") is False
+
+    def test_glob_single_star(self):
+        assert matches_glob("tests/test_foo.py", "tests/*") is True
+        assert matches_glob("tests/sub/test_foo.py", "tests/*") is False
+
+    def test_directory_prefix(self):
+        assert matches_glob("lib/src/generated/code.dart", "lib/src") is True
+
+    def test_file_pattern(self):
+        assert matches_glob("src/app.test.js", "*.test.js") is True
+
+
+class TestExclusionWithPatterns:
+    def test_is_excluded_with_patterns(self):
+        assert is_excluded("lib/src/service.dart", ["lib/src/**"]) is True
+        assert is_excluded("lib/main.dart", ["lib/src/**"]) is False
+
+    def test_is_included_respects_exclude_patterns(self):
+        include_dirs = {"lib/"}
+        exclude_pats = ["lib/src/**"]
+        assert is_included("lib/features/auth.dart", include_dirs, exclude_pats) is True
+        assert is_included("lib/src/internal.dart", include_dirs, exclude_pats) is False

@@ -18,6 +18,8 @@ class MetadataPropagator:
         """
         propagation_fields = {}
         for prefix, prefix_conf in config.items():
+            if not isinstance(prefix_conf, dict):
+                continue
             auto_fields = prefix_conf.get("automatic_fields", {})
             for field_name, field_conf in auto_fields.items():
                 if field_conf.get("handler") == "propagation":

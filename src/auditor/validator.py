@@ -47,6 +47,11 @@ class ConfigValidator:
             return {"success": False, "errors": errors, "warnings": warnings}
 
         for prefix, prefix_conf in config.items():
+            if prefix == "exclude":
+                if not isinstance(prefix_conf, (list, str)):
+                    errors.append("'exclude' must be a list of glob patterns or a string")
+                continue
+
             if not isinstance(prefix_conf, dict):
                 errors.append(f"Prefix '{prefix}' configuration must be a JSON object")
                 continue

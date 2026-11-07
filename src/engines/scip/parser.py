@@ -1,13 +1,81 @@
+import hashlib
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
-from utils.exclusions import load_include_dirs, is_included
-from utils.helpers import infer_scip_kind
+from utils.exclusions import load_include_dirs, load_exclude_patterns, is_included, is_excluded
+from utils.helpers import infer_scip_kind, score_definition_candidate
 
 try:
     from engines import scip_pb2
 except ImportError:
     import scip_pb2
+
+
+def extract_source_signature(lines: List[str], start_line: int, end_line: int) -> Optional[str]:
+    """Extract a clean declaration signature from source lines (1-indexed)."""
+    if not lines or start_line < 1 or start_line > len(lines):
+        return None
+    decl_lines = []
+    max_l = min(start_line + 4, end_line if end_line >= start_line else start_line, len(lines))
+    for i in range(start_line - 1, max_l):
+        l = lines[i].strip()
+        if not l:
+            continue
+        decl_lines.append(l)
+        if l.endswith("{") or l.endswith(";") or (l.endswith(":") and not l.startswith("@")):
+            break
+    if not decl_lines:
+        return None
+    sig = " ".join(decl_lines)
+    if sig.endswith("{"):
+        sig = sig[:-1].strip()
+    return sig[:300] if sig else None
+
+
+def extract_source_docstring(lines: List[str], start_line: int) -> str:
+    """Extract immediately preceding doc comments (///, /**, *, #, //) scanning upward (1-indexed)."""
+    if not lines or start_line <= 1 or start_line > len(lines):
+        return ""
+    doc_lines = []
+    idx = start_line - 2  # line right before start_line (0-indexed)
+    comment_prefixes = ("///", "//", "#", "*", "/**", "/*!", "/*")
+
+    if idx >= 0 and not lines[idx].strip():
+        idx -= 1
+
+    while idx >= 0:
+        raw_l = lines[idx]
+        stripped = raw_l.strip()
+        if not stripped:
+            break
+        matched_prefix = None
+        for p in comment_prefixes:
+            if stripped.startswith(p):
+                matched_prefix = p
+                break
+        if not matched_prefix:
+            break
+
+        content = stripped
+        if content.startswith("///"):
+            content = content[3:]
+        elif content.startswith("//"):
+            content = content[2:]
+        elif content.startswith("/**"):
+            content = content[3:].rstrip("*/")
+        elif content.startswith("/*"):
+            content = content[2:].rstrip("*/")
+        elif content.startswith("*"):
+            content = content[1:].rstrip("*/")
+        elif content.startswith("#"):
+            content = content[1:]
+        doc_lines.append(content.strip())
+        idx -= 1
+
+    if not doc_lines:
+        return ""
+    doc_lines.reverse()
+    return "\n".join(doc_lines)
 
 
 def _detect_scip_run_dir(scip_file: Path, project_root: Path, metadata_uri: Optional[str]) -> Path:
@@ -57,12 +125,13 @@ class ScipParser:
         """
         Parses a binary index.scip file into a normalized dictionary
         of symbols, occurrences, and edges.
-        Filters by include_dirs from config.json if project_root is provided.
+        Filters by include_dirs and exclude from config.json if project_root is provided.
         """
         if not scip_file.exists():
             raise FileNotFoundError(f"SCIP index file not found at {scip_file}")
 
         include_dirs = load_include_dirs(project_root) if project_root else None
+        exclude_patterns = load_exclude_patterns(project_root) if project_root else None
 
         index = scip_pb2.Index()
         with open(scip_file, "rb") as f:
@@ -93,6 +162,27 @@ class ScipParser:
             "files": []
         }
 
+        # Cache file lines on disk to avoid repeated I/O during source grounding
+        file_lines_cache: Dict[str, Optional[List[str]]] = {}
+
+        def get_file_lines(rel_fp: str) -> Optional[List[str]]:
+            if rel_fp in file_lines_cache:
+                return file_lines_cache[rel_fp]
+            if not project_root:
+                return None
+            target_path = project_root / rel_fp
+            if not target_path.exists() or not target_path.is_file():
+                file_lines_cache[rel_fp] = None
+                return None
+            try:
+                with open(target_path, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                    file_lines_cache[rel_fp] = lines
+                    return lines
+            except Exception:
+                file_lines_cache[rel_fp] = None
+                return None
+
         # 1. Parse external symbols (from external packages)
         for sym_info in index.external_symbols:
             docs = "\n".join(sym_info.documentation) if sym_info.documentation else ""
@@ -105,7 +195,9 @@ class ScipParser:
                 "kind": kind_str,
                 "signature": None,
                 "docstring": docs,
-                "body_hash": None
+                "body_hash": None,
+                "start_line": 1,
+                "end_line": 1,
             }
 
         # 2. First pass: Extract local symbol definitions & hover/docstrings
@@ -119,7 +211,9 @@ class ScipParser:
                 except ValueError:
                     pass
 
-            if include_dirs and not is_included(resolved_filepath, include_dirs):
+            if is_excluded(resolved_filepath, exclude_patterns):
+                continue
+            if include_dirs and not is_included(resolved_filepath, include_dirs, exclude_patterns):
                 continue
             parsed_data["files"].append(resolved_filepath)
 
@@ -171,14 +265,51 @@ class ScipParser:
                     if kind == "UnspecifiedKind" or not kind:
                         kind = infer_scip_kind(symbol)
 
-                    parsed_data["symbols"][symbol] = {
+                    docs = meta["docs"]
+                    sig = None
+                    body_hash = None
+
+                    # Source grounding: synthesize signature, docstring, and body hash from disk
+                    flines = get_file_lines(resolved_filepath)
+                    if flines:
+                        sig = extract_source_signature(flines, start_line + 1, end_line + 1)
+                        if not docs:
+                            docs = extract_source_docstring(flines, start_line + 1)
+                        if end_line >= start_line and start_line < len(flines):
+                            span_text = "".join(flines[start_line:end_line + 1])
+                            if span_text:
+                                body_hash = hashlib.sha256(span_text.encode("utf-8")).hexdigest()[:16]
+
+                    new_candidate = {
                         "symbol": symbol,
                         "filepath": resolved_filepath,
                         "kind": kind,
-                        "signature": None,
-                        "docstring": meta["docs"],
-                        "body_hash": None
+                        "signature": sig,
+                        "docstring": docs,
+                        "body_hash": body_hash,
+                        "start_line": start_line + 1,
+                        "end_line": end_line + 1,
                     }
+
+                    # Deterministic canonical symbol disambiguation
+                    if symbol in parsed_data["symbols"]:
+                        existing = parsed_data["symbols"][symbol]
+                        existing_score = score_definition_candidate(
+                            existing,
+                            filepath=existing.get("filepath"),
+                            start_line=existing.get("start_line", 1),
+                            end_line=existing.get("end_line", 1)
+                        )
+                        new_score = score_definition_candidate(
+                            new_candidate,
+                            filepath=resolved_filepath,
+                            start_line=start_line + 1,
+                            end_line=end_line + 1
+                        )
+                        if new_score > existing_score:
+                            parsed_data["symbols"][symbol] = new_candidate
+                    else:
+                        parsed_data["symbols"][symbol] = new_candidate
 
         # 3. Second pass: Extract call & reference edges
         occurrences_by_file = {}
@@ -205,6 +336,11 @@ class ScipParser:
                     resolved_filepath = str(abs_path.relative_to(project_root)).replace("\\", "/")
                 except ValueError:
                     pass
+
+            if is_excluded(resolved_filepath, exclude_patterns):
+                continue
+            if include_dirs and not is_included(resolved_filepath, include_dirs, exclude_patterns):
+                continue
 
             file_defs = occurrences_by_file.get(resolved_filepath, [])
 
@@ -239,6 +375,22 @@ class ScipParser:
                         "target": symbol,
                         "relation": "Calls"
                     })
+
+        # 4. Third pass: Missing symbol recovery / synthesis
+        # Ensure any symbol referenced in occurrences exists in parsed_data["symbols"]
+        for occ in parsed_data["occurrences"]:
+            sym = occ["symbol"]
+            if sym not in parsed_data["symbols"] and not sym.startswith("local "):
+                parsed_data["symbols"][sym] = {
+                    "symbol": sym,
+                    "filepath": None,
+                    "kind": infer_scip_kind(sym),
+                    "signature": None,
+                    "docstring": "",
+                    "body_hash": None,
+                    "start_line": 1,
+                    "end_line": 1,
+                }
 
         return parsed_data
 
