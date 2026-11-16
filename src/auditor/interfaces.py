@@ -136,16 +136,22 @@ class ViolationCheckerInterface(Protocol):
     def check(
         self,
         repository: Any,
+        symbol_classifications: Dict[str, Any],
+        all_edges: List[Dict[str, Any]],
         config: Dict[str, Any],
-        symbol_classifications: Dict[str, Any]
+        filepath_filter: Optional[str],
+        propagation_sources: Dict[Any, Any]
     ) -> List[Dict[str, Any]]:
         """
         Runs a specific violation check and returns found violations.
         
         Args:
             repository: Repository instance for database access
-            config: The applicable prefix configuration
             symbol_classifications: Current symbol classifications with fields
+            all_edges: List of all edges with relation
+            config: Full workspace configuration
+            filepath_filter: Optional filepath prefix filter
+            propagation_sources: Mapping of propagation origins
             
         Returns:
             List of violation dicts with keys: rule_id, symbol, filepath, message, etc.

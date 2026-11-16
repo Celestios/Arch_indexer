@@ -101,13 +101,18 @@ class ScipWrapper:
         return None
 
     @staticmethod
-    def parse_index(scip_file: Path, project_root: Optional[Path] = None) -> Dict[str, Any]:
+    def parse_index(
+        scip_file: Path,
+        project_root: Optional[Path] = None,
+        changed_files: Optional[Any] = None
+    ) -> Dict[str, Any]:
         """
         Parses a binary index.scip file into a normalized dictionary
         of symbols, occurrences, and edges.
         Filters by include_dirs from config.json if project_root is provided.
+        Filters by changed_files to skip disk I/O and occurrences for unchanged files.
         """
-        return ScipParser.parse_index(scip_file, project_root)
+        return ScipParser.parse_index(scip_file, project_root, changed_files=changed_files)
 
     @staticmethod
     def _get_symbol_layer(filepath: str, config: Dict[str, Any]) -> str:

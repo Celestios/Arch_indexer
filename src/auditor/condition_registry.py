@@ -54,8 +54,15 @@ def _eval_name_contains(symbol_info: dict, substring: str, **kwargs) -> bool:
     return substring in name
 
 def _eval_calls_prefix(symbol_info: dict, prefix: str, outgoing_targets: Optional[List] = None, **kwargs) -> bool:
-    """Evaluates calls_prefix condition. Requires repository from kwargs."""
+    """Evaluates calls_prefix condition. Uses symbol_to_filepath map if available, falls back to repository."""
     if not outgoing_targets:
+        return False
+    symbol_to_filepath = kwargs.get("symbol_to_filepath")
+    if symbol_to_filepath is not None:
+        for target in outgoing_targets:
+            target_path = symbol_to_filepath.get(target)
+            if target_path and target_path.replace("\\", "/").startswith(prefix):
+                return True
         return False
     repository = kwargs.get("repository")
     if not repository:

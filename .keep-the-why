@@ -1,0 +1,12 @@
+This is machine-readable project state for the Keep the Why skill
+(https://keepthewhy.com). See context/index.md, or this project's own
+README, for what Keep the Why actually is.
+
+<!-- keep-the-why:config -->
+- id: 9faf4ff1-6168-41ab-9285-bb6e0d4415c6---Arch_indexer
+- context: context/
+- init: complete
+- context-schema: 0.20.0
+- capture-confirmation: confirm-when-unsure
+- source-reference: never
+<!-- /keep-the-why:config -->

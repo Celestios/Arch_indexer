@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional, Tuple
-from utils.helpers import demangle_scip_symbol, sanitize_docstring, infer_scip_kind
+from utils.helpers import demangle_scip_symbol, sanitize_docstring, infer_scip_kind, format_classification_badge
 
 
 def _clean_doc_summary(doc: Optional[str]) -> str:
@@ -68,12 +68,14 @@ def format_context_results(
             start_line, end_line = symbol_to_lines[clean_name]
             line_range = f"L{start_line}-{end_line}" if start_line != end_line else f"L{start_line}"
 
+        badge = format_classification_badge(sym.get("classification"))
         sym_data = {
             "symbol": clean_name,
             "signature": sym["signature"],
             "docstring": sanitize_docstring(sym["docstring"]),
             "line_range": line_range,
             "kind": kind,
+            "badge": badge,
         }
 
         if kind.lower() in ("class", "struct", "interface"):
@@ -89,7 +91,8 @@ def format_context_results(
         md.append("### Classes")
         for cl in classes:
             range_str = f" [{cl['line_range']}]" if cl["line_range"] else ""
-            md.append(f"- **{cl['symbol']}**{range_str} ({cl['kind']})")
+            badge_str = f" `{cl['badge']}`" if cl.get("badge") else ""
+            md.append(f"- **{cl['symbol']}**{badge_str}{range_str} ({cl['kind']})")
             doc = _clean_doc_summary(cl["docstring"])
             if doc:
                 md.append(f"  * {doc}")
@@ -99,7 +102,8 @@ def format_context_results(
         md.append("### Methods & Functions")
         for mf in methods_and_funcs:
             range_str = f" [{mf['line_range']}]" if mf["line_range"] else ""
-            md.append(f"- **{mf['symbol']}**{range_str}")
+            badge_str = f" `{mf['badge']}`" if mf.get("badge") else ""
+            md.append(f"- **{mf['symbol']}**{badge_str}{range_str}")
             if mf["signature"]:
                 md.append(f"  * *Signature*: `{mf['signature']}`")
             doc = _clean_doc_summary(mf["docstring"])
@@ -117,21 +121,46 @@ def format_lookup_symbol(
 ) -> str:
     """Format lookup results for a code symbol as markdown."""
     clean_symbol = demangle_scip_symbol(exact_symbol[0])
+    badge = ""
+    if len(exact_symbol) > 8 and exact_symbol[8]:
+        badge = format_classification_badge(exact_symbol[8])
+    badge_header = f" `{badge}`" if badge else ""
+
     md = []
-    md.append(f"## Code Symbol: `{clean_symbol}`\n")
+    md.append(f"## Code Symbol: `{clean_symbol}`{badge_header}\n")
     md.append(f"- **Filepath**: `{exact_symbol[1] or 'External / Third-party'}`")
     md.append(f"- **Kind**: `{exact_symbol[2]}`")
     md.append(f"- **Signature**: `{exact_symbol[3] or 'None'}`")
+    if badge:
+        md.append(f"- **Classification**: `{badge}`")
+    if len(exact_symbol) > 7 and exact_symbol[7]:
+        parent_clean = demangle_scip_symbol(exact_symbol[7])
+        md.append(f"- **Enclosing Symbol**: `{parent_clean}`")
+    if len(exact_symbol) > 9 and exact_symbol[9] is not None:
+        cnt = exact_symbol[9]
+        churn_str = f"⚡ High Churn ({cnt} modifications)" if cnt >= 3 else f"Stable ({cnt} edits)"
+        md.append(f"- **Stability**: {churn_str}")
     doc = sanitize_docstring(exact_symbol[4]).strip() if exact_symbol[4] else "No docstring available."
     md.append(f"- **Docstring**:\n  {doc.replace(chr(10), chr(10) + '  ')}\n")
 
     if occurrences:
         md.append("### Symbol Occurrences")
-        md.append("| Filepath | Line Range | Role (Definition=1, Ref=2) |")
+        md.append("| Filepath | Line Range | Role |")
         md.append("| :--- | :--- | :--- |")
         seen_occ = set()
         for o in occurrences:
-            role_label = "Definition" if (o[3] & 1) else "Reference"
+            roles = []
+            if o[3] & 1:
+                roles.append("Definition")
+            else:
+                roles.append("Reference")
+            if o[3] & 4:
+                roles.append("[Mutates]")
+            if o[3] & 8:
+                roles.append("[Reads]")
+            if o[3] & 0x20:
+                roles.append("[Test]")
+            role_label = " ".join(roles)
             line_str = f"L{o[1]}" if o[1] == o[2] else f"L{o[1]}-{o[2]}"
             norm_fp = str(o[0]).replace("\\", "/")
             occ_key = (norm_fp, line_str, role_label)

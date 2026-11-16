@@ -56,7 +56,7 @@ class Auditor:
         """
         config = self.config_loader.load_config()
         if not config:
-            print("No architectural rules found in .arch/config.json. Skipping audit.")
+            print("No architectural rules found in .arch/config.json. Skipping audit.", file=sys.stderr)
             return []
 
         self._clear_old_violations(filepath_filter)
@@ -64,12 +64,16 @@ class Auditor:
         self._handle_config_change()
 
         all_symbols = self._fetch_all_symbols()
-        outgoing_map = self._build_outgoing_map(all_symbols)
-        symbol_classifications = self._classify_symbols(all_symbols, outgoing_map, config)
         all_edges = self._fetch_all_edges()
+        outgoing_map = self._build_outgoing_map(all_edges)
+        symbol_classifications = self._classify_symbols(all_symbols, outgoing_map, config)
 
         propagation_sources = self.propagator.run_propagation(symbol_classifications, all_edges, config)
         self.edge_weight_updater.update_edge_weights(all_edges, symbol_classifications, config)
+
+        # Persist resolved classification metadata onto symbols table for context badges
+        classification_updates = {sym: data["fields"] for sym, data in symbol_classifications.items()}
+        self.repository.symbols.update_symbols_classification_bulk(classification_updates)
 
         violations = []
         for checker in ViolationCheckerRegistry.get_all():
@@ -78,8 +82,9 @@ class Auditor:
                 config, filepath_filter, propagation_sources
             ))
 
+        self.repository.compliance.upsert_violations_bulk(violations)
         self._recompute_file_statuses(violations, filepath_filter)
-        print(f"[Auditor] Completed audit. Found {len(violations)} architectural violations.")
+        print(f"[Auditor] Completed audit. Found {len(violations)} architectural violations.", file=sys.stderr)
         return violations
 
     def _clear_old_violations(self, filepath_filter: Optional[str]):
@@ -97,15 +102,27 @@ class Auditor:
     def _fetch_all_symbols(self) -> List[Dict[str, Any]]:
         return self.repository.symbols.get_all_symbols_with_metadata()
 
-    def _build_outgoing_map(self, all_symbols: List[Dict[str, Any]]) -> Dict[str, List[str]]:
-        outgoing_calls_map = {}
-        for sym in all_symbols:
-            outgoing = self.repository.edges.get_outgoing_edges(sym["symbol"])
-            outgoing_calls_map[sym["symbol"]] = [o["target"] for o in outgoing]
+    def _build_outgoing_map(self, all_edges: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+        outgoing_calls_map: Dict[str, List[str]] = {}
+        if all_edges and "source" in all_edges[0]:
+            for edge in all_edges:
+                src = edge.get("source")
+                tgt = edge.get("target")
+                if src and tgt:
+                    outgoing_calls_map.setdefault(src, []).append(tgt)
+        elif all_edges and "symbol" in all_edges[0]:
+            # Backwards compatibility if symbols passed directly
+            edges = self._fetch_all_edges()
+            for edge in edges:
+                src = edge.get("source")
+                tgt = edge.get("target")
+                if src and tgt:
+                    outgoing_calls_map.setdefault(src, []).append(tgt)
         return outgoing_calls_map
 
     def _classify_symbols(self, all_symbols, outgoing_map, config) -> Dict[str, Dict[str, Any]]:
         file_metadata = self.repository.files.get_all_files_metadata()
+        symbol_to_filepath = {s["symbol"]: s.get("filepath") for s in all_symbols if "symbol" in s}
         symbol_classifications = {}
         for sym in all_symbols:
             filepath = sym.get("filepath")
@@ -115,7 +132,9 @@ class Auditor:
             if not prefix_conf:
                 continue
             outgoing = outgoing_map.get(sym["symbol"], [])
-            classifications = self.classifier.assign_automatic_fields(sym, prefix_conf, outgoing)
+            classifications = self.classifier.assign_automatic_fields(
+                sym, prefix_conf, outgoing, symbol_to_filepath=symbol_to_filepath
+            )
             if filepath in file_metadata:
                 manual_fields = file_metadata[filepath].get("manual_fields") or {}
                 classifications.update(manual_fields)
@@ -144,7 +163,9 @@ class Auditor:
         else:
             files_to_update = set(self.repository.files.get_all_files_metadata().keys())
 
+        statuses_to_update = {}
         for f_path in files_to_update:
             v_origins = violations_by_file.get(f_path, [])
             new_status = "COMPLIANT" if not v_origins or all(o != "automatic" for o in v_origins) else "VIOLATION_DETECTED"
-            self.repository.files.update_file_status(f_path, new_status)
+            statuses_to_update[f_path] = new_status
+        self.repository.files.update_file_statuses(statuses_to_update)

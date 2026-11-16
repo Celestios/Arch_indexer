@@ -159,12 +159,12 @@ class FilesRepository(BaseRepository):
         """Bulk update file compliance statuses."""
         if not statuses:
             return
+        data = [(status, filepath) for filepath, status in statuses.items()]
         with self.db_conn.session() as conn:
-            for filepath, status in statuses.items():
-                conn.execute(
-                    "UPDATE files SET status = ? WHERE filepath = ?",
-                    (status, filepath)
-                )
+            conn.executemany(
+                "UPDATE files SET status = ? WHERE filepath = ?",
+                data
+            )
 
     def mark_file_for_audit(self, filepath: str, justification: str):
         """Mark a file as pending audit with a justification."""

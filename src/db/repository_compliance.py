@@ -90,21 +90,21 @@ class ComplianceRepository(BaseRepository):
                 (f"{normalized_prefix}%",)
             )
 
-    def upsert_violations_bulk(self, violations):
+    def upsert_violations_bulk(self, violations: List[Dict[str, Any]]):
         """Bulk upsert violations in a single transaction."""
         if not violations:
             return
+        data = [
+            (
+                v["violation_id"],
+                v["rule_id"],
+                v.get("symbol"),
+                v["filepath"],
+                v["line"],
+                v["message"],
+                v.get("origin", "automatic")
+            )
+            for v in violations
+        ]
         with self.db_conn.session() as conn:
-            for v in violations:
-                conn.execute(
-                    UPSERT_VIOLATION_SQL,
-                    (
-                        v["violation_id"],
-                        v["rule_id"],
-                        v.get("symbol"),
-                        v["filepath"],
-                        v["line"],
-                        v["message"],
-                        v.get("origin", "automatic")
-                    )
-                )
+            conn.executemany(UPSERT_VIOLATION_SQL, data)

@@ -24,14 +24,6 @@ class BaseRepository:
             (filepaths,)
         )
 
-    def _delete_by_filepaths_unnest(self, table: str, filepaths: List[str]):
-        if not filepaths:
-            return
-        self._execute(
-            f"DELETE FROM {table} WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
-            (filepaths,)
-        )
-
 
 UPSERT_FILE_SQL = """
 INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification)
@@ -45,15 +37,19 @@ ON CONFLICT (filepath) DO UPDATE SET
 """
 
 UPSERT_SYMBOL_SQL = """
-INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, connection_weight)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, code_block)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (symbol) DO UPDATE SET
     filepath = excluded.filepath,
     kind = excluded.kind,
     signature = excluded.signature,
     docstring = excluded.docstring,
+    change_count = CASE WHEN symbols.body_hash <> excluded.body_hash THEN COALESCE(symbols.change_count, 1) + 1 ELSE COALESCE(symbols.change_count, 1) END,
+    last_modified = CASE WHEN symbols.body_hash <> excluded.body_hash THEN now() ELSE symbols.last_modified END,
     body_hash = excluded.body_hash,
-    connection_weight = excluded.connection_weight
+    connection_weight = excluded.connection_weight,
+    parent_symbol = excluded.parent_symbol,
+    code_block = excluded.code_block
 """
 
 UPSERT_VIOLATION_SQL = """

@@ -63,7 +63,8 @@ class SymbolsRepositoryInterface(Protocol):
         self, symbol: str, filepath: Optional[str], kind: str,
         signature: Optional[str], docstring: Optional[str],
         body_hash: Optional[str],
-        connection_weight: int = 0
+        connection_weight: int = 0,
+        parent_symbol: Optional[str] = None
     ) -> None: ...
 
     @abstractmethod
@@ -108,6 +109,21 @@ class SymbolsRepositoryInterface(Protocol):
     @abstractmethod
     def recalculate_connection_weights(self) -> None: ...
 
+    @abstractmethod
+    def add_diagnostics_bulk(self, diagnostics_list: List[Dict[str, Any]], progress_callback=None) -> None: ...
+
+    @abstractmethod
+    def delete_diagnostics_for_files(self, filepaths: List[str]) -> None: ...
+
+    @abstractmethod
+    def delete_diagnostics_for_file(self, filepath: str) -> None: ...
+
+    @abstractmethod
+    def get_diagnostics_for_file(self, filepath: str) -> List[Dict[str, Any]]: ...
+
+    @abstractmethod
+    def get_diagnostics_for_symbol(self, symbol: str) -> List[Dict[str, Any]]: ...
+
 
 @runtime_checkable
 class EdgesRepositoryInterface(Protocol):
@@ -133,6 +149,9 @@ class EdgesRepositoryInterface(Protocol):
 
     @abstractmethod
     def get_transitive_closure(self, symbol: str, max_depth: int = 3) -> Dict[str, List[Dict[str, Any]]]: ...
+
+    @abstractmethod
+    def get_dependent_files(self, filepaths: List[str]) -> List[str]: ...
 
 
 @runtime_checkable

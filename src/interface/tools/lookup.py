@@ -1,6 +1,6 @@
 from typing import List, Union
 from interface.formatters import format_lookup_file, format_lookup_symbol
-from utils.helpers import demangle_scip_symbol, resolve_symbol_in_repo
+from utils.helpers import demangle_scip_symbol, resolve_symbol_in_repo, is_test_caller
 
 
 def _lookup_single(target: str, repository) -> str:
@@ -37,11 +37,51 @@ def _lookup_single(target: str, repository) -> str:
         occs_raw = repository.symbols.get_occurrences_for_symbol(exact_symbol[0])
         occs = [(o["filepath"], o["start_line"], o["end_line"], o["role"]) for o in occs_raw]
         edges = repository.symbols.get_edges_for_symbol(exact_symbol[0])
-        md.append(format_lookup_symbol(exact_symbol, occs, edges))
+        sym_md = format_lookup_symbol(exact_symbol, occs, edges)
+        diags = repository.symbols.get_diagnostics_for_symbol(exact_symbol[0])
+        if diags:
+            diag_lines = ["\n### Compiler & Analyzer Diagnostics", "| Line:Col | Severity | Code | Message |", "| :--- | :--- | :--- | :--- |"]
+            for d in diags:
+                code_str = f"`{d['code']}`" if d.get("code") else ""
+                diag_lines.append(f"| L{d['line']}:{d['col']} | `{d['severity']}` | {code_str} | {d['message']} |")
+            sym_md += "\n" + "\n".join(diag_lines) + "\n"
+
+        # Check for tests transitively covering this symbol
+        closure = repository.edges.get_transitive_closure(exact_symbol[0], max_depth=3)
+        up_syms = [item["symbol"] for item in closure.get("upstream", [])]
+        if up_syms:
+            meta_batch = repository.symbols.get_symbols_metadata_batch(up_syms)
+            tests_found = []
+            for s in up_syms:
+                meta = meta_batch.get(s, {})
+                fp = meta.get("filepath")
+                defn = meta.get("definition")
+                r = defn.get("role", 0) if defn else 0
+                if is_test_caller(s, fp, r):
+                    clean_test = demangle_scip_symbol(s)
+                    if clean_test not in [t[0] for t in tests_found]:
+                        tests_found.append((clean_test, fp))
+            if tests_found:
+                test_lines = ["\n### Covered By Tests"]
+                for ts, tfp in tests_found[:5]:
+                    loc_str = f" in `{tfp}`" if tfp else ""
+                    test_lines.append(f"- **{ts}**{loc_str}")
+                sym_md += "\n" + "\n".join(test_lines) + "\n"
+
+        md.append(sym_md)
 
     if exact_file:
         file_syms = repository.symbols.get_symbols_by_filepath_exact(exact_file[0])
-        md.append(format_lookup_file(exact_file, file_syms))
+        file_md = format_lookup_file(exact_file, file_syms)
+        file_diags = repository.symbols.get_diagnostics_for_file(exact_file[0])
+        if file_diags:
+            diag_lines = ["\n### Compiler & Analyzer Diagnostics", "| Symbol | Line:Col | Severity | Code | Message |", "| :--- | :--- | :--- | :--- | :--- |"]
+            for d in file_diags:
+                sym_str = f"`{demangle_scip_symbol(d['symbol'])}`" if d.get("symbol") else "-"
+                code_str = f"`{d['code']}`" if d.get("code") else ""
+                diag_lines.append(f"| {sym_str} | L{d['line']}:{d['col']} | `{d['severity']}` | {code_str} | {d['message']} |")
+            file_md += "\n" + "\n".join(diag_lines) + "\n"
+        md.append(file_md)
 
     if not exact_symbol and not exact_file:
         if matching_files:

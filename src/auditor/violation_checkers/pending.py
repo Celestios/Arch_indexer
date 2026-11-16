@@ -23,5 +23,4 @@ class PendingAuditChecker:
             vdata = {"violation_id": violation_id, "rule_id": "pending_audit", "symbol": None,
                      "filepath": f_path, "line": 1, "message": msg, "origin": "automatic"}
             violations.append(vdata)
-            repository.compliance.add_violation(**vdata)
         return violations

@@ -12,6 +12,7 @@ def handle_compile_context(
     out_filepath: Optional[str],
     repository,
     project_root: Path,
+    max_tokens: int = 4000,
 ) -> str:
     """Compile a deterministic markdown context document. Returns markdown."""
     compiler = ContextCompiler(repository, project_root)
@@ -21,4 +22,5 @@ def handle_compile_context(
         direction=direction,
         resolution=resolution,
         out_filepath=out_filepath,
+        max_tokens=max_tokens,
     )

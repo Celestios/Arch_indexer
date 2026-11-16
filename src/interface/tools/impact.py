@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional, Tuple
-from utils.helpers import demangle_scip_symbol, resolve_symbol_in_repo
+from utils.helpers import demangle_scip_symbol, resolve_symbol_in_repo, is_test_caller, detect_entry_point
 
 
 def is_noisy_symbol(sym: str) -> bool:
@@ -21,15 +21,19 @@ def is_noisy_symbol(sym: str) -> bool:
 def is_class_symbol(repository, db_symbol: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """Check if the given symbol represents a Class in the repository."""
     sym_record = repository.symbols.get_symbol(db_symbol)
-    if sym_record and sym_record.get("kind") == "Class":
+    if sym_record and sym_record.get("kind") in ("Class", "Struct", "Interface", "Trait"):
         return True, sym_record
     if db_symbol.endswith("#"):
         return True, sym_record
     prefix = db_symbol if db_symbol.endswith("#") else db_symbol + "#"
     with repository.symbols.db_conn.session() as conn:
         res = conn.execute(
-            "SELECT count(*) FROM symbols WHERE symbol LIKE ? AND (kind IN ('Method', 'Constructor') OR symbol LIKE '%().')",
-            (prefix + "%",)
+            """
+            SELECT count(*) FROM symbols
+            WHERE parent_symbol = ?
+               OR (symbol LIKE ? AND (kind IN ('Method', 'Constructor') OR symbol LIKE '%().'))
+            """,
+            (db_symbol, prefix + "%")
         ).fetchone()
         if res and res[0] > 0:
             return True, sym_record
@@ -49,8 +53,27 @@ def handle_impact(symbol: str, max_depth: int, repository) -> str:
 
     is_cls, _ = is_class_symbol(repository, db_symbol)
     if is_cls:
-        return _handle_class_impact(repository, db_symbol, clean_focal, max_depth)
-    return _handle_symbol_impact(repository, db_symbol, clean_focal, max_depth)
+        res_md = _handle_class_impact(repository, db_symbol, clean_focal, max_depth)
+    else:
+        res_md = _handle_symbol_impact(repository, db_symbol, clean_focal, max_depth)
+
+    # Historical Git Co-Change Coupling
+    sym_record = repository.symbols.get_symbol(db_symbol)
+    focal_fp = sym_record.get("filepath") if sym_record else None
+    if focal_fp:
+        from change_tracker.git_coupling import GitCouplingMiner
+        co_changes = GitCouplingMiner.get_co_changed_files(repository, focal_fp, min_frequency=0.20)
+        if co_changes:
+            co_md = [
+                "### ── Historical Git Co-Change Coupling",
+                f"> **Co-Change Warning**: Modifying `{focal_fp}` historically correlates with changes in:"
+            ]
+            for c in co_changes:
+                pct = round(c["frequency"] * 100, 1)
+                co_md.append(f"- `{c['filepath']}` ({pct}% co-change over {c['co_change_count']} commits)")
+            res_md += "\n" + "\n".join(co_md) + "\n"
+
+    return res_md
 
 
 def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth: int) -> str:
@@ -61,10 +84,11 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
         method_rows = conn.execute(
             """
             SELECT symbol, kind, signature, docstring FROM symbols
-            WHERE symbol LIKE ? AND symbol LIKE '%().' AND symbol NOT LIKE '%.(%'
+            WHERE parent_symbol = ?
+               OR (symbol LIKE ? AND symbol LIKE '%().' AND symbol NOT LIKE '%.(%')
             ORDER BY symbol
             """,
-            (prefix + "%",)
+            (db_symbol, prefix + "%")
         ).fetchall()
 
     methods_list = [r[0] for r in method_rows]
@@ -162,6 +186,46 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
                 md.append(f"  * Called by `{c}`")
     md.append("")
 
+    # Check for tests and entry points across all callers
+    all_caller_syms = set(seen_sources)
+    with repository.edges.db_conn.session() as conn:
+        for m_sym in methods_list:
+            rows = conn.execute("SELECT source FROM edges WHERE target = ?", (m_sym,)).fetchall()
+            for r in rows:
+                if not is_noisy_symbol(r[0]) and not r[0].startswith(prefix):
+                    all_caller_syms.add(r[0])
+
+    if all_caller_syms:
+        meta_callers = repository.symbols.get_symbols_metadata_batch(list(all_caller_syms))
+        class_tests = []
+        class_roots = []
+        for c_sym in all_caller_syms:
+            meta = meta_callers.get(c_sym, {})
+            fp = meta.get("filepath")
+            defn = meta.get("definition")
+            r = defn.get("role", 0) if defn else 0
+            if is_test_caller(c_sym, fp, r):
+                class_tests.append((demangle_scip_symbol(c_sym), fp))
+            else:
+                inc_count = len(repository.edges.get_incoming_edges(c_sym))
+                ep = detect_entry_point(c_sym, fp, inc_count)
+                if ep:
+                    class_roots.append((demangle_scip_symbol(c_sym), fp, ep))
+
+        if class_tests:
+            md.append("### ── Covered By Tests")
+            for ts, tfp in sorted(class_tests):
+                loc_str = f" in `{tfp}`" if tfp else ""
+                md.append(f"- **{ts}**{loc_str}")
+            md.append("")
+
+        if class_roots:
+            md.append("### ── Root Entry Points Affected")
+            for rs, rfp, rep in sorted(class_roots):
+                loc_str = f" in `{rfp}`" if rfp else ""
+                md.append(f"- **{rs}**{loc_str} [{rep}]")
+            md.append("")
+
     # Category 3: Downstream Dependencies (Internal & Subsystem Coupling)
     md.append("### ── Downstream Dependencies (Per Method)")
     deps_found = False
@@ -212,7 +276,37 @@ def _handle_symbol_impact(repository, db_symbol: str, clean_focal: str, max_dept
     upstream = [item for item in raw_upstream if not is_noisy_symbol(item.get("symbol", ""))]
     downstream = [item for item in raw_downstream if not is_noisy_symbol(item.get("symbol", ""))]
 
+    caller_syms = [item["symbol"] for item in upstream]
+    meta_batch = repository.symbols.get_symbols_metadata_batch(caller_syms) if caller_syms else {}
+
+    test_callers = []
+    root_entry_points = []
+    production_callers = []
+
+    for item in upstream:
+        sym = item["symbol"]
+        meta = meta_batch.get(sym, {})
+        fp = meta.get("filepath")
+        defn = meta.get("definition")
+        role = defn.get("role", 0) if defn else 0
+        if is_test_caller(sym, fp, role):
+            test_callers.append((item, fp))
+        else:
+            production_callers.append((item, fp))
+            incoming_edges = repository.edges.get_incoming_edges(sym)
+            incoming_count = len(incoming_edges)
+            entry_type = detect_entry_point(sym, fp, incoming_count)
+            if entry_type:
+                root_entry_points.append((item, fp, entry_type))
+
     md = [f"## Blast Radius for: `{clean_focal}`\n"]
+
+    sym_rec = repository.symbols.get_symbol(db_symbol)
+    change_count = sym_rec.get("change_count", 1) if sym_rec else 1
+    if change_count >= 3:
+        md.append(f"> **Change Risk**: ⚡ High-Churn Hotspot (modified {change_count} times in repository history)\n")
+    else:
+        md.append(f"> **Stability**: Stable Primitive (low churn: {change_count} edits recorded)\n")
 
     md.append("### ── Upstream Callers (Who calls this?)")
     if not upstream:
@@ -223,9 +317,32 @@ def _handle_symbol_impact(repository, db_symbol: str, clean_focal: str, max_dept
             path_nodes = [demangle_scip_symbol(s) for s in item["path"] if not is_noisy_symbol(s)]
             path_str = " ──> ".join(f"`{p}`" for p in path_nodes)
             clean_sym = demangle_scip_symbol(item["symbol"])
-            md.append(f"- **{clean_sym}** [Depth: {item['depth']}]")
+            rel_label = f" [{item['relation']}]" if item.get("relation") and item.get("relation") != "Calls" else ""
+            md.append(f"- **{clean_sym}** [Depth: {item['depth']}]{rel_label}")
             md.append(f"  * Path: {path_str}")
     md.append("")
+
+    if test_callers:
+        md.append("### ── Covered By Tests")
+        test_sorted = sorted(test_callers, key=lambda x: x[0]["depth"])
+        for item, fp in test_sorted:
+            clean_test = demangle_scip_symbol(item["symbol"])
+            loc_str = f" in `{fp}`" if fp else ""
+            md.append(f"- **{clean_test}**{loc_str} [Depth: {item['depth']}]")
+        md.append("")
+
+    if root_entry_points:
+        md.append("### ── Root Entry Points Affected")
+        root_sorted = sorted(root_entry_points, key=lambda x: x[0]["depth"])
+        seen_roots = set()
+        for item, fp, entry_type in root_sorted:
+            clean_root = demangle_scip_symbol(item["symbol"])
+            if clean_root in seen_roots:
+                continue
+            seen_roots.add(clean_root)
+            loc_str = f" in `{fp}`" if fp else ""
+            md.append(f"- **{clean_root}**{loc_str} [{entry_type}] [Depth: {item['depth']}]")
+        md.append("")
 
     md.append("### ── Downstream Callees (What does this call?)")
     if not downstream:
@@ -236,7 +353,8 @@ def _handle_symbol_impact(repository, db_symbol: str, clean_focal: str, max_dept
             path_nodes = [demangle_scip_symbol(s) for s in item["path"] if not is_noisy_symbol(s)]
             path_str = " ──> ".join(f"`{p}`" for p in path_nodes)
             clean_sym = demangle_scip_symbol(item["symbol"])
-            md.append(f"- **{clean_sym}** [Depth: {item['depth']}]")
+            rel_label = f" [{item['relation']}]" if item.get("relation") and item.get("relation") != "Calls" else ""
+            md.append(f"- **{clean_sym}** [Depth: {item['depth']}]{rel_label}")
             md.append(f"  * Path: {path_str}")
     md.append("")
 

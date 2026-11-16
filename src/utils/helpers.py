@@ -252,3 +252,64 @@ def resolve_symbol_in_repo(repository, target: str) -> Optional[tuple]:
 
     return None
 
+
+def format_classification_badge(raw: Any) -> str:
+    """Formats symbol classification dictionary or JSON string into a compact badge."""
+    if not raw:
+        return ""
+    fields = raw
+    if isinstance(raw, str):
+        try:
+            fields = json.loads(raw)
+        except Exception:
+            return ""
+    if not isinstance(fields, dict) or not fields:
+        return ""
+    parts = []
+    order = ["layer", "tier", "stability"]
+    for k in order:
+        if k in fields and fields[k]:
+            parts.append(f"{k}: {fields[k]}")
+    for k, v in sorted(fields.items()):
+        if k not in order and v:
+            parts.append(f"{k}: {v}")
+    if not parts:
+        return ""
+    return f"[{', '.join(parts)}]"
+
+
+def is_test_caller(sym: str, filepath: Optional[str] = None, role: int = 0) -> bool:
+    """Checks if a symbol corresponds to a test definition or occurrence."""
+    if role & 0x20:
+        return True
+    if filepath:
+        fp_norm = filepath.replace("\\", "/").lower()
+        if (
+            fp_norm.startswith(("test/", "tests/"))
+            or "/test/" in fp_norm
+            or "/tests/" in fp_norm
+            or fp_norm.endswith(("_test.dart", "_test.py", "_test.rs", "_test.go", ".test.ts", ".test.js"))
+            or "test_" in fp_norm
+        ):
+            return True
+    s_clean = demangle_scip_symbol(sym).lower()
+    if s_clean.startswith("test_") or s_clean.endswith("_test") or ".test_" in s_clean or "::test_" in s_clean:
+        return True
+    return False
+
+
+def detect_entry_point(sym: str, filepath: Optional[str] = None, incoming_count: int = 0) -> Optional[str]:
+    """Detects if a symbol is a system entry point (main, MCP endpoint, FFI bridge, or root caller)."""
+    clean = demangle_scip_symbol(sym)
+    fp = (filepath or "").replace("\\", "/").lower()
+
+    if clean in ("main", "main()") or clean.endswith(".main") or clean.endswith(".main()"):
+        return "System Entry: `main()`"
+    if "interface/tools" in fp or "interface.tools" in clean or "interface/server" in fp:
+        return "MCP Tool Endpoint"
+    if "bridge" in fp or "ffi" in fp or "frb_generated" in fp:
+        return "FFI Export / Bridge"
+    if incoming_count == 0 and not is_test_caller(sym, filepath):
+        return "Root Caller (No Upstream)"
+    return None
+

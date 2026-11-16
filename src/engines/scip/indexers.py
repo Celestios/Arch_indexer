@@ -9,9 +9,23 @@ from utils.helpers import IS_WINDOWS
 from engines.scip.utils import run_with_scroll
 
 
+def _find_arch_dir(start_dir: Path) -> Path:
+    """Find the nearest .arch directory traversing upwards."""
+    curr = start_dir.resolve()
+    while True:
+        candidate = curr / ".arch"
+        if candidate.is_dir():
+            return candidate
+        if curr.parent == curr:
+            break
+        curr = curr.parent
+    return start_dir / ".arch"
+
+
 def _move_index_to_arch(project_dir: Path, language: str, cargo_root: Path = None) -> Optional[Path]:
     """Move generated index.scip to .arch/index_{language}.scip."""
-    arch_index = project_dir / ".arch" / f"index_{language}.scip"
+    arch_dir = _find_arch_dir(project_dir)
+    arch_index = arch_dir / f"index_{language}.scip"
     search_dirs = [project_dir]
     if cargo_root and cargo_root != project_dir:
         search_dirs.append(cargo_root)

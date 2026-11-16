@@ -40,7 +40,7 @@ class DependencyViolationChecker:
                         violations.extend(self._check_package_restriction(rule, source_sym, target_sym, source_data, filepath, field_name))
                     elif rule.get("rule_type", "dependency_check") == "dependency_check" and target_sym in symbol_classifications:
                         target_data = symbol_classifications[target_sym]
-                        v = self._check_single_dependency(rule, source_sym, target_sym, source_data, target_data, filepath, field_name, config, propagation_sources, field_conf)
+                        v = self._check_single_dependency(rule, source_sym, target_sym, source_data, target_data, filepath, field_name, config, propagation_sources, field_conf, symbol_classifications)
                         if v:
                             violations.append(v)
         return violations
@@ -57,10 +57,9 @@ class DependencyViolationChecker:
         rule_id = f"{field_name}_pkg_{forbidden_source}".lower().replace("/", "_").replace(".", "_")
         data = {"violation_id": violation_id, "rule_id": rule_id, "symbol": source_sym,
                 "filepath": filepath, "line": line_number, "message": msg, "origin": "automatic"}
-        self.repository.compliance.add_violation(**data)
         return [data]
 
-    def _check_single_dependency(self, rule, source_sym, target_sym, source_data, target_data, filepath, field_name, config, propagation_sources, field_conf) -> Optional[Dict[str, Any]]:
+    def _check_single_dependency(self, rule, source_sym, target_sym, source_data, target_data, filepath, field_name, config, propagation_sources, field_conf, symbol_classifications) -> Optional[Dict[str, Any]]:
         source_val = source_data["static_fields"].get(field_name)
         target_val = target_data["fields"].get(field_name)
         if source_val is None or target_val is None:
@@ -72,6 +71,11 @@ class DependencyViolationChecker:
         msg = rule.get("message", f"Dependency violation: {source_val} is not allowed to call {target_val}")
         path = self._trace_propagation_path(source_sym, target_sym, field_name, propagation_sources, field_conf)
         trace_msg = msg + self.tracer.format_path_trace(path)
+
+        # Counterfactual fix suggestions: Find existing barrier intermediaries
+        fix_hint = self._find_counterfactual_fix(target_sym, target_data, field_name, field_conf, symbol_classifications)
+        if fix_hint:
+            trace_msg += f"\n  Suggested Fix: {fix_hint}"
         line_number = find_definition_line(self.repository, target_sym, filepath)
 
         violation_id = ViolationId.generate(source_sym, target_sym, field_name, forbidden_source, forbidden_target)
@@ -86,7 +90,6 @@ class DependencyViolationChecker:
 
         data = {"violation_id": violation_id, "rule_id": rule_id, "symbol": source_sym,
                 "filepath": filepath, "line": line_number, "message": trace_msg, "origin": "automatic"}
-        self.repository.compliance.add_violation(**data)
         return data
 
     def _trace_propagation_path(self, source_sym, target_sym, field_name, propagation_sources, field_conf) -> List[str]:
@@ -120,3 +123,34 @@ class DependencyViolationChecker:
 
         seen = set()
         return [node for node in path if node not in seen and not seen.add(node)]
+
+    def _find_counterfactual_fix(self, target_sym: str, target_data: Dict, field_name: str, field_conf: Dict, symbol_classifications: Dict) -> Optional[str]:
+        barriers = field_conf.get("barriers", [])
+        if not barriers:
+            return None
+        barrier_field = field_conf.get("barrier_field", field_name)
+
+        incoming = self.repository.edges.get_incoming_edges(target_sym)
+        parent_sym = target_data.get("symbol_info", {}).get("parent_symbol")
+        if parent_sym:
+            incoming = incoming + self.repository.edges.get_incoming_edges(parent_sym)
+
+        candidates = []
+        from utils.helpers import demangle_scip_symbol
+        seen_callers = set()
+        for edge in incoming:
+            caller = edge.get("source")
+            if not caller or caller.startswith("local ") or caller in seen_callers or caller not in symbol_classifications:
+                continue
+            seen_callers.add(caller)
+            caller_fields = symbol_classifications[caller]["fields"]
+            caller_layer = caller_fields.get(barrier_field)
+            if caller_layer in barriers:
+                clean_caller = demangle_scip_symbol(caller)
+                clean_target = demangle_scip_symbol(target_sym)
+                candidates.append(f"`{clean_caller}` (in {caller_layer}) already calls `{clean_target}`")
+                if len(candidates) >= 2:
+                    break
+        if candidates:
+            return f"Delegate through existing barrier intermediary in {'/'.join(barriers)}: " + "; ".join(candidates)
+        return None

@@ -134,17 +134,36 @@ class ConfigValidator:
                         if not isinstance(rule, dict):
                             errors.append(f"Prefix '{prefix}' field '{field_name}' rule at index {idx} must be a JSON object")
                             continue
-                        source = rule.get("source")
-                        target = rule.get("target")
-                        if not source or not target:
-                            errors.append(f"Prefix '{prefix}' field '{field_name}' rule at index {idx} must specify both 'source' and 'target'")
-                            continue
-                        
-                        if allowed_values is not None:
-                            if source not in allowed_values:
+                        rule_type = rule.get("rule_type", "dependency_check")
+                        if rule_type == "package_restriction":
+                            source = rule.get("source")
+                            blocklist = rule.get("blocklist")
+                            if not source or blocklist is None:
+                                errors.append(f"Prefix '{prefix}' field '{field_name}' rule at index {idx} must specify both 'source' and 'blocklist'")
+                                continue
+                            if allowed_values is not None and source not in allowed_values:
                                 errors.append(f"Prefix '{prefix}' field '{field_name}' rule source '{source}' is not in allowed values list {allowed_values}")
-                            if target not in allowed_values:
-                                errors.append(f"Prefix '{prefix}' field '{field_name}' rule target '{target}' is not in allowed values list {allowed_values}")
+                        elif rule_type == "naming_convention":
+                            classification = rule.get("classification")
+                            suffix = rule.get("name_suffix")
+                            prefix_pattern = rule.get("name_prefix")
+                            if not classification or (not suffix and not prefix_pattern):
+                                errors.append(f"Prefix '{prefix}' field '{field_name}' rule at index {idx} must specify 'classification' and at least one of 'name_suffix' or 'name_prefix'")
+                                continue
+                            if allowed_values is not None and classification not in allowed_values:
+                                errors.append(f"Prefix '{prefix}' field '{field_name}' rule classification '{classification}' is not in allowed values list {allowed_values}")
+                        else:
+                            source = rule.get("source")
+                            target = rule.get("target")
+                            if not source or not target:
+                                errors.append(f"Prefix '{prefix}' field '{field_name}' rule at index {idx} must specify both 'source' and 'target'")
+                                continue
+                            
+                            if allowed_values is not None:
+                                if source not in allowed_values:
+                                    errors.append(f"Prefix '{prefix}' field '{field_name}' rule source '{source}' is not in allowed values list {allowed_values}")
+                                if target not in allowed_values:
+                                    errors.append(f"Prefix '{prefix}' field '{field_name}' rule target '{target}' is not in allowed values list {allowed_values}")
 
             # 5. Propagation barriers referential integrity
             barriers = field_conf.get("barriers", [])

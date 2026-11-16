@@ -27,7 +27,12 @@ class FieldValidator:
             updated_fields = dict(current_manual_fields)
             fields_to_reset = []
             justification = meta.get("justification") or ""
-            is_modified = (meta.get("pending_audit") and justification == "File modified, pending re-audit")
+            is_modified = meta.get("is_modified")
+            if is_modified is None:
+                is_modified = bool(
+                    meta.get("pending_audit")
+                    and ("modified" in justification.lower() or justification.startswith("File modified"))
+                )
             fields_changed = False
 
             for field_name, field_conf in manual_cfg.items():

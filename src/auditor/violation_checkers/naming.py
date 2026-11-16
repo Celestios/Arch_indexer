@@ -57,5 +57,4 @@ class NamingViolationChecker:
                     vdata = {"violation_id": violation_id, "rule_id": rule_id, "symbol": sym,
                              "filepath": filepath, "line": line_number, "message": msg, "origin": "automatic"}
                     violations.append(vdata)
-                    self.repository.compliance.add_violation(**vdata)
         return violations

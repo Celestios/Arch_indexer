@@ -121,31 +121,16 @@ The CLI tool `arch` provides commands for workspace setup, indexing, auditing bo
 
 The FastMCP server exposes tools returning clean, token-efficient Markdown strings optimized for LLM consumption.
 
-### `query`
-*   **Purpose**: Multi-source code search. Runs both keyword searches (on symbol names and file paths) and semantic similarity searches (on symbol docstrings) in parallel, dividing results into distinct sections.
+### `lookup`
+*   **Purpose**: Resolves symbol and file locations, definitions, occurrences, and direct call relationships.
 *   **Parameters**:
-    *   `text` (Union[list[str], str], required): A single query string or a list of search terms.
-    *   `limit` (integer, optional, default: 5): Max search matches per query.
+    *   `target` (Union[list[str], str], required): Symbol name, file path, or search query.
 *   **Output Format (Markdown)**:
     ```markdown
-    ## Search Results for: "database"
+    ## Search Results for: "DbConnection"
 
-    ### 1. Symbol Name Matches (Keyword Search)
-    1. **db.connection.DbConnection**
-       - **File**: `src/db/connection.py`
-       - **Kind**: `Class`
-       - **Signature**: `class DbConnection`
-
-    ### 2. Semantic Docstring Matches
-    1. **db.repository.Repository** (Similarity: 0.89)
-       - **File**: `src/db/repository.py`
-       - **Kind**: `Class`
-       - **Doc**: DAO class for indexing operations...
-
-    ### 3. Filepath Matches
-    1. **src/db/schema.sql**
-       - **Language**: `sql`
-       - **Audit Status**: `COMPLIANT`
+    ### Symbol Definitions
+    - **db.connection.DbConnection** (Class) in `src/db/connection.py:L9-L75`
     ```
 
 ### `context`
@@ -205,38 +190,24 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
        - **Violation**: Presentation layer cannot directly call Infrastructure layer
     ```
 
-### `map`
-*   **Purpose**: Provides a bird's-eye modular map of code structure using Label Propagation (LPA) community detection, listing key hub entry points and inter-module dependencies.
-*   **Parameters**: None
-
-### `trace`
-*   **Purpose**: Uses CodeQL to trace a data flow path from a source symbol to a sink symbol.
-*   **Parameters**:
-    *   `source` (string, required): Source symbol name.
-    *   `sink` (string, required): Sink/destination symbol name.
-
 ### `report`
 *   **Purpose**: Generates a structured overview or compliance violation report of the workspace.
 *   **Parameters**:
     *   `name` (string, required): Name of the report (`overview` or `compliance`).
     *   `format` (string, optional, default: `markdown`): Format of the output (`markdown` or `json`).
 
-### `set_fields`
-*   **Purpose**: Updates manual compliance status or metadata fields for files, strictly validating them against the project ontology (`config.json`).
-*   **Parameters**:
-    *   `target` (string, required): A JSON filepath (for batch overrides) or a source file path.
-    *   `update` (string, optional): Combined field-value update parameter in the format `"field:value"`. Example: `"status:VIOLATION"` or `"pattern:Controller"`.
-    *   `justification` (string, optional): Rationale comment explaining the status update (required if status is set to `VIOLATION`).
-
-### `index`
-*   **Purpose**: Generalized database lookup tool. Automatically detects if the search string is a file path (e.g. `auditor.analyzer` or `src/auditor/analyzer.py`) or a code symbol (e.g. `auditor.analyzer.Auditor.run_audit`) and returns details, declarations, occurrences, and relationships.
-*   **Parameters**:
-    *   `target` (string, required): The symbol name or file path search target.
-
-### `clear_pending_audits`
-*   **Purpose**: Clears the change-tracker pending audit flags for all files in the database.
-*   **Parameters**: None
-
 ### `analyze`
 *   **Purpose**: Validates the architectural configuration ontology (`config.json`) completeness and sanity. Checks syntax, structure, allowed values reachability, and dependency rules referential integrity.
 *   **Parameters**: None
+
+### `set_fields`
+*   **Purpose**: Updates manual compliance status or metadata fields for files, strictly validating them against the project ontology (`config.json`).
+*   **Parameters**:
+    *   `filepath` (string, required): Target source file path.
+    *   `fields_json` (string, required): JSON string of field-value pairs to set.
+    *   `justification` (string, optional): Justification comment explaining the update.
+
+### `clear_pending`
+*   **Purpose**: Clears the change-tracker pending audit flags for all files in the database.
+*   **Parameters**:
+    *   `justification` (string, required): Reason for clearing pending audits.

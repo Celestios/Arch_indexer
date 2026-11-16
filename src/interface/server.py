@@ -8,8 +8,20 @@ src_dir = Path(__file__).resolve().parent.parent
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
+import os
+import sys
+import json
+from pathlib import Path
+from typing import Optional, List, Union
+
+# Setup sys.path to resolve imports from src/
+src_dir = Path(__file__).resolve().parent.parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+
 from mcp.server.fastmcp import FastMCP
-from utils.session import db_session
+from db.connection import DbConnection
+from db.repository import Repository
 from interface.server_config import get_project_root, get_db_path
 from interface.tools.context import handle_context
 from interface.tools.lookup import handle_lookup
@@ -19,6 +31,38 @@ from interface.tools.compile_context import handle_compile_context
 from interface.validators import validate_direction, validate_resolution
 
 mcp = FastMCP("arch")
+
+_shared_db_conn: Optional[DbConnection] = None
+_shared_repository: Optional[Repository] = None
+
+
+def get_server_repository() -> Repository:
+    """Get or create cached Repository/DbConnection for the MCP server lifecycle."""
+    global _shared_db_conn, _shared_repository
+    db_path = get_db_path()
+    if not db_path.exists():
+        raise FileNotFoundError(f"Arch database not found at {db_path}. Please run 'arch init' first.")
+    if _shared_db_conn is None or _shared_db_conn.db_path != db_path:
+        if _shared_db_conn is not None:
+            try:
+                _shared_db_conn.close()
+            except Exception:
+                pass
+        _shared_db_conn = DbConnection(db_path)
+        _shared_repository = Repository(_shared_db_conn)
+    return _shared_repository
+
+
+def close_server_connection():
+    """Explicitly close cached server database connection."""
+    global _shared_db_conn, _shared_repository
+    if _shared_db_conn is not None:
+        try:
+            _shared_db_conn.close()
+        except Exception:
+            pass
+        _shared_db_conn = None
+        _shared_repository = None
 
 
 @mcp.tool()
@@ -30,8 +74,8 @@ def lookup(target: Union[List[str], str]) -> str:
     if not db_path.exists():
         return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        with db_session(get_project_root()) as (repository, db_conn):
-            return handle_lookup(target, repository)
+        repository = get_server_repository()
+        return handle_lookup(target, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -47,8 +91,8 @@ def context(filepaths: Union[List[str], str]) -> str:
     if not db_path.exists():
         return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        with db_session(get_project_root()) as (repository, db_conn):
-            return handle_context(filepaths, repository)
+        repository = get_server_repository()
+        return handle_context(filepaths, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -65,8 +109,8 @@ def impact(symbol: str, max_depth: int = 3) -> str:
     if not db_path.exists():
         return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        with db_session(get_project_root()) as (repository, db_conn):
-            return handle_impact(symbol, max_depth, repository)
+        repository = get_server_repository()
+        return handle_impact(symbol, max_depth, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -80,6 +124,7 @@ def compile_context(
     direction: str = "downstream",
     resolution: str = "signature",
     out_filepath: Optional[str] = None,
+    max_tokens: int = 4000,
 ) -> str:
     """
     Compiles a deterministic markdown-formatted architectural context document
@@ -99,10 +144,10 @@ def compile_context(
     if not db_path.exists():
         return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        with db_session(get_project_root()) as (repository, db_conn):
-            return handle_compile_context(
-                symbol, radius, direction, resolution, out_filepath, repository, get_project_root()
-            )
+        repository = get_server_repository()
+        return handle_compile_context(
+            symbol, radius, direction, resolution, out_filepath, repository, get_project_root(), max_tokens
+        )
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -118,19 +163,146 @@ def audit() -> str:
     if not db_path.exists():
         return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        with db_session(get_project_root()) as (repository, db_conn):
-            return handle_audit(repository, get_project_root())
+        repository = get_server_repository()
+        return handle_audit(repository, get_project_root())
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error running audit: {e}"
 
 
+@mcp.tool()
+def report(name: str, format: str = "markdown") -> str:
+    """
+    Generates high-level summaries or compliance reports of the workspace code graph.
+    name: 'overview' or 'compliance'
+    format: 'markdown' or 'json'
+    """
+    db_path = get_db_path()
+    if not db_path.exists():
+        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
+    try:
+        repository = get_server_repository()
+        from reporter.generator import Reporter
+        reporter = Reporter(repository)
+        return reporter.generate_report(name, format)
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error generating report: {e}"
+
+
+@mcp.tool()
+def analyze() -> str:
+    """
+    Validates the architectural configuration ontology (config.json) completeness and sanity.
+    """
+    try:
+        from auditor.validator import ConfigValidator
+        project_root = get_project_root()
+        validator = ConfigValidator(project_root)
+        res = validator.validate()
+        lines = ["=== Configuration Sanity & Completeness Analysis ==="]
+        if res["warnings"]:
+            lines.append(f"\n[WARNING] Reachability warnings ({len(res['warnings'])}):")
+            for w in res["warnings"]:
+                lines.append(f"  - {w}")
+        else:
+            lines.append("\n[OK] Value reachability check passed (no unreachable values).")
+
+        if res["errors"]:
+            lines.append(f"\n[ERROR] Referential integrity failures ({len(res['errors'])}):")
+            for err in res["errors"]:
+                lines.append(f"  - {err}")
+            lines.append("\nValidation failed.")
+        else:
+            lines.append("[OK] Referential integrity validation passed.")
+            lines.append("\nValidation succeeded.")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error analyzing configuration: {e}"
+
+
+@mcp.tool()
+def set_fields(filepath: str, fields_json: str, justification: Optional[str] = None) -> str:
+    """
+    Sets manual metadata fields for a file.
+    """
+    db_path = get_db_path()
+    if not db_path.exists():
+        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
+    try:
+        fields = json.loads(fields_json)
+    except Exception as e:
+        return f"Error: Invalid JSON fields payload: {e}"
+
+    try:
+        repository = get_server_repository()
+        from utils.session import resolve_filepath
+        resolved = resolve_filepath(repository, filepath)
+        if not resolved:
+            return f"Error: File '{filepath}' is not registered in the database."
+
+        file_info = repository.files.get_file(resolved)
+        current_fields = {}
+        if file_info and file_info.get("manual_fields"):
+            try:
+                current_fields = json.loads(file_info["manual_fields"])
+            except Exception:
+                pass
+
+        for k, v in fields.items():
+            if v is None:
+                current_fields.pop(k, None)
+            else:
+                current_fields[k] = v
+
+        repository.files.update_file_manual_fields(resolved, current_fields, justification)
+        from auditor.analyzer import Auditor
+        auditor = Auditor(repository, get_project_root())
+        auditor.run_audit()
+        return f"Successfully updated manual fields for '{resolved}' to: {current_fields}."
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error setting fields: {e}"
+
+
+@mcp.tool()
+def clear_pending(justification: str) -> str:
+    """
+    Clears the pending audit flag on all files in the database.
+    """
+    db_path = get_db_path()
+    if not db_path.exists():
+        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
+    try:
+        repository = get_server_repository()
+        repository.files.clear_all_pending_audits(justification)
+        from auditor.analyzer import Auditor
+        auditor = Auditor(repository, get_project_root())
+        auditor.run_audit()
+        return "Successfully cleared pending audit status for all files."
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error clearing pending audits: {e}"
+
+
+@mcp.tool()
+def clear_pending_audits(justification: str = "Manual clear") -> str:
+    """Alias for clear_pending."""
+    return clear_pending(justification)
+
+
 def run_server(port: int = 0):
-    if port > 0:
-        mcp.run(transport="sse", port=port)
-    else:
-        mcp.run()
+    try:
+        if port > 0:
+            mcp.run(transport="sse", port=port)
+        else:
+            mcp.run()
+    finally:
+        close_server_connection()
 
 
 def main():

@@ -91,8 +91,8 @@ class IndexIngester:
 
             if changed_files:
                 from change_tracker.invalidation import TransitiveInvalidation
-                invalidator = TransitiveInvalidation(repository, max_depth=2)
-                changed_files = list(invalidator.expand_changed_files(changed_files))
+                invalidator = TransitiveInvalidation(repository, max_depth=1)
+                changed_files = list(invalidator.expand_changed_files(changed_files, new_symbols=parsed_data.get("symbols")))
                 print(f"[SCIP Ingest] Incremental: {len(changed_files)} to process (including dependents), {len(unchanged_files)} unchanged")
         else:
             changed_files = file_list
@@ -132,9 +132,11 @@ class IndexIngester:
                         "Refusing to overwrite. This might be due to a failed SCIP extraction. Pass force=True to override."
                     )
 
-        for fp in deleted_files:
-            print(f"[SCIP Ingest] Cleaning up deleted file from database: {fp}")
-            repository.files.delete_file(fp)
+        if deleted_files:
+            for fp in deleted_files:
+                print(f"[SCIP Ingest] Cleaning up deleted file from database: {fp}")
+            from db.cascade import CascadeCleanupService
+            CascadeCleanupService(repository).delete_files_bulk(deleted_files)
 
         # Register files in bulk with actual SHA-256 hashes
         files_to_ingest = []
@@ -154,16 +156,6 @@ class IndexIngester:
             print("[SCIP Ingest] No files changed. Skipping symbol/occurrence/edge ingestion.")
             return
 
-        # 1b. Delete old edges, symbols, and occurrences for changed files before re-ingesting.
-        # Order matters: edges first (delete_edges_for_file uses a subquery against symbols),
-        # then occurrences, then symbols.
-        for fp in changed_files:
-            repository.edges.delete_edges_for_file(fp)
-        for fp in changed_files:
-            repository.symbols.delete_occurrences_for_file(fp)
-        for fp in changed_files:
-            repository.symbols.delete_symbols_for_file(fp)
-
         # 2. Ingest symbols (only changed files + all external symbols)
         changed_set = set(changed_files)
         filtered_symbols = {k: v for k, v in parsed_data["symbols"].items()
@@ -175,6 +167,26 @@ class IndexIngester:
         if changed_files:
             existing_symbols = repository.symbols.get_symbols_by_filepaths(changed_files)
 
+        # 1b. Delete old edges, symbols, and occurrences for changed files before re-ingesting.
+        # Order matters: edges first, then occurrences, then symbols.
+        if force:
+            from db.cascade import CascadeCleanupService
+            CascadeCleanupService(repository).delete_files_bulk(changed_files)
+        elif changed_files:
+            repository.edges.delete_edges_for_files(changed_files)
+            repository.symbols.delete_occurrences_for_files(changed_files)
+            repository.symbols.delete_diagnostics_for_files(changed_files)
+            removed_symbols = [
+                sym_id for sym_id, sym in existing_symbols.items()
+                if (not sym.get("filepath") or sym.get("filepath") in changed_set) and sym_id not in filtered_symbols
+            ]
+            if removed_symbols:
+                with repository.db_conn.session() as conn:
+                    conn.execute(
+                        "DELETE FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))",
+                        (removed_symbols,)
+                    )
+
         symbols_to_ingest = [
             {
                 "symbol": sym["symbol"],
@@ -183,6 +195,8 @@ class IndexIngester:
                 "signature": sym["signature"],
                 "docstring": sym["docstring"],
                 "body_hash": sym["body_hash"],
+                "parent_symbol": sym.get("parent_symbol"),
+                "code_block": sym.get("code_block"),
             }
             for sym_id, sym in filtered_symbols.items()
             if sym_id not in existing_symbols or (
@@ -190,6 +204,8 @@ class IndexIngester:
                 or existing_symbols[sym_id]["kind"] != sym["kind"]
                 or existing_symbols[sym_id]["signature"] != sym.get("signature")
                 or existing_symbols[sym_id]["docstring"] != sym["docstring"]
+                or existing_symbols[sym_id].get("parent_symbol") != sym.get("parent_symbol")
+                or existing_symbols[sym_id].get("code_block") != sym.get("code_block")
             )
         ]
 
@@ -197,7 +213,7 @@ class IndexIngester:
         if skipped > 0:
             print(f"  Skipped {skipped} unchanged symbols.")
         print(f"[SCIP Ingest] Writing {len(symbols_to_ingest)} symbols to database...")
-        sym_chunk = 100
+        sym_chunk = 10_000
         for i in range(0, len(symbols_to_ingest), sym_chunk):
             chunk = symbols_to_ingest[i:i + sym_chunk]
             repository.symbols.upsert_symbols_bulk(chunk)
@@ -208,11 +224,18 @@ class IndexIngester:
                                 if occ["filepath"] and occ["filepath"] in changed_set]
         total_occ = len(filtered_occurrences)
         print(f"[SCIP Ingest] Ingesting {total_occ} occurrences...")
-        occ_chunk = 100
+        occ_chunk = 10_000
         for i in range(0, total_occ, occ_chunk):
             chunk = filtered_occurrences[i:i + occ_chunk]
             repository.symbols.add_occurrences_bulk(chunk)
             print_progress(min(i + occ_chunk, total_occ), total_occ, prefix="[SCIP Ingest] Occurrences")
+
+        # 3b. Ingest diagnostics (only changed files)
+        filtered_diagnostics = [d for d in parsed_data.get("diagnostics", [])
+                                if d.get("filepath") and d["filepath"] in changed_set]
+        if filtered_diagnostics:
+            print(f"[SCIP Ingest] Ingesting {len(filtered_diagnostics)} diagnostics...")
+            repository.symbols.add_diagnostics_bulk(filtered_diagnostics)
 
         # 4. Ingest call graph edges (only changed files)
         filtered_edges = [e for e in parsed_data["edges"]
@@ -254,10 +277,11 @@ class IndexIngester:
         repository.edges.add_edges_bulk(edges_to_ingest)
 
         # 5. Clean up any orphaned edges and occurrences left over from prior index runs
-        orphaned_edges = repository.edges.delete_orphaned_edges()
-        orphaned_occurrences = repository.symbols.delete_orphaned_occurrences()
-        if orphaned_edges or orphaned_occurrences:
-            print(f"[SCIP Ingest] Cleaned up {orphaned_edges} orphaned edges, {orphaned_occurrences} orphaned occurrences")
+        if force:
+            orphaned_edges = repository.edges.delete_orphaned_edges()
+            orphaned_occurrences = repository.symbols.delete_orphaned_occurrences()
+            if orphaned_edges or orphaned_occurrences:
+                print(f"[SCIP Ingest] Cleaned up {orphaned_edges} orphaned edges, {orphaned_occurrences} orphaned occurrences")
 
         # 6. Recalculate connection weights for symbols
         print("[SCIP Ingest] Recalculating symbol connection weights...")

@@ -1,4 +1,4 @@
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from db.repository import Repository
 from auditor.condition_registry import ConditionEvaluatorRegistry
 
@@ -11,7 +11,13 @@ class SymbolClassifier:
     def __init__(self, repository: Repository):
         self.repository = repository
 
-    def evaluate_conditions(self, symbol_info: Dict[str, Any], conditions: Dict[str, Any], outgoing_targets: List[str]) -> bool:
+    def evaluate_conditions(
+        self,
+        symbol_info: Dict[str, Any],
+        conditions: Dict[str, Any],
+        outgoing_targets: List[str],
+        symbol_to_filepath: Optional[Dict[str, str]] = None
+    ) -> bool:
         """
         Returns True if a symbol definition meets all the specified assignment conditions.
         Delegates each condition type to the registered evaluator in ConditionEvaluatorRegistry.
@@ -20,7 +26,8 @@ class SymbolClassifier:
             if not ConditionEvaluatorRegistry.evaluate(
                 condition_type, symbol_info, value,
                 outgoing_targets=outgoing_targets,
-                repository=self.repository
+                repository=self.repository,
+                symbol_to_filepath=symbol_to_filepath
             ):
                 return False
         return True
@@ -29,7 +36,8 @@ class SymbolClassifier:
         self,
         symbol_info: Dict[str, Any],
         prefix_conf: Dict[str, Any],
-        outgoing_targets: List[str]
+        outgoing_targets: List[str],
+        symbol_to_filepath: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
         Evaluates the prefix configuration's automatic fields and returns the assigned values.
@@ -47,7 +55,7 @@ class SymbolClassifier:
                 target_value = rule.get("value")
                 conditions = rule.get("conditions", {})
                 
-                if self.evaluate_conditions(symbol_info, conditions, outgoing_targets):
+                if self.evaluate_conditions(symbol_info, conditions, outgoing_targets, symbol_to_filepath=symbol_to_filepath):
                     assigned_val = target_value
                     break
                     

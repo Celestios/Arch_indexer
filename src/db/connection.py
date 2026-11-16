@@ -70,6 +70,14 @@ class DbConnection:
             # DuckDB allows executing multiple SQL statements separated by semicolons
             # We can execute the whole schema string
             conn.execute(schema_sql)
+            try:
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS parent_symbol VARCHAR;")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS classification VARCHAR DEFAULT '{}';")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS code_block TEXT;")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS change_count INTEGER DEFAULT 1;")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
+            except Exception:
+                pass
         except Exception as e:
             print(f"Error initializing DuckDB schema: {e}", file=sys.stderr)
             raise e

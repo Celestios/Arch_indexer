@@ -1,3 +1,4 @@
+import sys
 from typing import Dict, List, Any
 from collections import deque
 
@@ -85,7 +86,7 @@ class MetadataPropagator:
 
             queue = deque(worklist)
             iterations = 0
-            max_iterations = 10000
+            max_iterations = max(10000, len(symbol_classifications) * 10)
 
             while queue and iterations < max_iterations:
                 n = queue.popleft()
@@ -110,5 +111,12 @@ class MetadataPropagator:
                         if m not in visited:
                             queue.append(m)
                             visited.add(m)
+
+            if queue and iterations >= max_iterations:
+                print(
+                    f"[MetadataPropagator] Warning: Worklist propagation for field '{field_name}' "
+                    f"reached maximum iteration cap ({max_iterations}) before reaching a fixed point.",
+                    file=sys.stderr
+                )
 
         return propagation_sources

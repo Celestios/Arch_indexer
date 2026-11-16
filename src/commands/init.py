@@ -145,6 +145,17 @@ def cmd_init(args):
     db_conn = DbConnection(arch_dir / "arch.db")
     repository = Repository(db_conn)
 
+    # Sync compliance rules from config.json now that it is configured
+    config_path = arch_dir / "config.json"
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                conf = json.load(f)
+            from setup.initializer import sync_rules_to_db
+            sync_rules_to_db(repository, conf)
+        except Exception as e:
+            print(f"Warning: Failed to sync compliance rules: {e}", file=sys.stderr)
+
     # 5. Run SCIP indexer
     indexed_any = _run_scip_indexer(project_root, repository, selected_languages, getattr(args, 'force', False))
 

@@ -12,6 +12,7 @@ class CascadeCleanupService:
         """Delete a file and all its associated data across tables."""
         self.repository.edges.delete_edges_for_file(filepath)
         self.repository.symbols.delete_occurrences_for_file(filepath)
+        self.repository.symbols.delete_diagnostics_for_file(filepath)
         self.repository.symbols.delete_symbols_for_file(filepath)
         self.repository.files.delete_file_record(filepath)
 
@@ -21,5 +22,6 @@ class CascadeCleanupService:
             return
         self.repository.edges.delete_edges_for_files(filepaths)
         self.repository.symbols.delete_occurrences_for_files(filepaths)
+        self.repository.symbols.delete_diagnostics_for_files(filepaths)
         self.repository.symbols.delete_symbols_for_files(filepaths)
         self.repository.files.delete_files_records(filepaths)

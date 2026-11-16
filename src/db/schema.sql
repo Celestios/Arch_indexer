@@ -21,7 +21,12 @@ CREATE TABLE IF NOT EXISTS symbols (
     signature TEXT,
     docstring TEXT,
     body_hash VARCHAR, -- AST body hash to skip edge update if unchanged
-    connection_weight INTEGER DEFAULT 0
+    connection_weight INTEGER DEFAULT 0,
+    parent_symbol VARCHAR, -- Enclosing symbol (AST parent scope)
+    classification VARCHAR DEFAULT '{}', -- Architectural metadata fields (layer, tier, etc.)
+    code_block TEXT, -- Defining code block for the class, method, function, or symbol
+    change_count INTEGER DEFAULT 1,
+    last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 3. Track physical locations where symbols are referenced/defined
@@ -67,4 +72,25 @@ CREATE TABLE IF NOT EXISTS compliance_violations (
 CREATE TABLE IF NOT EXISTS system_metadata (
     key VARCHAR PRIMARY KEY,
     value VARCHAR NOT NULL
+);
+
+-- 8. Track compiler & analyzer diagnostics from SCIP index
+CREATE TABLE IF NOT EXISTS diagnostics (
+    filepath VARCHAR NOT NULL,
+    symbol VARCHAR,
+    line INTEGER NOT NULL,
+    col INTEGER NOT NULL,
+    severity VARCHAR NOT NULL,
+    code VARCHAR,
+    message TEXT NOT NULL,
+    tags VARCHAR
+);
+
+-- 9. Track historical git co-change coupling
+CREATE TABLE IF NOT EXISTS file_co_changes (
+    filepath_a VARCHAR NOT NULL,
+    filepath_b VARCHAR NOT NULL,
+    co_change_count INTEGER NOT NULL,
+    frequency FLOAT NOT NULL,
+    PRIMARY KEY (filepath_a, filepath_b)
 );

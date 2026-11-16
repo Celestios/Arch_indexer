@@ -158,3 +158,58 @@ def test_deleted_file_cleanup(tmp_path):
     assert repository.files.get_file('lib/ui/button.dart') is None
 
     db_conn.close()
+
+
+def test_transitive_invalidation(tmp_path):
+    from change_tracker.invalidation import TransitiveInvalidation
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    # Insert symbols across two files: util.dart defines helper, main.dart calls helper
+    repository.symbols.upsert_symbol(
+        symbol="pkg::util::helper()",
+        filepath="lib/util.dart",
+        kind="Function",
+        signature="void helper()",
+        docstring="",
+        body_hash="hash1"
+    )
+    repository.symbols.upsert_symbol(
+        symbol="pkg::main::run()",
+        filepath="lib/main.dart",
+        kind="Function",
+        signature="void run()",
+        docstring="",
+        body_hash="hash2"
+    )
+    # Edge: main calls util
+    repository.edges.add_edge(source="pkg::main::run()", target="pkg::util::helper()", relation="Calls")
+
+    invalidator = TransitiveInvalidation(repository, max_depth=1)
+
+    # Case 1: Interface (signature) did not change -> no expansion
+    new_symbols_same = {
+        "pkg::util::helper()": {
+            "symbol": "pkg::util::helper()",
+            "filepath": "lib/util.dart",
+            "signature": "void helper()"
+        }
+    }
+    expanded = invalidator.expand_changed_files(["lib/util.dart"], new_symbols=new_symbols_same)
+    assert expanded == {"lib/util.dart"}
+
+    # Case 2: Interface (signature) changed -> invalidates lib/main.dart
+    new_symbols_changed = {
+        "pkg::util::helper()": {
+            "symbol": "pkg::util::helper()",
+            "filepath": "lib/util.dart",
+            "signature": "int helper(int x)"
+        }
+    }
+    expanded = invalidator.expand_changed_files(["lib/util.dart"], new_symbols=new_symbols_changed)
+    assert expanded == {"lib/util.dart", "lib/main.dart"}
+
+    # Case 3: Calling without new_symbols defaults to invalidating dependents
+    expanded_direct = invalidator.expand_changed_files(["lib/util.dart"])
+    assert expanded_direct == {"lib/util.dart", "lib/main.dart"}
+
+    db_conn.close()

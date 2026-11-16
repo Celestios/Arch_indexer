@@ -1,3 +1,4 @@
+from collections import deque
 from typing import Dict, List, Any, Optional
 from db.connection import DbConnection
 from db.base import BaseRepository
@@ -14,23 +15,23 @@ class EdgesRepository(BaseRepository):
                 (source, target, relation, weight)
             )
 
-    def get_outgoing_edges(self, symbol: str) -> List[Dict[str, str]]:
+    def get_outgoing_edges(self, symbol: str) -> List[Dict[str, Any]]:
         """Lists all symbols directly referenced/called by the given symbol."""
         with self.db_conn.session() as conn:
             res = conn.execute(
-                "SELECT target, relation FROM edges WHERE source = ?",
+                "SELECT target, relation, weight FROM edges WHERE source = ?",
                 (symbol,)
             ).fetchall()
-            return [{"target": r[0], "relation": r[1]} for r in res]
+            return [{"target": r[0], "relation": r[1], "weight": r[2] if len(r) > 2 else 1.0} for r in res]
 
-    def get_incoming_edges(self, symbol: str) -> List[Dict[str, str]]:
+    def get_incoming_edges(self, symbol: str) -> List[Dict[str, Any]]:
         """Lists all callers/parents referencing the given symbol."""
         with self.db_conn.session() as conn:
             res = conn.execute(
-                "SELECT source, relation FROM edges WHERE target = ?",
+                "SELECT source, relation, weight FROM edges WHERE target = ?",
                 (symbol,)
             ).fetchall()
-            return [{"source": r[0], "relation": r[1]} for r in res]
+            return [{"source": r[0], "relation": r[1], "weight": r[2] if len(r) > 2 else 1.0} for r in res]
 
     def add_edges_bulk(self, edges_list: List[Dict[str, Any]]):
         """Bulk inserts a list of edges in a single transaction."""
@@ -95,33 +96,45 @@ class EdgesRepository(BaseRepository):
         upstream = []
         downstream = []
         with self.db_conn.session() as conn:
-            queue = [(symbol, 0, [symbol])]
+            # Upstream BFS (callers)
             visited = {symbol}
-            while queue:
-                curr, depth, path = queue.pop(0)
-                if depth >= max_depth:
-                    continue
-                callers = conn.execute("SELECT source FROM edges WHERE target = ?", (curr,)).fetchall()
-                for (caller,) in callers:
+            current_frontier = {symbol: [symbol]}
+            for depth in range(max_depth):
+                if not current_frontier:
+                    break
+                nodes = list(current_frontier.keys())
+                rows = conn.execute(
+                    "SELECT source, target, relation FROM edges WHERE target IN (SELECT UNNEST(?::VARCHAR[]))",
+                    (nodes,)
+                ).fetchall()
+                next_frontier = {}
+                for caller, tgt, rel in rows:
                     if caller not in visited:
                         visited.add(caller)
-                        new_path = [caller] + path
-                        upstream.append({"symbol": caller, "depth": depth + 1, "path": new_path})
-                        queue.append((caller, depth + 1, new_path))
+                        new_path = [caller] + current_frontier[tgt]
+                        upstream.append({"symbol": caller, "depth": depth + 1, "path": new_path, "relation": rel})
+                        next_frontier[caller] = new_path
+                current_frontier = next_frontier
 
-            queue = [(symbol, 0, [symbol])]
+            # Downstream BFS (callees)
             visited = {symbol}
-            while queue:
-                curr, depth, path = queue.pop(0)
-                if depth >= max_depth:
-                    continue
-                callees = conn.execute("SELECT target FROM edges WHERE source = ?", (curr,)).fetchall()
-                for (callee,) in callees:
+            current_frontier = {symbol: [symbol]}
+            for depth in range(max_depth):
+                if not current_frontier:
+                    break
+                nodes = list(current_frontier.keys())
+                rows = conn.execute(
+                    "SELECT target, source, relation FROM edges WHERE source IN (SELECT UNNEST(?::VARCHAR[]))",
+                    (nodes,)
+                ).fetchall()
+                next_frontier = {}
+                for callee, src, rel in rows:
                     if callee not in visited:
                         visited.add(callee)
-                        new_path = path + [callee]
-                        downstream.append({"symbol": callee, "depth": depth + 1, "path": new_path})
-                        queue.append((callee, depth + 1, new_path))
+                        new_path = current_frontier[src] + [callee]
+                        downstream.append({"symbol": callee, "depth": depth + 1, "path": new_path, "relation": rel})
+                        next_frontier[callee] = new_path
+                current_frontier = next_frontier
 
         return {"upstream": upstream, "downstream": downstream}
 
@@ -146,3 +159,21 @@ class EdgesRepository(BaseRepository):
                 "UPDATE edges SET weight = ? WHERE source = ? AND target = ? AND relation = ?",
                 weight_updates
             )
+
+    def get_dependent_files(self, filepaths: List[str]) -> List[str]:
+        """Find all files that call symbols defined in the given files using a single join query."""
+        if not filepaths:
+            return []
+        with self.db_conn.session() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT s_caller.filepath
+                FROM symbols s_def
+                JOIN edges e ON e.target = s_def.symbol
+                JOIN symbols s_caller ON e.source = s_caller.symbol
+                WHERE s_def.filepath IN (SELECT UNNEST(?::VARCHAR[]))
+                  AND s_caller.filepath IS NOT NULL
+                """,
+                (filepaths,)
+            ).fetchall()
+            return [r[0] for r in rows if r[0]]

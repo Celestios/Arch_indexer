@@ -323,6 +323,67 @@ The validated workspace configuration uses the following mapping:
 """
 
 
+def sync_rules_to_db(repository: Repository, config: dict):
+    """Sync all architectural rules from config to compliance_rules table."""
+    if not isinstance(config, dict):
+        return
+
+    for prefix, prefix_conf in config.items():
+        if not isinstance(prefix_conf, dict):
+            continue
+
+        # Top-level prefix rules
+        for rule in prefix_conf.get("rules", []):
+            if not isinstance(rule, dict):
+                continue
+            rule_type = rule.get("rule_type", "dependency_check")
+            severity = rule.get("severity", "Error")
+            if rule_type == "package_restriction":
+                source = rule.get("source", "*")
+                msg = rule.get("message", f"Package restriction: {source} cannot depend on blocklist")
+                rule_id = f"{prefix}_pkg_{source}".lower().replace("/", "_").replace(".", "_")
+                repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+            elif rule_type == "naming_convention":
+                classification = rule.get("classification", "*")
+                msg = rule.get("message", f"Naming convention for {classification}")
+                rule_id = f"{prefix}_naming_{classification}".lower().replace("/", "_").replace(".", "_")
+                repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+            else:
+                source = rule.get("source", "*")
+                target = rule.get("target", "*")
+                msg = rule.get("message", f"Dependency violation: {source} -> {target}")
+                rule_id = f"{prefix}_{source}_{target}".lower().replace("/", "_").replace(".", "_")
+                repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+
+        # Field-level rules
+        auto_fields = prefix_conf.get("automatic_fields", {})
+        for field_name, field_conf in auto_fields.items():
+            if not isinstance(field_conf, dict):
+                continue
+            handler = field_conf.get("handler", "dependency_check")
+            for rule in field_conf.get("rules", []):
+                if not isinstance(rule, dict):
+                    continue
+                rule_type = rule.get("rule_type", handler)
+                severity = rule.get("severity", "Error")
+                if rule_type == "package_restriction":
+                    source = rule.get("source", "*")
+                    msg = rule.get("message", f"Package restriction: {source} cannot depend on blocklist")
+                    rule_id = f"{prefix}_{field_name}_pkg_{source}".lower().replace("/", "_").replace(".", "_")
+                    repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+                elif rule_type == "naming_convention":
+                    classification = rule.get("classification", "*")
+                    msg = rule.get("message", f"Naming convention for {classification}")
+                    rule_id = f"{prefix}_{field_name}_naming_{classification}".lower().replace("/", "_").replace(".", "_")
+                    repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+                else:
+                    source = rule.get("source", "*")
+                    target = rule.get("target", "*")
+                    msg = rule.get("message", f"Dependency violation: {source} -> {target}")
+                    rule_id = f"{prefix}_{field_name}_{source}_{target}".lower().replace("/", "_").replace(".", "_")
+                    repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+
+
 def initialize_workspace(project_root: Path) -> Path:
     """
     Initializes the workspace: creates output folders, deploys a default config.json,
@@ -366,36 +427,29 @@ def initialize_workspace(project_root: Path) -> Path:
 
     try:
         db_conn.get_connection()
-        db_conn.close()
+
+        # 3. Read config.json and sync compliance rules to the database
+        print("Syncing architectural rules to compliance catalog...")
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                config = json.load(f)
+
+            sync_rules_to_db(repository, config)
+            print("Architectural compliance rules successfully synchronized.")
+        except Exception as e:
+            print(f"Warning: Failed to synchronize compliance rules from config.json: {e}", file=sys.stderr)
+
+        # 4. Mine historical git co-change coupling
+        try:
+            from change_tracker.git_coupling import GitCouplingMiner
+            pairs_count = GitCouplingMiner.mine_git_co_changes(project_root, repository)
+            if pairs_count > 0:
+                print(f"Mined {pairs_count} historical git co-change relationships.")
+        except Exception:
+            pass
     except Exception as e:
         print(f"Failed to initialize database schema: {e}", file=sys.stderr)
         raise e
-
-    # 3. Read config.json and sync compliance rules to the database
-    print("Syncing architectural rules to compliance catalog...")
-    try:
-        with open(config_file, "r", encoding="utf-8") as f:
-            config = json.load(f)
-
-        for prefix, prefix_conf in config.items():
-            if not isinstance(prefix_conf, dict):
-                continue
-            auto_fields = prefix_conf.get("automatic_fields", {})
-            for field_name, field_conf in auto_fields.items():
-                if field_conf.get("handler") == "dependency_check":
-                    rules = field_conf.get("rules", [])
-                    for rule in rules:
-                        source = rule.get("source")
-                        target = rule.get("target")
-                        msg = rule.get("message", f"Dependency violation: {source} -> {target}")
-                        severity = rule.get("severity", "Error")
-
-                        rule_id = f"{prefix}_{field_name}_{source}_{target}".lower().replace("/", "_").replace(".", "_")
-                        repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
-
-        print("Architectural compliance rules successfully synchronized.")
-    except Exception as e:
-        print(f"Warning: Failed to synchronize compliance rules from config.json: {e}", file=sys.stderr)
     finally:
         db_conn.close()
 

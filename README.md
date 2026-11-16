@@ -1,5 +1,7 @@
 # Arch-mcp
 
+[![Keep the Why](https://keepthewhy.com/assets/badge.svg)](https://keepthewhy.com)
+
 **Arch-mcp** is an Agent-Native Code Intelligence and Compliance Engine. Running as a Model Context Protocol (MCP) server, it empowers AI coding agents to navigate, query, audit, and enforce architectural rules on codebases with compiler-level precision.
 
 It integrates:

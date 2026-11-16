@@ -37,6 +37,16 @@ def handle_context(filepaths, repository) -> str:
                 symbol_to_lines[sym_name] = (start_line, effective_end)
                 symbol_to_lines[demangle_scip_symbol(sym_name)] = (start_line, effective_end)
 
-        out_md.append(format_context_results(fp, symbols, symbol_to_lines))
+        res_md = format_context_results(fp, symbols, symbol_to_lines)
+        file_diags = repository.symbols.get_diagnostics_for_file(fp)
+        if file_diags:
+            diag_lines = ["\n### Compiler & Analyzer Diagnostics", "| Symbol | Line:Col | Severity | Code | Message |", "| :--- | :--- | :--- | :--- | :--- |"]
+            for d in file_diags:
+                s_name = demangle_scip_symbol(d['symbol']) if d.get('symbol') else "-"
+                code_str = f"`{d['code']}`" if d.get("code") else ""
+                diag_lines.append(f"| `{s_name}` | L{d['line']}:{d['col']} | `{d['severity']}` | {code_str} | {d['message']} |")
+            res_md += "\n" + "\n".join(diag_lines) + "\n"
+
+        out_md.append(res_md)
 
     return "\n\n---\n\n".join(out_md)
