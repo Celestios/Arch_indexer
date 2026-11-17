@@ -8,6 +8,7 @@ from db.connection import DbConnection
 from db.repository import Repository
 from engines.registry import LanguageRegistry
 from engines.scip_wrapper import ScipWrapper
+from engines.treesitter import TreesitterEngine
 from change_tracker.tracker import ChangeTracker
 from auditor.analyzer import Auditor
 from engines.ffi_linker import FfiLinker
@@ -110,6 +111,25 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
             last_trigger = time.monotonic()
             pending = True
             changed_files.add(path)
+
+            # --- Tier 1: Immediate Tree-sitter AST Sync (< 2ms) ---
+            if path.exists() and path.is_file():
+                t0 = time.perf_counter()
+                try:
+                    rel_fp = str(path.resolve().relative_to(project_root)).replace("\\", "/")
+                except ValueError:
+                    rel_fp = str(path).replace("\\", "/")
+
+                try:
+                    db_conn_tier1 = DbConnection(db_path)
+                    repo_tier1 = Repository(db_conn_tier1)
+                    decls = TreesitterEngine.sync_file_to_db(repo_tier1, path)
+                    db_conn_tier1.close()
+                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                    if decls:
+                        print(f"[arch watch] [AST Tier-1] Synced {len(decls)} symbols from {rel_fp} ({elapsed_ms:.1f}ms)")
+                except Exception as ast_err:
+                    print(f"[arch watch] [AST Tier-1] Warning syncing {rel_fp}: {ast_err}", file=sys.stderr)
 
     handler = Handler()
     observer = Observer()

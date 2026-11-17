@@ -89,25 +89,25 @@ def normalize_range(occ: Any, use_enclosing: bool = False) -> Optional[tuple[int
     Supports legacy occ.range / occ.enclosing_range as well as modern
     single_line_range / multi_line_range typed_range oneof fields.
     """
+    has_field = getattr(occ, "HasField", None)
+
     if use_enclosing:
-        sl_enc = getattr(occ, "single_line_enclosing_range", None)
-        if sl_enc is not None:
-            l = getattr(sl_enc, "line", None)
-            sc = getattr(sl_enc, "start_character", None)
-            ec = getattr(sl_enc, "end_character", None)
-            if _is_int(l) and _is_int(sc) and _is_int(ec):
-                return (l, sc, l, ec)
+        if has_field:
+            if occ.HasField("single_line_enclosing_range"):
+                sl = occ.single_line_enclosing_range
+                return (sl.line, sl.start_character, sl.line, sl.end_character)
+            if occ.HasField("multi_line_enclosing_range"):
+                ml = occ.multi_line_enclosing_range
+                return (ml.start_line, ml.start_character, ml.end_line, ml.end_character)
+        elif isinstance(occ, dict):
+            if occ.get("single_line_enclosing_range"):
+                sl = occ["single_line_enclosing_range"]
+                return (sl["line"], sl["start_character"], sl["line"], sl["end_character"])
+            if occ.get("multi_line_enclosing_range"):
+                ml = occ["multi_line_enclosing_range"]
+                return (ml["start_line"], ml["start_character"], ml["end_line"], ml["end_character"])
 
-        ml_enc = getattr(occ, "multi_line_enclosing_range", None)
-        if ml_enc is not None:
-            sl = getattr(ml_enc, "start_line", None)
-            sc = getattr(ml_enc, "start_character", None)
-            el = getattr(ml_enc, "end_line", None)
-            ec = getattr(ml_enc, "end_character", None)
-            if _is_int(sl) and _is_int(sc) and _is_int(el) and _is_int(ec):
-                return (sl, sc, el, ec)
-
-        enc = getattr(occ, "enclosing_range", None)
+        enc = getattr(occ, "enclosing_range", None) if not isinstance(occ, dict) else occ.get("enclosing_range")
         if enc is not None:
             try:
                 if len(enc) == 3 and all(_is_int(x) for x in enc):
@@ -117,24 +117,22 @@ def normalize_range(occ: Any, use_enclosing: bool = False) -> Optional[tuple[int
             except (TypeError, IndexError):
                 pass
 
-    sl = getattr(occ, "single_line_range", None)
-    if sl is not None:
-        l = getattr(sl, "line", None)
-        sc = getattr(sl, "start_character", None)
-        ec = getattr(sl, "end_character", None)
-        if _is_int(l) and _is_int(sc) and _is_int(ec):
-            return (l, sc, l, ec)
+    if has_field:
+        if occ.HasField("single_line_range"):
+            sl = occ.single_line_range
+            return (sl.line, sl.start_character, sl.line, sl.end_character)
+        if occ.HasField("multi_line_range"):
+            ml = occ.multi_line_range
+            return (ml.start_line, ml.start_character, ml.end_line, ml.end_character)
+    elif isinstance(occ, dict):
+        if occ.get("single_line_range"):
+            sl = occ["single_line_range"]
+            return (sl["line"], sl["start_character"], sl["line"], sl["end_character"])
+        if occ.get("multi_line_range"):
+            ml = occ["multi_line_range"]
+            return (ml["start_line"], ml["start_character"], ml["end_line"], ml["end_character"])
 
-    ml = getattr(occ, "multi_line_range", None)
-    if ml is not None:
-        sl_l = getattr(ml, "start_line", None)
-        sc = getattr(ml, "start_character", None)
-        el = getattr(ml, "end_line", None)
-        ec = getattr(ml, "end_character", None)
-        if _is_int(sl_l) and _is_int(sc) and _is_int(el) and _is_int(ec):
-            return (sl_l, sc, el, ec)
-
-    r = getattr(occ, "range", None)
+    r = getattr(occ, "range", None) if not isinstance(occ, dict) else occ.get("range")
     if r is not None:
         try:
             if len(r) == 3 and all(_is_int(x) for x in r):

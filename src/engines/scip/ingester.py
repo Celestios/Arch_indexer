@@ -160,15 +160,18 @@ class IndexIngester:
             return
 
         # 2. Ingest symbols (only changed files + all external symbols)
-        changed_set = set(changed_files)
-        filtered_symbols = {k: v for k, v in parsed_data["symbols"].items()
-                           if v["filepath"] is None or v["filepath"] in changed_set}
+        changed_set = {fp.replace("\\", "/") for fp in changed_files}
+        filtered_symbols = {
+            k: {**v, "filepath": v["filepath"].replace("\\", "/") if v.get("filepath") else None}
+            for k, v in parsed_data["symbols"].items()
+            if v.get("filepath") is None or v["filepath"].replace("\\", "/") in changed_set
+        }
         total_symbols = len(filtered_symbols)
         print(f"[SCIP Ingest] Ingesting {total_symbols} symbols from {len(changed_files)} changed files...")
 
         existing_symbols = {}
         if changed_files:
-            existing_symbols = repository.symbols.get_symbols_by_filepaths(changed_files)
+            existing_symbols = repository.symbols.get_symbols_by_filepaths(list(changed_set))
 
         # 1b. Delete old edges, symbols, and occurrences for changed files before re-ingesting.
         # Order matters: edges first, then occurrences, then symbols.
@@ -193,28 +196,37 @@ class IndexIngester:
                     )
 
         from utils.helpers import demangle_scip_symbol
-        symbols_to_ingest = [
-            {
-                "symbol": sym["symbol"],
-                "clean_symbol": demangle_scip_symbol(sym["symbol"]),
-                "filepath": sym["filepath"],
-                "kind": sym["kind"],
-                "signature": sym["signature"],
-                "docstring": sym["docstring"],
-                "body_hash": sym["body_hash"],
-                "parent_symbol": sym.get("parent_symbol"),
-                "code_block": sym.get("code_block"),
-            }
-            for sym_id, sym in filtered_symbols.items()
-            if sym_id not in existing_symbols or (
-                existing_symbols[sym_id]["body_hash"] != sym["body_hash"]
-                or existing_symbols[sym_id]["kind"] != sym["kind"]
-                or existing_symbols[sym_id]["signature"] != sym.get("signature")
-                or existing_symbols[sym_id]["docstring"] != sym["docstring"]
-                or existing_symbols[sym_id].get("parent_symbol") != sym.get("parent_symbol")
-                or existing_symbols[sym_id].get("code_block") != sym.get("code_block")
-            )
-        ]
+        symbols_to_ingest = []
+        for sym_id, sym in filtered_symbols.items():
+            existing = existing_symbols.get(sym_id)
+            # If existing symbol has signature/docstring from treesitter, preserve it
+            sig = sym.get("signature")
+            doc = sym.get("docstring")
+            if existing:
+                if (not sig or not str(sig).strip()) and existing.get("signature"):
+                    sig = existing["signature"]
+                if (not doc or not str(doc).strip()) and existing.get("docstring"):
+                    doc = existing["docstring"]
+
+            if not existing or (
+                existing.get("body_hash") != sym.get("body_hash")
+                or existing.get("kind") != sym.get("kind")
+                or (sig and existing.get("signature") != sig)
+                or (doc and existing.get("docstring") != doc)
+                or existing.get("parent_symbol") != sym.get("parent_symbol")
+                or existing.get("code_block") != sym.get("code_block")
+            ):
+                symbols_to_ingest.append({
+                    "symbol": sym["symbol"],
+                    "clean_symbol": demangle_scip_symbol(sym["symbol"]),
+                    "filepath": sym["filepath"],
+                    "kind": sym["kind"],
+                    "signature": sig,
+                    "docstring": doc,
+                    "body_hash": sym["body_hash"],
+                    "parent_symbol": sym.get("parent_symbol"),
+                    "code_block": sym.get("code_block"),
+                })
 
         skipped = total_symbols - len(symbols_to_ingest)
         if skipped > 0:
@@ -227,8 +239,11 @@ class IndexIngester:
             print_progress(min(i + sym_chunk, len(symbols_to_ingest)), len(symbols_to_ingest), prefix="[SCIP Ingest] Symbols DB")
 
         # 3. Ingest occurrences (only changed files)
-        filtered_occurrences = [occ for occ in parsed_data["occurrences"]
-                                if occ["filepath"] and occ["filepath"] in changed_set]
+        filtered_occurrences = [
+            {**occ, "filepath": occ["filepath"].replace("\\", "/")}
+            for occ in parsed_data["occurrences"]
+            if occ.get("filepath") and occ["filepath"].replace("\\", "/") in changed_set
+        ]
         total_occ = len(filtered_occurrences)
         print(f"[SCIP Ingest] Ingesting {total_occ} occurrences...")
         occ_chunk = 10_000
@@ -238,16 +253,21 @@ class IndexIngester:
             print_progress(min(i + occ_chunk, total_occ), total_occ, prefix="[SCIP Ingest] Occurrences")
 
         # 3b. Ingest diagnostics (only changed files)
-        filtered_diagnostics = [d for d in parsed_data.get("diagnostics", [])
-                                if d.get("filepath") and d["filepath"] in changed_set]
+        filtered_diagnostics = [
+            {**d, "filepath": d["filepath"].replace("\\", "/")}
+            for d in parsed_data.get("diagnostics", [])
+            if d.get("filepath") and d["filepath"].replace("\\", "/") in changed_set
+        ]
         if filtered_diagnostics:
             print(f"[SCIP Ingest] Ingesting {len(filtered_diagnostics)} diagnostics...")
             repository.symbols.add_diagnostics_bulk(filtered_diagnostics)
 
         # 4. Ingest call graph edges (only changed files)
-        filtered_edges = [e for e in parsed_data["edges"]
-                          if filtered_symbols.get(e["source"], {}).get("filepath") in changed_set
-                          or filtered_symbols.get(e["target"], {}).get("filepath") in changed_set]
+        filtered_edges = [
+            e for e in parsed_data["edges"]
+            if (filtered_symbols.get(e["source"], {}).get("filepath") or "").replace("\\", "/") in changed_set
+            or (filtered_symbols.get(e["target"], {}).get("filepath") or "").replace("\\", "/") in changed_set
+        ]
         total_edges = len(filtered_edges)
         print(f"[SCIP Ingest] Ingesting {total_edges} edges from changed files...")
 

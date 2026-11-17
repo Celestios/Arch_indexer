@@ -5,8 +5,8 @@
 **Arch-mcp** is an Agent-Native Code Intelligence and Compliance Engine. Running as a Model Context Protocol (MCP) server, it empowers AI coding agents to navigate, query, audit, and enforce architectural rules on codebases with compiler-level precision.
 
 It integrates:
+*   **Tree-sitter** for sub-millisecond AST parsing, syntax boundaries, signatures, and docstrings.
 *   **SCIP / LSIF** for compiler-level, type-resolved code navigation (definitions and references).
-*   **CodeQL** for semantic logic analysis and data-flow path tracing.
 *   **Graphify Components** for local ONNX semantic embeddings, context packaging, and incremental change tracking.
 *   **Compliance Auditor** to enforce project boundary constraints (layers, tiers, role purity) defined in `config.json`.
 
@@ -24,7 +24,7 @@ Both files are ignored in Git (using `.gitignore`).
 ## Project Structure
 *   `src/setup/`: Provisioning scripts (`initializer.py`, `downloader.py`, `indexers.py`, `embedder_bootstrap.py`).
 *   `src/db/`: Persistence layer connecting DuckDB schema to the project model.
-*   `src/engines/`: Wrappers for external tooling (SCIP, CodeQL, ONNX Embedder).
+*   `src/engines/`: Wrappers for external tooling (Tree-sitter, SCIP, ONNX Embedder).
 *   `src/agent_instructions/`: Generates custom markdown instructions for LLM agents.
 *   `src/interface/`: MCP server and command-line wrappers for agent tools.
 *   `src/change_tracker/`: Hashing logic to track code changes and hot-reload indices.
@@ -41,14 +41,7 @@ Creates `.arch/` directory, deploys default `config.json` rule templates, and co
 .venv\Scripts\python src/setup/initializer.py
 ```
 
-### 2. Setup CodeQL CLI
-Downloads, caches (`archive/codeql.zip`), and extracts the CodeQL CLI to the local workspace:
-```bash
-.venv\Scripts\python src/setup/indexers.py
-```
-*Note: Running on a script pipeline? Run with `--non-interactive` to bypass prompt questions.*
-
-### 3. Setup ONNX Embedding Model
+### 2. Setup ONNX Embedding Model
 Prompts the user interactively on console to choose their desired semantic embedding model:
 ```bash
 .venv\Scripts\python src/setup/embedder_bootstrap.py

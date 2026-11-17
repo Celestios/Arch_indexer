@@ -6,6 +6,7 @@ from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
 from engines.scip_wrapper import ScipWrapper
+from engines.treesitter import TreesitterEngine
 from engines.ffi_linker import FfiLinker
 from utils.session import get_project_root
 
@@ -156,7 +157,15 @@ def cmd_init(args):
         except Exception as e:
             print(f"Warning: Failed to sync compliance rules: {e}", file=sys.stderr)
 
-    # 5. Run SCIP indexer
+    # 5a. Run Tree-sitter AST Indexer (Stage 1: Declarations, Signatures, Docstrings, Metrics)
+    print("\n--- Running Tree-sitter AST Indexer ---")
+    try:
+        ast_sym_count = TreesitterEngine.sync_project_to_db(repository, project_root, languages=selected_languages)
+        print(f"  Tree-sitter: Extracted {ast_sym_count} symbols with exact signatures and docstrings.")
+    except Exception as ast_e:
+        print(f"  Warning: Tree-sitter extraction encountered an issue: {ast_e}", file=sys.stderr)
+
+    # 5b. Run SCIP Semantic Indexer (Stage 2: Cross-File Graph, Occurrences, Diagnostics)
     indexed_any = _run_scip_indexer(project_root, repository, selected_languages, getattr(args, 'force', False))
 
     # 6. FFI linking

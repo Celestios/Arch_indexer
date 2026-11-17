@@ -11,7 +11,7 @@ The CLI tool `arch` provides commands for workspace setup, indexing, auditing bo
 ### Commands
 
 #### `arch init`
-*   **Purpose**: The primary interactive CLI entry point. Initializes the workspace, scans source files, downloads the local ONNX embedding models, bootstraps the CodeQL CLI binary, builds indexing databases, and registers the server automatically with Claude Desktop.
+*   **Purpose**: The primary interactive CLI entry point. Initializes the workspace, scans source files, downloads the local ONNX embedding models, builds indexing databases, and registers the server automatically with Claude Desktop.
 *   **Syntax**:
     ```bash
     arch init [project_root]
@@ -19,17 +19,15 @@ The CLI tool `arch` provides commands for workspace setup, indexing, auditing bo
 *   **Arguments**:
     *   `project_root` (optional, default: `.`): Path to the target project directory.
 *   **Interactive Flow**:
-    1.  **Auto-Recognition**: Scans for Rust and Dart toolchains, reporting availability.
+    1.  **Auto-Recognition**: Scans for Rust, Dart, and Python toolchains, reporting availability.
     2.  **Embedder Model prompt**: Prompts the user to choose an ONNX model size:
         *   `[1]` `all-MiniLM-L6-v2` (~90MB download, 384 dimensions)
         *   `[2]` `bge-small-en-v1.5` (~130MB download, 384 dimensions)
         *   `[3]` `all-mpnet-base-v2` (~430MB download, 768 dimensions)
         *   `[4]` Skip model download (disables semantic search)
-    3.  **CodeQL CLI prompt**: Prompts the user to download the CodeQL CLI binary (~200MB download). Needed for tracing data flows in compiled code (e.g. Rust).
-    4.  **Real-Time Progress Bar**: Downloads the embedder model and CodeQL zip files, displaying a real-time progress bar.
-    5.  **Auto-Indexing**: Automatically executes toolchain indexers (Dart/Rust) and ingests all AST symbols and edge relationships into the DuckDB database.
-    6.  **CodeQL Database Creation**: If CodeQL CLI is ready and Rust is detected, prompts to build a CodeQL database of the project (`.arch/codeql_db`) to enable tracer queries.
-    7.  **Automated MCP Registration**: Prompts to automatically register the server configuration (virtual environment python interpreter, script arguments, and project paths) inside your Claude Desktop settings (`claude_desktop_config.json`).
+    3.  **Real-Time Progress Bar**: Downloads the embedder model files, displaying a real-time progress bar.
+    4.  **Auto-Indexing**: Automatically executes toolchain indexers and ingests all AST symbols and edge relationships into the DuckDB database.
+    5.  **Automated MCP Registration**: Prompts to automatically register the server configuration (virtual environment python interpreter, script arguments, and project paths) inside your Claude Desktop settings (`claude_desktop_config.json`).
 
 #### `arch audit`
 *   **Purpose**: Runs architectural boundary audits. Ideal for developers to integrate directly into Git pre-commit hooks or CI/CD pipelines to block commits that violate layer boundaries.

@@ -135,16 +135,7 @@ This file archives samples of outputs from the various `arch` MCP tools executed
 
 ---
 
-## 6. Data Flow Trace (`arch/trace`)
-**Tool Description**: Traces the data flow path from a source symbol to a sink symbol using CodeQL analysis.
-
-### Execution result on this workspace:
-`Error running data flow trace: CodeQL CLI is not available.`
-*(Note: Requires the CodeQL CLI to be installed and configured in the system environment path to map AST data flows.)*
-
----
-
-## 7. Dynamic Context Compilation (`arch/compile_context`)
+## 6. Dynamic Context Compilation (`arch/compile_context`)
 **Tool Description**: Compiles a deterministic markdown-formatted architectural context document starting from a focal symbol, traversing its call graph neighborhood.
 
 ### Sample Output (Focal symbol: `from_value`, Radius: 1, Resolution: signature):
@@ -190,7 +181,7 @@ Generated dynamically by the Arch-mcp Context Compiler.
 
 ---
 
-## 8. File & Symbol Details Lookup (`arch/index`)
+## 7. File & Symbol Details Lookup (`arch/index`)
 **Tool Description**: Looks up details, metadata, and relationships for a file module or code symbol.
 
 ### Sample Output (Target: `rust/src/domain/relations.rs`):

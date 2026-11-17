@@ -4,6 +4,7 @@ from typing import Any, List, Optional, Union
 
 from setup.initializer import initialize_workspace, sync_rules_to_db
 from engines.scip_wrapper import ScipWrapper
+from engines.treesitter import TreesitterEngine
 from auditor.analyzer import Auditor
 from utils.helpers import demangle_scip_symbol
 
@@ -59,6 +60,12 @@ def handle_reindex(
     languages = ScipWrapper.detect_languages(project_root)
     if not languages:
         return "## Workspace Re-indexing\n\nNo supported languages (Dart, Rust, Go, TypeScript, Java, Python) detected in workspace."
+
+    # Stage 1: Fast Tree-sitter AST Sync (Exact signatures, docstrings, metrics)
+    try:
+        TreesitterEngine.sync_project_to_db(repository, project_root, filepaths=dirty_files, languages=languages)
+    except Exception:
+        pass
 
     indexed_langs = []
     failed_langs = []

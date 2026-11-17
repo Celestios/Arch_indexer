@@ -32,6 +32,8 @@
 
 ## D
 
+- [dual-engine-architecture.md](dual-engine-architecture.md) — Dual-engine division of responsibility between Tree-sitter AST engine and SCIP semantic compiler, two-tier watcher, and range normalizer fix
+
 ## E
 
 ## F

@@ -43,8 +43,14 @@ ON CONFLICT (symbol) DO UPDATE SET
     clean_symbol = excluded.clean_symbol,
     filepath = excluded.filepath,
     kind = excluded.kind,
-    signature = excluded.signature,
-    docstring = excluded.docstring,
+    signature = CASE 
+        WHEN excluded.signature IS NOT NULL AND excluded.signature <> '' THEN excluded.signature 
+        ELSE symbols.signature 
+    END,
+    docstring = CASE 
+        WHEN excluded.docstring IS NOT NULL AND excluded.docstring <> '' THEN excluded.docstring 
+        ELSE symbols.docstring 
+    END,
     change_count = CASE WHEN symbols.body_hash <> excluded.body_hash THEN COALESCE(symbols.change_count, 1) + 1 ELSE COALESCE(symbols.change_count, 1) END,
     last_modified = CASE WHEN symbols.body_hash <> excluded.body_hash THEN now() ELSE symbols.last_modified END,
     body_hash = excluded.body_hash,
