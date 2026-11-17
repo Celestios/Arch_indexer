@@ -23,7 +23,23 @@ class DbConnection:
         """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if self._conn is None:
-            self._conn = duckdb.connect(str(self.db_path))
+            try:
+                self._conn = duckdb.connect(str(self.db_path))
+            except Exception as e:
+                # Handle known DuckDB WAL replay bug (e.g. "Failure while replaying WAL file")
+                wal_path = self.db_path.with_name(self.db_path.name + ".wal")
+                if "Failure while replaying WAL file" in str(e) and wal_path.exists():
+                    import shutil
+                    corrupt_backup = self.db_path.with_name(self.db_path.name + ".wal.corrupt")
+                    print(
+                        f"[DbConnection] DuckDB WAL replay failure encountered ({e}). "
+                        f"Quarantining {wal_path.name} to {corrupt_backup.name}...",
+                        file=sys.stderr
+                    )
+                    shutil.move(wal_path, corrupt_backup)
+                    self._conn = duckdb.connect(str(self.db_path))
+                else:
+                    raise
             
             # Ensure schema is applied
             if not self._initialized:

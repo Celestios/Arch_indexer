@@ -33,6 +33,7 @@
 ## D
 
 - [dual-engine-architecture.md](dual-engine-architecture.md) — Dual-engine division of responsibility between Tree-sitter AST engine and SCIP semantic compiler, two-tier watcher, and range normalizer fix
+- [duckdb-resilience.md](duckdb-resilience.md) — Automatic quarantine and recovery for unreplayable DuckDB WAL assertion failures
 
 ## E
 
@@ -49,6 +50,8 @@
 ## K
 
 ## L
+
+- [lookup-output-design.md](lookup-output-design.md) — Unified references and call graph table with directional flow and target column elimination in symbol lookup
 
 ## M
 
