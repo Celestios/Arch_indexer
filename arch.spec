@@ -9,6 +9,7 @@ a = Analysis(
         ('src/db/schema.sql', 'src/db'),
         ('src/engines/queries/*', 'engines/queries'),
         ('src/engines/dart_analyzer/helper', 'engines/dart_analyzer/helper'),
+        ('src/graph_builder/circuit_config.json', 'src/graph_builder'),
     ],
     hiddenimports=[
         'uuid', 'mcp', 'mcp.server.fastmcp', 'mcp.server.fastmcp.server',

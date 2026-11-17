@@ -120,7 +120,7 @@ def format_lookup_symbol(
     edges: List[tuple],
 ) -> str:
     """Format lookup results for a code symbol as markdown."""
-    clean_symbol = demangle_scip_symbol(exact_symbol[0])
+    clean_symbol = exact_symbol[10] if len(exact_symbol) > 10 and exact_symbol[10] else demangle_scip_symbol(exact_symbol[0])
     badge = ""
     if len(exact_symbol) > 8 and exact_symbol[8]:
         badge = format_classification_badge(exact_symbol[8])

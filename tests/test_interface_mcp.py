@@ -414,3 +414,101 @@ def test_mcp_tools_database_missing(tmp_path, monkeypatch):
     assert "database not found" in mcp_server.impact("symbol").lower()
     assert "database not found" in mcp_server.compile_context("symbol").lower()
     assert "database not found" in mcp_server.audit().lower()
+    assert "database not found" in mcp_server.map().lower()
+
+
+def test_mcp_tools_map(tmp_path, monkeypatch):
+    repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
+    import src.interface.server as mcp_server
+
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO files (filepath, sha256, language, status, manual_status)
+            VALUES
+                ('src/db/connection.py', 'hash1', 'python', 'COMPLIANT', 'COMPLIANT'),
+                ('src/auditor/analyzer.py', 'hash2', 'python', 'COMPLIANT', 'COMPLIANT'),
+                ('tests/test_db.py', 'hash3', 'python', 'COMPLIANT', 'COMPLIANT')
+        """)
+        conn.execute("""
+            INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, parent_symbol)
+            VALUES
+                ('db.connection.connect', 'connect', 'src/db/connection.py', 'Function', 'connect()', null),
+                ('auditor.analyzer.Auditor', 'Auditor', 'src/auditor/analyzer.py', 'Class', 'class Auditor', null),
+                ('auditor.analyzer.Auditor.run', 'Auditor.run', 'src/auditor/analyzer.py', 'Method', 'run(self)', 'auditor.analyzer.Auditor'),
+                ('tests.test_db.test_conn', 'test_conn', 'tests/test_db.py', 'Function', 'test_conn()', null),
+                ('builtins.str', 'str', null, 'Class', 'class str', null)
+        """)
+        conn.execute("""
+            INSERT INTO edges (source, target, relation, weight)
+            VALUES
+                ('auditor.analyzer.Auditor.run', 'db.connection.connect', 'Calls', 5.0),
+                ('tests.test_db.test_conn', 'db.connection.connect', 'Calls', 2.0),
+                ('auditor.analyzer.Auditor.run', 'builtins.str', 'Calls', 10.0)
+        """)
+
+    # 1. Default map call (folder level at root, external excluded)
+    res_default = mcp_server.map()
+    assert "## Repository Architectural Blueprint Map" in res_default
+    assert "### Project Totals" in res_default
+    assert "`src/`" in res_default
+    assert "`tests/`" in res_default
+    # External excluded by default
+    assert "`external/`" not in res_default
+    assert "`tests/` ──[2 calls]──> `src/`" in res_default or "`tests/` ──[2 calls]──>" in res_default
+
+    # 2. Scoped map call on src/ at tree_depth=1
+    res_src = mcp_server.map(path="src", tree_depth=1, detail_level="folder")
+    assert "`src/db/`" in res_src
+    assert "`src/auditor/`" in res_src
+    assert "`tests/`" not in res_src
+    assert "`src/auditor/` ──[5 calls]──> `src/db/`" in res_src
+
+    # 3. File detail level on src/auditor
+    res_file = mcp_server.map(path="src/auditor", detail_level="file")
+    assert "`src/auditor/analyzer.py`" in res_file
+
+    # 4. Multi-target query
+    res_multi = mcp_server.map(targets=[
+        {"path": "src", "tree_depth": 1, "detail_level": "folder"},
+        {"path": "tests", "tree_depth": 0, "detail_level": "folder"}
+    ])
+    assert "`src/db/`" in res_multi
+    assert "`src/auditor/`" in res_multi
+    assert "`tests/`" in res_multi
+    assert "`src/auditor/` ──[5 calls]──> `src/db/`" in res_multi
+
+    # 5. External inclusion test
+    res_ext = mcp_server.map(include_external=True)
+    assert "`external/`" in res_ext
+    assert "builtins.str" in res_ext or "str" in res_ext
+
+
+def test_run_server_sse(monkeypatch):
+    import src.interface.server as mcp_server
+    called = {}
+
+    def mock_run(*args, **kwargs):
+        called["args"] = args
+        called["kwargs"] = kwargs
+
+    monkeypatch.setattr(mcp_server.mcp, "run", mock_run)
+    mcp_server.run_server(port=8099)
+
+    assert mcp_server.mcp.settings.port == 8099
+    assert called["kwargs"].get("transport") == "sse"
+
+
+def test_run_server_stdio(monkeypatch):
+    import src.interface.server as mcp_server
+    called = {}
+
+    def mock_run(*args, **kwargs):
+        called["args"] = args
+        called["kwargs"] = kwargs
+
+    monkeypatch.setattr(mcp_server.mcp, "run", mock_run)
+    mcp_server.run_server(port=0)
+
+    assert "transport" not in called["kwargs"]
+

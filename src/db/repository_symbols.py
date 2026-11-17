@@ -16,18 +16,22 @@ class SymbolsRepository(BaseRepository):
         body_hash: Optional[str],
         connection_weight: int = 0,
         parent_symbol: Optional[str] = None,
-        code_block: Optional[str] = None
+        code_block: Optional[str] = None,
+        clean_symbol: Optional[str] = None,
     ):
         """Inserts or replaces a code symbol declaration in the database."""
+        if clean_symbol is None and symbol:
+            from utils.helpers import demangle_scip_symbol
+            clean_symbol = demangle_scip_symbol(symbol)
         with self.db_conn.session() as conn:
-            conn.execute(UPSERT_SYMBOL_SQL, (symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, code_block))
+            conn.execute(UPSERT_SYMBOL_SQL, (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, code_block))
 
     def get_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Retrieves details of a registered symbol declaration."""
         with self.db_conn.session() as conn:
             res = conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count, code_block FROM symbols WHERE symbol = ?",
-                (symbol,)
+                "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count, code_block, clean_symbol FROM symbols WHERE symbol = ? OR clean_symbol = ?",
+                (symbol, symbol)
             ).fetchone()
             if res:
                 return {
@@ -41,7 +45,8 @@ class SymbolsRepository(BaseRepository):
                     "parent_symbol": res[7],
                     "classification": res[8] or "{}",
                     "change_count": res[9] if len(res) > 9 and res[9] is not None else 1,
-                    "code_block": res[10] if len(res) > 10 else None
+                    "code_block": res[10] if len(res) > 10 else None,
+                    "clean_symbol": res[11] if len(res) > 11 and res[11] else res[0]
                 }
         return None
 
@@ -54,7 +59,7 @@ class SymbolsRepository(BaseRepository):
         placeholders = ",".join("?" for _ in fp_norms)
         with self.db_conn.session() as conn:
             rows = conn.execute(
-                f"""SELECT symbol, kind, body_hash, signature, docstring, filepath, parent_symbol, classification, code_block FROM symbols
+                f"""SELECT symbol, kind, body_hash, signature, docstring, filepath, parent_symbol, classification, code_block, clean_symbol FROM symbols
                     WHERE replace(filepath, '\\', '/') IN ({placeholders})""",
                 fp_norms
             ).fetchall()
@@ -67,7 +72,8 @@ class SymbolsRepository(BaseRepository):
                     "filepath": r[5],
                     "parent_symbol": r[6],
                     "classification": r[7] or "{}",
-                    "code_block": r[8] if len(r) > 8 else None
+                    "code_block": r[8] if len(r) > 8 else None,
+                    "clean_symbol": r[9] if len(r) > 9 and r[9] else r[0]
                 }
         return result
 
@@ -114,9 +120,11 @@ class SymbolsRepository(BaseRepository):
         """Bulk upserts a list of symbols in a single transaction."""
         if not symbols_list:
             return
+        from utils.helpers import demangle_scip_symbol
         data = [
             (
                 sym["symbol"],
+                sym.get("clean_symbol") or demangle_scip_symbol(sym["symbol"]),
                 sym["filepath"],
                 sym["kind"],
                 sym["signature"],
@@ -373,27 +381,29 @@ class SymbolsRepository(BaseRepository):
             )
 
     def search_symbols_keyword(self, query: str, limit: int = 5):
-        """Search symbols by keyword in name."""
+        """Search symbols by keyword in symbol or clean_symbol."""
+        q = f"%{query.lower()}%"
         with self.db_conn.session() as conn:
             return conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE LOWER(symbol) LIKE ? LIMIT ?",
-                (f"%{query.lower()}%", limit)
+                "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE LOWER(symbol) LIKE ? OR LOWER(COALESCE(clean_symbol, '')) LIKE ? LIMIT ?",
+                (q, q, limit)
             ).fetchall()
 
     def search_symbols_like(self, query: str, limit: int = 10):
-        """Search symbols by partial name match."""
+        """Search symbols by partial name match in symbol or clean_symbol."""
+        q = f"%{query}%"
         with self.db_conn.session() as conn:
             return conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE symbol LIKE ? LIMIT ?",
-                (f"%{query}%", limit)
+                "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE symbol LIKE ? OR clean_symbol LIKE ? LIMIT ?",
+                (q, q, limit)
             ).fetchall()
 
     def get_symbol_exact(self, symbol: str):
-        """Get exact symbol match."""
+        """Get exact symbol match (by symbol or clean_symbol)."""
         with self.db_conn.session() as conn:
             return conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count FROM symbols WHERE symbol = ?",
-                (symbol,)
+                "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count, clean_symbol FROM symbols WHERE symbol = ? OR clean_symbol = ?",
+                (symbol, symbol)
             ).fetchone()
 
     def update_symbols_classification_bulk(self, classifications: Dict[str, Dict[str, Any]]):
@@ -447,7 +457,7 @@ class SymbolsRepository(BaseRepository):
         """Returns all symbols with full metadata."""
         with self.db_conn.session() as conn:
             res = conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring FROM symbols"
+                "SELECT symbol, filepath, kind, signature, docstring, clean_symbol FROM symbols"
             ).fetchall()
             return [
                 {
@@ -455,7 +465,8 @@ class SymbolsRepository(BaseRepository):
                     "filepath": r[1],
                     "kind": r[2],
                     "signature": r[3],
-                    "docstring": r[4]
+                    "docstring": r[4],
+                    "clean_symbol": r[5] if len(r) > 5 and r[5] else r[0]
                 }
                 for r in res
             ]

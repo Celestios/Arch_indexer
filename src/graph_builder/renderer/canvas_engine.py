@@ -997,7 +997,7 @@ CANVAS_ENGINE_JS_TEMPLATE = """
       const code = getString(node.codeIdx);
       const filePath = getString(node.fileIdx) || 'unknown';
       const startLine = node.line > 0 ? node.line : 1;
-      const endLine = node.endLine > 0 ? node.endLine : (startLine + (code ? code.split('\n').length - 1 : 0));
+      const endLine = node.endLine > 0 ? node.endLine : (startLine + (code ? code.split(/\\r?\\n/).length - 1 : 0));
 
       typeSpan.textContent = (NODE_TYPES[node.type] || 'SYMBOL').toUpperCase();
       typeSpan.style.color = NODE_COLORS[node.type] || '#38bdf8';
@@ -1006,7 +1006,7 @@ CANVAS_ENGINE_JS_TEMPLATE = """
 
       if (code) {
         codeText.textContent = code;
-        const lineCount = code.split('\n').length;
+        const lineCount = code.split(/\\r?\\n/).length;
         let gutterHtml = '';
         for (let i = 0; i < lineCount; i++) {
           gutterHtml += `<div>${startLine + i}</div>`;

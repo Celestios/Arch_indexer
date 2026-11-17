@@ -32,13 +32,16 @@ class IndexIngester:
         from change_tracker.tracker import ChangeTracker
 
         # 1. Register files first
-        files_to_register = set(parsed_data.get("files", []))
+        files_to_register = set()
+        for f in parsed_data.get("files", []):
+            if f:
+                files_to_register.add(f.replace("\\", "/"))
         for occ in parsed_data["occurrences"]:
-            if occ["filepath"]:
-                files_to_register.add(occ["filepath"])
+            if occ.get("filepath"):
+                files_to_register.add(occ["filepath"].replace("\\", "/"))
         for sym in parsed_data["symbols"].values():
-            if sym["filepath"]:
-                files_to_register.add(sym["filepath"])
+            if sym.get("filepath"):
+                files_to_register.add(sym["filepath"].replace("\\", "/"))
 
         file_list = list(files_to_register)
 
@@ -170,8 +173,10 @@ class IndexIngester:
         # 1b. Delete old edges, symbols, and occurrences for changed files before re-ingesting.
         # Order matters: edges first, then occurrences, then symbols.
         if force:
-            from db.cascade import CascadeCleanupService
-            CascadeCleanupService(repository).delete_files_bulk(changed_files)
+            repository.edges.delete_edges_for_files(changed_files)
+            repository.symbols.delete_occurrences_for_files(changed_files)
+            repository.symbols.delete_diagnostics_for_files(changed_files)
+            repository.symbols.delete_symbols_for_files(changed_files)
         elif changed_files:
             repository.edges.delete_edges_for_files(changed_files)
             repository.symbols.delete_occurrences_for_files(changed_files)
@@ -187,9 +192,11 @@ class IndexIngester:
                         (removed_symbols,)
                     )
 
+        from utils.helpers import demangle_scip_symbol
         symbols_to_ingest = [
             {
                 "symbol": sym["symbol"],
+                "clean_symbol": demangle_scip_symbol(sym["symbol"]),
                 "filepath": sym["filepath"],
                 "kind": sym["kind"],
                 "signature": sym["signature"],

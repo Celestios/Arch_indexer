@@ -4,6 +4,7 @@ Combines CSS styles (`styles.py`), Canvas JS engine (`canvas_engine.py`),
 and compact serialized graph data into a standalone HTML file.
 """
 
+import html
 import json
 from typing import Dict, Any
 from .styles import PCB_CSS
@@ -20,6 +21,14 @@ class HtmlGraphGenerator:
 
     def generate_html(self, compact_data: Dict[str, Any], title: str = "Arch PCB Circuit Map") -> str:
         json_data = json.dumps(compact_data, separators=(",", ":"), ensure_ascii=False)
+        # Safely escape characters that could terminate the <script> block or cause syntax errors
+        json_data = (
+            json_data.replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
         stats = compact_data.get("stats", {})
         total_nodes = stats.get("total_nodes", len(compact_data.get("nodes", [])))
         total_edges = stats.get("total_edges", len(compact_data.get("links", [])))
@@ -27,12 +36,14 @@ class HtmlGraphGenerator:
 
         script_body = CANVAS_ENGINE_JS_TEMPLATE.replace("__JSON_DATA__", json_data)
 
+        escaped_title = html.escape(title)
+
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{title}</title>
+  <title>{escaped_title}</title>
   <style>{PCB_CSS}</style>
 </head>
 <body>

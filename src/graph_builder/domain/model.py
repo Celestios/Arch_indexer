@@ -4,6 +4,7 @@ Constructs pure file packages, nested class/symbol hierarchies, aggregated edges
 and global hub designations without hardcoded database assumptions.
 """
 
+import os
 from typing import Dict, List, Any, Optional, Tuple
 from .types import NodeType, EdgeType, NODE_COLORS, NODE_SIZES, EDGE_COLORS
 from .entities import GraphNode, GraphEdge
@@ -144,6 +145,19 @@ class GraphModel:
         symbol_defs = reader.fetch_symbol_definitions() if hasattr(reader, "fetch_symbol_definitions") else {}
         code_extractor = CodeExtractor()
 
+        if not files:
+            unique_fps = {s["filepath"] for s in symbols if s.get("filepath")}
+            files = [
+                {
+                    "filepath": fp,
+                    "language": "python",
+                    "status": "COMPLIANT",
+                    "filename": os.path.basename(fp),
+                    "directory": os.path.dirname(fp) or ".",
+                }
+                for fp in sorted(unique_fps)
+            ]
+
         scoped_files = [f for f in files if self._matches_scope(f["filepath"])]
         scoped_file_paths = {f["filepath"] for f in scoped_files}
 
@@ -222,10 +236,14 @@ class GraphModel:
                 if code_res:
                     line, end_line, code_text = code_res
 
+            node_label = s["label"]
+            if (parent_cls_id or ntype in (NodeType.METHOD, NodeType.CONSTRUCTOR)) and "#" in node_label:
+                node_label = node_label.split("#")[-1]
+
             self.add_node(
                 GraphNode(
                     id=sid,
-                    label=s["label"],
+                    label=node_label,
                     type=ntype,
                     color=NODE_COLORS[ntype],
                     val=node_size,

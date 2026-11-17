@@ -385,3 +385,68 @@ def test_circuit_config_and_hierarchical_funnel():
     assert root_zone is not None
     assert root_zone["depth"] == 0
 
+
+def test_method_name_strips_class_prefix():
+    from graph_builder.ingestion.scip_parser import ScipParser
+
+    # SCIP python method format
+    raw_sym = "scip-python python Arch_indexer 0.1.0 `auditor.propagation`/MetadataPropagator#run_propagation()."
+    parsed = ScipParser.parse_scip_symbol(raw_sym)
+    assert parsed["label"] == "run_propagation()"
+
+    # Constructor
+    raw_init = "scip-python python Arch_indexer 0.1.0 `auditor.propagation`/MetadataPropagator#__init__()."
+    parsed_init = ScipParser.parse_scip_symbol(raw_init)
+    assert parsed_init["label"] == "__init__()"
+
+    # Property / method without ()
+    raw_prop = "scip-python python Arch_indexer 0.1.0 `auditor.propagation`/MetadataPropagator#is_active"
+    parsed_prop = ScipParser.parse_scip_symbol(raw_prop)
+    assert parsed_prop["label"] == "is_active"
+
+    # Class itself retains its name
+    raw_cls = "scip-python python Arch_indexer 0.1.0 `auditor.propagation`/MetadataPropagator#"
+    parsed_cls = ScipParser.parse_scip_symbol(raw_cls)
+    assert parsed_cls["label"] == "MetadataPropagator"
+
+
+def test_graph_command_registration():
+    import argparse
+    from commands.registry import register_all
+
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    register_all(subparsers)
+
+    assert "graph" in subparsers.choices
+    graph_parser = subparsers.choices["graph"]
+    parsed = graph_parser.parse_args(["--output", "custom.html", "--scope", "src"])
+    assert parsed.output == "custom.html"
+    assert parsed.scope == "src"
+    assert hasattr(parsed, "func")
+
+
+def test_html_generator_safe_escaping_and_script_tags():
+    """Verify that strings containing </script>, <!--, etc. do not break HTML or JavaScript."""
+    gen = HtmlGraphGenerator()
+    compact_data = {
+        "strings": [
+            "<script>alert('xss')</script>",
+            "line1\r\nline2\nline3",
+            "<!-- comment -->",
+        ],
+        "nodes": [],
+        "links": [],
+        "packages": [],
+        "stats": {"total_nodes": 0, "total_edges": 0, "packages_count": 0},
+    }
+    html = gen.generate_html(compact_data, title="<Test & Safe>")
+    # Title must be escaped
+    assert "<title>&lt;Test &amp; Safe&gt;</title>" in html
+    # Raw unescaped </script> must not appear inside the json data
+    # Only one </script> should exist in the entire HTML (the actual closing tag)
+    assert html.count("</script>") == 1
+    assert "\\u003c/script\\u003e" in html
+
+
+

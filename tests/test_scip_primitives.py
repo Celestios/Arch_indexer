@@ -89,3 +89,57 @@ def test_scip_primitives_ingestion(tmp_path):
     assert len(repo.symbols.get_diagnostics_for_file("pkg/bar.py")) == 0
 
     db_conn.close()
+
+
+def test_clean_symbol_storage_and_querying(tmp_path):
+    db_file = tmp_path / "test_clean_sym.db"
+    db_conn = DbConnection(db_file)
+    repo = Repository(db_conn)
+
+    # 1. Upsert symbol without explicit clean_symbol -> auto-computes clean_symbol
+    repo.symbols.upsert_symbol(
+        symbol="scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login().",
+        filepath="src/auth/service.py",
+        kind="Method",
+        signature="def login(username, password)",
+        docstring="Authenticates user",
+        body_hash="hash1"
+    )
+
+    # Verify stored clean_symbol
+    sym_by_raw = repo.symbols.get_symbol("scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login().")
+    assert sym_by_raw is not None
+    assert sym_by_raw["clean_symbol"] == "src.auth.service.py.AuthService.login()"
+
+    # 2. Querying by clean_symbol directly
+    sym_by_clean = repo.symbols.get_symbol("src.auth.service.py.AuthService.login()")
+    assert sym_by_clean is not None
+    assert sym_by_clean["symbol"] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
+
+    # 3. get_symbol_exact matches clean_symbol
+    exact_by_clean = repo.symbols.get_symbol_exact("src.auth.service.py.AuthService.login()")
+    assert exact_by_clean is not None
+    assert exact_by_clean[0] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
+    assert exact_by_clean[10] == "src.auth.service.py.AuthService.login()"
+
+    # 4. Search by keyword on clean_symbol
+    results_kw = repo.symbols.search_symbols_keyword("AuthService.login")
+    assert len(results_kw) == 1
+    assert results_kw[0][0] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
+
+    # 5. Bulk upsert preserves and computes clean_symbol
+    repo.symbols.upsert_symbols_bulk([
+        {
+            "symbol": "rust-analyzer cargo my_crate 0.2.0 domain/user/User#",
+            "filepath": "src/user.rs",
+            "kind": "Struct",
+            "signature": "struct User",
+            "docstring": "User entity",
+            "body_hash": "hash2"
+        }
+    ])
+    user_sym = repo.symbols.get_symbol("domain.user.User")
+    assert user_sym is not None
+    assert user_sym["clean_symbol"] == "domain.user.User"
+
+    db_conn.close()

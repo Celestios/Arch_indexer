@@ -1,18 +1,8 @@
 import os
 import sys
-from pathlib import Path
-from typing import Optional, List, Union
-
-# Setup sys.path to resolve imports from src/
-src_dir = Path(__file__).resolve().parent.parent
-if str(src_dir) not in sys.path:
-    sys.path.insert(0, str(src_dir))
-
-import os
-import sys
 import json
 from pathlib import Path
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any
 
 # Setup sys.path to resolve imports from src/
 src_dir = Path(__file__).resolve().parent.parent
@@ -28,6 +18,9 @@ from interface.tools.lookup import handle_lookup
 from interface.tools.impact import handle_impact
 from interface.tools.audit import handle_audit
 from interface.tools.compile_context import handle_compile_context
+from interface.tools.map import handle_map
+from interface.tools.reindex import handle_reindex
+from interface.tools.set_status import handle_set_status
 from interface.validators import validate_direction, validate_resolution
 
 mcp = FastMCP("arch")
@@ -295,10 +288,94 @@ def clear_pending_audits(justification: str = "Manual clear") -> str:
     return clear_pending(justification)
 
 
+@mcp.tool()
+def map(
+    targets: Optional[Union[List[Dict[str, Any]], str]] = None,
+    path: str = "",
+    tree_depth: int = 1,
+    detail_level: str = "folder",
+    include_external: bool = False,
+) -> str:
+    """
+    Returns a structured, multi-level architectural blueprint map of the repository.
+
+    Parameters:
+    - targets: Optional list of query dicts, e.g. [{"path": "src", "tree_depth": 1, "detail_level": "folder"}].
+               Allows querying multiple subtrees simultaneously.
+    - path: Starting position in the project tree ("" for repo root, "src", "tests", "lib", etc.).
+    - tree_depth: How many folder levels deep to group/aggregate (1 = immediate subfolders, 2 = sub-subfolders, 0 = flat).
+    - detail_level: Granularity level: "folder" | "file" | "class" | "symbol" (or 1..5).
+    - include_external: Whether to include third-party/built-in symbols (default: False).
+    """
+    db_path = get_db_path()
+    if not db_path.exists():
+        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
+    try:
+        repository = get_server_repository()
+        return handle_map(
+            repository,
+            targets=targets,
+            path=path,
+            tree_depth=tree_depth,
+            detail_level=detail_level,
+            include_external=include_external,
+        )
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error building architectural graph map: {e}"
+
+
+@mcp.tool()
+def set_status(filepath: str, status: str, justification: Optional[str] = None) -> str:
+    """
+    Sets manual AI logical compliance status for a file (COMPLIANT or VIOLATION_DETECTED).
+    Flagging a file as VIOLATION_DETECTED requires a justification.
+    """
+    db_path = get_db_path()
+    if not db_path.exists():
+        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
+    try:
+        repository = get_server_repository()
+        return handle_set_status(repository, get_project_root(), filepath, status, justification)
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error setting status: {e}"
+
+
+@mcp.tool()
+def reindex(filepaths: Optional[Union[List[str], str]] = None, force: bool = False) -> str:
+    """
+    Triggers an incremental (or forced full) re-indexing of workspace symbols and call edges.
+    When code files are modified or refactored, use this tool to update the code graph.
+    """
+    db_path = get_db_path()
+    if not db_path.exists():
+        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
+    try:
+        repository = get_server_repository()
+        return handle_reindex(repository, get_project_root(), filepaths=filepaths, force=force)
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error re-indexing workspace: {e}"
+
+
+@mcp.tool()
+def index(filepaths: Optional[Union[List[str], str]] = None, force: bool = False) -> str:
+    """
+    Alias for reindex. Triggers an incremental or forced re-indexing of the workspace.
+    """
+    return reindex(filepaths=filepaths, force=force)
+
+
 def run_server(port: int = 0):
     try:
         if port > 0:
-            mcp.run(transport="sse", port=port)
+            if hasattr(mcp, "settings"):
+                mcp.settings.port = port
+            mcp.run(transport="sse")
         else:
             mcp.run()
     finally:

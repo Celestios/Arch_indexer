@@ -21,7 +21,8 @@ def cmd_mcp(args):
     # Single-instance check — return existing server URL if running
     from utils.single_instance import acquire_server
     arch_dir = project_root / CONFIG_DIR_NAME
-    existing_url = acquire_server(arch_dir)
+    req_port = getattr(args, "port", 0)
+    existing_url = acquire_server(arch_dir, port=req_port)
     if existing_url:
         print(existing_url)
         sys.exit(0)
@@ -33,7 +34,7 @@ def cmd_mcp(args):
 
     from utils.single_instance import read_lock
     lock = read_lock(arch_dir)
-    port = lock.get("port", 0) if lock else args.port
+    port = lock.get("port", 0) if lock else req_port
 
     from interface.server import run_server
     run_server(port=port)

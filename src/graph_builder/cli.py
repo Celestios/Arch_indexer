@@ -1,9 +1,7 @@
 """
-CLI Runner for the Modular Electronic Circuit Board HTML Graph Builder.
-Supports centralized JSON configuration via `--config`.
+Core Runner for the Modular Electronic Circuit Board HTML Graph Builder.
 """
 
-import argparse
 import os
 import webbrowser
 from typing import Optional
@@ -91,37 +89,3 @@ def build_graph_html(
         webbrowser.open(f"file://{abs_output}")
 
     return abs_output
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Build an electronic PCB circuit diagram HTML visualizer directly from DuckDB."
-    )
-    parser.add_argument("--db", default=".arch/arch.db", help="Path to DuckDB file")
-    parser.add_argument("-o", "--output", default="circuit_board.html", help="Path for output HTML file")
-    parser.add_argument("-c", "--config", default=None, help="Path to circuit_config.json")
-    parser.add_argument("--scope", default="src", help="Filter to a directory or file prefix")
-    parser.add_argument("--include-tests", action="store_true", help="Include test files")
-    parser.add_argument("--include-occurrences", action="store_true", help="Include raw occurrence vias")
-    parser.add_argument("--include-external", action="store_true", help="Include external third-party symbols")
-    parser.add_argument("--include-parameters", action="store_true", help="Include parameter variable nodes")
-    parser.add_argument("--max-refs", type=int, default=None, help="Max reference occurrences per symbol")
-    parser.add_argument("--open", action="store_true", help="Open in default web browser upon completion")
-
-    args = parser.parse_args()
-    build_graph_html(
-        db_path=args.db,
-        output_path=args.output,
-        include_occurrences=args.include_occurrences,
-        max_refs_per_symbol=args.max_refs,
-        include_external=args.include_external,
-        exclude_tests=not args.include_tests,
-        exclude_parameters=not args.include_parameters,
-        scope=args.scope,
-        config_path=args.config,
-        open_browser=args.open,
-    )
-
-
-if __name__ == "__main__":
-    main()

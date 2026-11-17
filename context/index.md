@@ -22,6 +22,8 @@
 
 ## A
 
+- [architectural-blueprint-map.md](architectural-blueprint-map.md) — Dynamic multi-target blueprint mapping, decoupled tree depth and detail level, external symbol filtering, and table-first directional call flow
+
 ## B
 
 ## C

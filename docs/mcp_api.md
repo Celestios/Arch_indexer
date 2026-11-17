@@ -211,3 +211,45 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
 *   **Purpose**: Clears the change-tracker pending audit flags for all files in the database.
 *   **Parameters**:
     *   `justification` (string, required): Reason for clearing pending audits.
+
+### `set_status`
+*   **Purpose**: Sets manual AI logical compliance status for a file (`COMPLIANT` or `VIOLATION_DETECTED`). Flagging a file as `VIOLATION_DETECTED` requires a justification comment and registers a manual logical violation in the compliance catalog.
+*   **Parameters**:
+    *   `filepath` (string, required): Target source file path.
+    *   `status` (string, required): Manual compliance status (`COMPLIANT` or `VIOLATION_DETECTED`).
+    *   `justification` (string, optional): Justification comment (required for `VIOLATION_DETECTED`).
+
+### `map`
+*   **Purpose**: Returns a structured, multi-level architectural blueprint map: repository totals, table-based structural nodes, key hubs, and directional call dependencies. Supports dynamic and modular queries across arbitrary repository subtrees.
+*   **Parameters**:
+    *   `targets` (list of objects or JSON string, optional): List of query specs to evaluate multiple subtrees simultaneously, e.g. `[{"path": "src", "tree_depth": 1, "detail_level": "folder"}]`.
+    *   `path` (string, optional, default: `""`): Starting position in the project tree (`""` for root, or e.g. `"src"`, `"tests"`, `"packages/core"`).
+    *   `tree_depth` (integer, optional, default: `1`): How many directory levels deep to group/aggregate (`1` = immediate subfolders, `2` = sub-subfolders, `0` = flat).
+    *   `detail_level` (string or integer 1-5, optional, default: `"folder"`): Granularity level: `"folder"` (Level 1/2), `"file"` (Level 3), `"class"` (Level 4), `"symbol"` (Level 5).
+    *   `include_external` (boolean, optional, default: `False`): Whether to include standard library and 3rd-party symbols (`builtins`, etc.).
+*   **Output Format (Markdown)**:
+    ```markdown
+    ## Repository Architectural Blueprint Map
+
+    ### Project Totals
+    | Files Indexed | Symbols Registered | Dependencies (Call Graph) | Active Violations |
+    | :---: | :---: | :---: | :---: |
+    | 48 | 1637 | 1789 | 0 |
+
+    ### Architecture Nodes (`src/`, tree_depth=1, detail="folder")
+    | Module / Subsystem | Files | Symbols | Inbound | Outbound | Top Hub Symbol (Connections) |
+    | :--- | :---: | :---: | :---: | :---: | :--- |
+    | `src/db/` | 6 | 520 | 25 | 15 | `db.repository.Repository` (44) |
+    | `src/auditor/` | 8 | 316 | 2 | 6 | `auditor.analyzer.Auditor` (94) |
+
+    ### Inter-Module Call Dependencies
+    - `src/commands/` ──[8 calls]──> `src/db/`
+    - `src/auditor/` ──[6 calls]──> `src/db/`
+    ```
+
+### `reindex` / `index`
+*   **Purpose**: Triggers an incremental (or forced full) re-indexing of the workspace to update symbol tables, occurrences, call graph edges, and architectural compliance rules.
+*   **Parameters**:
+    *   `filepaths` (Union[list[str], str], optional): Target file(s) to incrementally re-index. If omitted, checks all detected languages.
+    *   `force` (boolean, optional, default: False): If True, performs a clean full re-index.
+

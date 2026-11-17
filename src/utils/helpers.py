@@ -229,8 +229,8 @@ def resolve_symbol_in_repo(repository, target: str) -> Optional[tuple]:
     with repository.db_conn.session() as conn:
         for p in patterns:
             rows = conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring, body_hash FROM symbols WHERE symbol LIKE ? LIMIT 50",
-                (p,)
+                "SELECT symbol, filepath, kind, signature, docstring, body_hash, clean_symbol FROM symbols WHERE symbol LIKE ? OR clean_symbol LIKE ? LIMIT 50",
+                (p, p)
             ).fetchall()
             if rows:
                 candidates = [
@@ -240,7 +240,7 @@ def resolve_symbol_in_repo(repository, target: str) -> Optional[tuple]:
                 ]
                 if candidates:
                     def score(c):
-                        dem = demangle_scip_symbol(c[0])
+                        dem = c[6] if len(c) > 6 and c[6] else demangle_scip_symbol(c[0])
                         dem_no_parens = dem[:-2] if dem.endswith("()") else dem
                         is_test = is_auxiliary_path(c[1])
                         exact = (dem == t or dem_no_parens == t or dem.endswith("." + t) or dem_no_parens.endswith("." + t))

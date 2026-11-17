@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS files (
 -- 2. Track symbols (classes, functions, methods, structs)
 CREATE TABLE IF NOT EXISTS symbols (
     symbol VARCHAR PRIMARY KEY,
+    clean_symbol VARCHAR,
     filepath VARCHAR, -- Nullable for external third-party library dependencies
     kind VARCHAR NOT NULL, -- Class, Struct, Function, Method, etc.
     signature TEXT,

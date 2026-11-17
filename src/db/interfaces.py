@@ -64,7 +64,8 @@ class SymbolsRepositoryInterface(Protocol):
         signature: Optional[str], docstring: Optional[str],
         body_hash: Optional[str],
         connection_weight: int = 0,
-        parent_symbol: Optional[str] = None
+        parent_symbol: Optional[str] = None,
+        clean_symbol: Optional[str] = None
     ) -> None: ...
 
     @abstractmethod

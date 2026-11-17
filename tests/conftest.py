@@ -6,16 +6,22 @@ mock_mcp = MagicMock()
 mock_fastmcp = MagicMock()
 
 # FastMCP.tool() should return a decorator that returns the original function
+class MockSettings:
+    def __init__(self):
+        self.port = 8000
+        self.host = "127.0.0.1"
+
+
 class MockFastMCP:
     def __init__(self, *args, **kwargs):
-        pass
+        self.settings = MockSettings()
 
     def tool(self):
         def decorator(func):
             return func
         return decorator
 
-    def run(self):
+    def run(self, *args, **kwargs):
         pass
 
 mock_fastmcp.FastMCP = MockFastMCP

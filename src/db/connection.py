@@ -53,6 +53,61 @@ class DbConnection:
                 pass
             self._conn = None
 
+    def compact_database(self) -> dict:
+        """
+        Compacts the DuckDB database by exporting and re-importing into a clean database file.
+        Reclaims free and dead blocks left behind by incremental deletions and re-indexing passes.
+        Returns a dictionary summarizing original size, compacted size, and saved bytes.
+        """
+        import shutil
+        import tempfile
+
+        self.close()
+        if not self.db_path.exists():
+            return {"status": "skipped", "reason": "database does not exist"}
+
+        orig_size = self.db_path.stat().st_size
+        temp_dir = Path(tempfile.mkdtemp(prefix="duckdb_compact_"))
+        export_dir = temp_dir / "export"
+        compacted_db = temp_dir / "compacted.db"
+
+        try:
+            conn = duckdb.connect(str(self.db_path), read_only=True)
+            tables = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+            orig_counts = {t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in tables}
+            conn.execute(f"EXPORT DATABASE '{export_dir.as_posix()}'")
+            conn.close()
+
+            conn_new = duckdb.connect(str(compacted_db))
+            conn_new.execute(f"IMPORT DATABASE '{export_dir.as_posix()}'")
+            new_counts = {t: conn_new.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in tables}
+            conn_new.close()
+
+            for t in tables:
+                if orig_counts[t] != new_counts[t]:
+                    raise ValueError(
+                        f"Table count mismatch during compaction for '{t}': "
+                        f"{orig_counts[t]} original vs {new_counts[t]} compacted"
+                    )
+
+            compacted_size = compacted_db.stat().st_size
+            backup_path = self.db_path.with_suffix(".db.bak")
+            shutil.copy2(self.db_path, backup_path)
+            shutil.move(compacted_db, self.db_path)
+            if backup_path.exists():
+                backup_path.unlink()
+
+            return {
+                "status": "success",
+                "orig_size": orig_size,
+                "compacted_size": compacted_size,
+                "saved_bytes": orig_size - compacted_size,
+                "saved_mb": round((orig_size - compacted_size) / (1024 * 1024), 2),
+                "ratio": round(compacted_size / orig_size, 3) if orig_size > 0 else 1.0,
+            }
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def _initialize_schema(self, conn: duckdb.DuckDBPyConnection):
         """Reads schema.sql and applies it to the database connection."""
         if getattr(sys, 'frozen', False):
@@ -70,14 +125,25 @@ class DbConnection:
             # DuckDB allows executing multiple SQL statements separated by semicolons
             # We can execute the whole schema string
             conn.execute(schema_sql)
+        except Exception as e:
+            pass
+
+        try:
+            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS parent_symbol VARCHAR;")
+            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS classification VARCHAR DEFAULT '{}';")
+            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS code_block TEXT;")
+            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS change_count INTEGER DEFAULT 1;")
+            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
+            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS clean_symbol VARCHAR;")
             try:
-                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS parent_symbol VARCHAR;")
-                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS classification VARCHAR DEFAULT '{}';")
-                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS code_block TEXT;")
-                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS change_count INTEGER DEFAULT 1;")
-                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_symbols_clean_symbol ON symbols(clean_symbol);")
             except Exception:
                 pass
+            # Backfill clean_symbol for existing rows if null
+            null_syms = conn.execute("SELECT symbol FROM symbols WHERE clean_symbol IS NULL").fetchall()
+            if null_syms:
+                from utils.helpers import demangle_scip_symbol
+                updates = [(demangle_scip_symbol(s[0]), s[0]) for s in null_syms]
+                conn.executemany("UPDATE symbols SET clean_symbol = ? WHERE symbol = ?", updates)
         except Exception as e:
-            print(f"Error initializing DuckDB schema: {e}", file=sys.stderr)
-            raise e
+            print(f"Warning during schema migration: {e}", file=sys.stderr)

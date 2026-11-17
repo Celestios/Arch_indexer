@@ -151,13 +151,15 @@ class ScipParser:
             display_name = clean_desc.rstrip("#/.")
             if clean_desc.endswith("()."):
                 base = clean_desc[:-3].rstrip("#/.")
-                segments = re.split(r"[/:]", base)
+                segments = re.split(r"[/:#]", base)
                 short_name = segments[-1] + "()"
             else:
-                segments = re.split(r"[/:]", display_name)
+                segments = re.split(r"[/:#]", display_name)
                 short_name = segments[-1] if segments else display_name
 
             short_name = re.sub(r"\.\([a-zA-Z0-9_]+\)$", "", short_name)
+            if "#" in short_name:
+                short_name = short_name.split("#")[-1]
 
             return {
                 "raw": symbol_str,

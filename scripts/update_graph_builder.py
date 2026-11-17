@@ -11,17 +11,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 TRANSMIT_FILE = BASE_DIR / "transmit (3).txt"
 
 FILES_SPEC = [
-    ("graph_builder/circuit_config.json", 24, 72, "json"),
+    ("src/graph_builder/circuit_config.json", 24, 72, "json"),
     ("circuit_config.json", 24, 72, "json"),
-    ("graph_builder/config.py", 75, 179, "py"),
-    ("graph_builder/layout/zone_classifier.py", 182, 388, "py"),
-    ("graph_builder/layout/package_sizer.py", 391, 620, "py"),
-    ("graph_builder/layout/circuit_layout.py", 623, 976, "py"),
-    ("graph_builder/routing/channel_router.py", 979, 1360, "py"),
-    ("graph_builder/serialization/compressor.py", 1363, 1507, "py"),
-    ("graph_builder/renderer/canvas_engine.py", 1511, 2462, "py"),
-    ("graph_builder/cli.py", 2466, 2592, "py"),
-    ("graph_builder/__init__.py", 2595, 2637, "py"),
+    ("src/graph_builder/config.py", 75, 179, "py"),
+    ("src/graph_builder/layout/zone_classifier.py", 182, 388, "py"),
+    ("src/graph_builder/layout/package_sizer.py", 391, 620, "py"),
+    ("src/graph_builder/layout/circuit_layout.py", 623, 976, "py"),
+    ("src/graph_builder/routing/channel_router.py", 979, 1360, "py"),
+    ("src/graph_builder/serialization/compressor.py", 1363, 1507, "py"),
+    ("src/graph_builder/renderer/canvas_engine.py", 1511, 2462, "py"),
+    ("src/graph_builder/cli.py", 2466, 2592, "py"),
+    ("src/graph_builder/__init__.py", 2595, 2637, "py"),
 ]
 
 

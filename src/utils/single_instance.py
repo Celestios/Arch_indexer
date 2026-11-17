@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -46,6 +47,8 @@ def _server_alive(url: str) -> bool:
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=2) as resp:
             return resp.status < 500
+    except urllib.error.HTTPError as e:
+        return e.code < 500
     except Exception:
         return False
 
@@ -104,7 +107,7 @@ def write_lock(arch_dir: Path, pid: int, port: int) -> Path:
     return lock_path
 
 
-def acquire_server(arch_dir: Path) -> Optional[str]:
+def acquire_server(arch_dir: Path, port: int = 0) -> Optional[str]:
     """Try to acquire a server slot.
 
     If a server is already running, returns its URL.
@@ -114,7 +117,8 @@ def acquire_server(arch_dir: Path) -> Optional[str]:
     if existing:
         return existing
 
-    port = _find_open_port()
+    if port <= 0:
+        port = _find_open_port()
     write_lock(arch_dir, os.getpid(), port)
 
     def cleanup():
