@@ -102,8 +102,8 @@ class CodeFolder:
             replacements.append((repl_start, end_byte, repl))
         else:
             if lang == "python":
-                indent = " " * (body_node.start_point.column)
-                repl = f"\n{indent}..."
+                # In tree-sitter-python, body_node starts after the newline and indentation
+                repl = "..."
                 replacements.append((start_byte, end_byte, repl))
             else:
                 # C-style braces: { ... }

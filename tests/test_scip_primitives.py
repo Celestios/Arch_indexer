@@ -27,6 +27,54 @@ def test_format_lookup_symbol_mutation_and_reads():
     assert "Reference [Test]" in output
 
 
+def test_format_lookup_symbol_unified_table():
+    exact_symbol = (
+        "db/base/BaseRepository#",
+        "src/db/base.py",
+        "Class",
+        "class BaseRepository:",
+        "Shared base class for all repository implementations.",
+        "hash123",
+        10,
+        None,
+        None,
+        0,
+        "db.base.BaseRepository"
+    )
+    occurrences = [
+        ("src/db/base.py", 5, 25, 1),
+        ("src/db/repository_compliance.py", 3, 3, 2 | 8),
+        ("src/db/repository_compliance.py", 6, 6, 2 | 8),
+        ("src/db/repository_edges.py", 4, 4, 2 | 8),
+    ]
+    edges = [
+        ("db/repository_compliance/ComplianceRepository#", "db/base/BaseRepository#", "Implements"),
+        ("db/repository_compliance/ComplianceRepository#", "db/base/BaseRepository#", "Calls"),
+        ("db/base/BaseRepository#", "db/connection/DbConnection#", "Calls"),
+    ]
+    sym_fp_map = {
+        "db/repository_compliance/ComplianceRepository#": "src/db/repository_compliance.py",
+        "db/connection/DbConnection#": "src/db/connection.py",
+    }
+    output = format_lookup_symbol(exact_symbol, occurrences, edges, symbol_filepath_map=sym_fp_map)
+
+    # 1. Unified header
+    assert "### References & Call Graph" in output
+    assert "| Location | Symbol / Scope | Relation | Role |" in output
+
+    # 2. Merged occurrences and multiple relations for ComplianceRepository
+    assert "| `src/db/repository_compliance.py:L3, L6` | `ComplianceRepository` | ← Calls, Implements | Reference [Reads] |" in output
+
+    # 3. Definition row
+    assert "| `src/db/base.py:L5-25` | `db.base.BaseRepository` | — | Definition |" in output
+
+    # 4. Outgoing edge with direction arrow
+    assert "| `src/db/connection.py` | `DbConnection` | → Calls | — |" in output
+
+    # 5. File occurrence without edges
+    assert "| `src/db/repository_edges.py:L4` | — | — | Reference [Reads] |" in output
+
+
 def test_scip_primitives_ingestion(tmp_path):
     db_file = tmp_path / "test.db"
     db_conn = DbConnection(db_file)

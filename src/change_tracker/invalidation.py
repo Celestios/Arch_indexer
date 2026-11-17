@@ -37,7 +37,8 @@ class TransitiveInvalidation:
                     if isinstance(v, dict) and "filepath" in v:
                         fp = v.get("filepath")
                         if fp:
-                            new_by_file.setdefault(fp, {})[v.get("symbol", k)] = v.get("signature")
+                            fp_norm = fp.replace("\\", "/")
+                            new_by_file.setdefault(fp_norm, {})[v.get("symbol", k)] = v.get("signature")
                     elif isinstance(v, dict):
                         new_by_file[k] = v
             elif isinstance(new_symbols, (list, set, tuple)):
@@ -45,12 +46,14 @@ class TransitiveInvalidation:
                     if isinstance(s, dict):
                         fp = s.get("filepath")
                         if fp:
-                            new_by_file.setdefault(fp, {})[s.get("symbol")] = s.get("signature")
+                            fp_norm = fp.replace("\\", "/")
+                            new_by_file.setdefault(fp_norm, {})[s.get("symbol")] = s.get("signature")
 
             for fp in changed_files:
-                old_syms = self.repository.symbols.get_symbols_in_file(fp)
+                fp_norm = fp.replace("\\", "/")
+                old_syms = self.repository.symbols.get_symbols_in_file(fp_norm)
                 old_map = {s["symbol"]: s.get("signature") for s in old_syms}
-                new_map = new_by_file.get(fp, {})
+                new_map = new_by_file.get(fp_norm, {})
 
                 # If symbol set or any signature changed, we must invalidate callers
                 if set(old_map.keys()) != set(new_map.keys()) or any(old_map[s] != new_map[s] for s in old_map):

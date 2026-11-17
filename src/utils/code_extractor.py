@@ -138,7 +138,7 @@ class CodeExtractor:
                     return py_data["by_name"][sym_name]
 
         # 2. Indentation / Braces heuristic fallback for all languages or non-AST files
-        if line and 1 <= line <= len(lines):
+        if isinstance(line, int) and 1 <= line <= len(lines):
             start_idx = line - 1
             decl_line = lines[start_idx]
             indent = len(decl_line) - len(decl_line.lstrip())

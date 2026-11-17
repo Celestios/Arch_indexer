@@ -170,8 +170,15 @@ class IndexIngester:
         print(f"[SCIP Ingest] Ingesting {total_symbols} symbols from {len(changed_files)} changed files...")
 
         existing_symbols = {}
+        existing_by_clean = {}
+        from utils.helpers import demangle_scip_symbol
         if changed_files:
             existing_symbols = repository.symbols.get_symbols_by_filepaths(list(changed_set))
+            for sid, sdata in existing_symbols.items():
+                fp = sdata.get("filepath")
+                csym = sdata.get("clean_symbol") or sid
+                if fp and csym:
+                    existing_by_clean[(fp, csym)] = sdata
 
         # 1b. Delete old edges, symbols, and occurrences for changed files before re-ingesting.
         # Order matters: edges first, then occurrences, then symbols.
@@ -184,9 +191,15 @@ class IndexIngester:
             repository.edges.delete_edges_for_files(changed_files)
             repository.symbols.delete_occurrences_for_files(changed_files)
             repository.symbols.delete_diagnostics_for_files(changed_files)
+            upgraded_clean = {
+                (v["filepath"], demangle_scip_symbol(k))
+                for k, v in filtered_symbols.items() if v.get("filepath")
+            }
             removed_symbols = [
                 sym_id for sym_id, sym in existing_symbols.items()
-                if (not sym.get("filepath") or sym.get("filepath") in changed_set) and sym_id not in filtered_symbols
+                if (not sym.get("filepath") or sym.get("filepath") in changed_set)
+                and sym_id not in filtered_symbols
+                and (sym.get("filepath"), sym.get("clean_symbol") or sym_id) not in upgraded_clean
             ]
             if removed_symbols:
                 with repository.db_conn.session() as conn:
@@ -195,26 +208,35 @@ class IndexIngester:
                         (removed_symbols,)
                     )
 
-        from utils.helpers import demangle_scip_symbol
         symbols_to_ingest = []
         for sym_id, sym in filtered_symbols.items():
             existing = existing_symbols.get(sym_id)
-            # If existing symbol has signature/docstring from treesitter, preserve it
+            if not existing and sym.get("filepath"):
+                clean = demangle_scip_symbol(sym["symbol"])
+                existing = existing_by_clean.get((sym["filepath"], clean))
+
             sig = sym.get("signature")
             doc = sym.get("docstring")
+            parent_sym = sym.get("parent_symbol")
+            code_block = sym.get("code_block")
             if existing:
-                if (not sig or not str(sig).strip()) and existing.get("signature"):
+                # Prioritize existing high-fidelity Tree-sitter signatures and docstrings
+                if existing.get("signature"):
                     sig = existing["signature"]
-                if (not doc or not str(doc).strip()) and existing.get("docstring"):
+                if existing.get("docstring"):
                     doc = existing["docstring"]
+                if existing.get("parent_symbol") and not parent_sym:
+                    parent_sym = existing["parent_symbol"]
+                if existing.get("code_block") and not code_block:
+                    code_block = existing["code_block"]
 
             if not existing or (
                 existing.get("body_hash") != sym.get("body_hash")
                 or existing.get("kind") != sym.get("kind")
                 or (sig and existing.get("signature") != sig)
                 or (doc and existing.get("docstring") != doc)
-                or existing.get("parent_symbol") != sym.get("parent_symbol")
-                or existing.get("code_block") != sym.get("code_block")
+                or (parent_sym and existing.get("parent_symbol") != parent_sym)
+                or (code_block and existing.get("code_block") != code_block)
             ):
                 symbols_to_ingest.append({
                     "symbol": sym["symbol"],
@@ -224,8 +246,8 @@ class IndexIngester:
                     "signature": sig,
                     "docstring": doc,
                     "body_hash": sym["body_hash"],
-                    "parent_symbol": sym.get("parent_symbol"),
-                    "code_block": sym.get("code_block"),
+                    "parent_symbol": parent_sym,
+                    "code_block": code_block,
                 })
 
         skipped = total_symbols - len(symbols_to_ingest)

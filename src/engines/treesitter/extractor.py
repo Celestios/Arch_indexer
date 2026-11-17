@@ -98,7 +98,13 @@ class TreesitterExtractor:
     ) -> List[SymbolDeclaration]:
         """Extracts symbol declarations from a file."""
         fp = Path(filepath)
-        norm_fp = str(filepath).replace("\\", "/")
+        if project_root:
+            try:
+                norm_fp = str(Path(filepath).resolve().relative_to(Path(project_root).resolve())).replace("\\", "/")
+            except Exception:
+                norm_fp = str(filepath).replace("\\", "/")
+        else:
+            norm_fp = str(filepath).replace("\\", "/")
 
         if source is None:
             if not fp.exists():
@@ -124,7 +130,11 @@ class TreesitterExtractor:
         # Derive module prefix from filepath
         module_prefix = cls._derive_module_prefix(norm_fp)
 
-        extractor_fn = getattr(cls, f"_extract_{language}", None)
+        if language in ("tsx", "javascript", "jsx"):
+            extractor_fn = cls._extract_typescript
+        else:
+            extractor_fn = getattr(cls, f"_extract_{language}", None)
+
         if not extractor_fn:
             # Fallback for generic C-like / other languages
             extractor_fn = cls._extract_generic
@@ -309,6 +319,19 @@ class TreesitterExtractor:
 
             if kind:
                 name_node = node.child_by_field_name("name")
+                if not name_node and node.child_by_field_name("declarator"):
+                    decl = node.child_by_field_name("declarator")
+                    while decl and decl.type in ("function_declarator", "pointer_declarator"):
+                        sub_decl = decl.child_by_field_name("declarator")
+                        if sub_decl:
+                            decl = sub_decl
+                        else:
+                            break
+                    if decl and decl.type == "identifier":
+                        name_node = decl
+                    elif decl:
+                        name_node = decl.child_by_field_name("declarator") or decl
+
                 body_node = node.child_by_field_name("body")
                 if name_node:
                     item_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
@@ -490,6 +513,19 @@ class TreesitterExtractor:
 
             if kind:
                 name_node = node.child_by_field_name("name")
+                if not name_node and node.child_by_field_name("declarator"):
+                    decl = node.child_by_field_name("declarator")
+                    while decl and decl.type in ("function_declarator", "pointer_declarator"):
+                        sub_decl = decl.child_by_field_name("declarator")
+                        if sub_decl:
+                            decl = sub_decl
+                        else:
+                            break
+                    if decl and decl.type == "identifier":
+                        name_node = decl
+                    elif decl:
+                        name_node = decl.child_by_field_name("declarator") or decl
+
                 body_node = node.child_by_field_name("body")
                 if name_node:
                     item_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
@@ -544,12 +580,12 @@ class TreesitterExtractor:
     @classmethod
     def _extract_doc_comments(cls, node: tree_sitter.Node, code_bytes: bytes) -> str:
         """Extracts preceding doc comments (///, /**, //, #) from siblings right before the node."""
-        parent = node.parent
-        if not parent:
-            return ""
+        target = node
+        while target.parent and target.parent.type in ("export_statement", "export_declaration", "decorated_definition"):
+            target = target.parent
 
         comments = []
-        curr = node.prev_sibling
+        curr = target.prev_sibling
         while curr:
             if curr.type in ("comment", "line_comment", "block_comment"):
                 text = code_bytes[curr.start_byte:curr.end_byte].decode("utf-8", errors="replace").strip()
@@ -560,9 +596,11 @@ class TreesitterExtractor:
                     text = text[3:].rstrip("*/").strip()
                 elif text.startswith("//"):
                     text = text[2:].strip()
-                elif text.startswith("#"):
+                elif text.startswith("#") and not text.startswith("#["):
                     text = text[1:].strip()
                 comments.insert(0, text)
+            elif curr.type in ("attribute_item", "decorator"):
+                pass  # Walk backward past intervening attributes / decorators
             else:
                 break
             curr = curr.prev_sibling

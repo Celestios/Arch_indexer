@@ -93,12 +93,15 @@ def normalize_range(occ: Any, use_enclosing: bool = False) -> Optional[tuple[int
 
     if use_enclosing:
         if has_field:
-            if occ.HasField("single_line_enclosing_range"):
-                sl = occ.single_line_enclosing_range
-                return (sl.line, sl.start_character, sl.line, sl.end_character)
-            if occ.HasField("multi_line_enclosing_range"):
-                ml = occ.multi_line_enclosing_range
-                return (ml.start_line, ml.start_character, ml.end_line, ml.end_character)
+            try:
+                if occ.HasField("single_line_enclosing_range") is True:
+                    sl = occ.single_line_enclosing_range
+                    return (sl.line, sl.start_character, sl.line, sl.end_character)
+                if occ.HasField("multi_line_enclosing_range") is True:
+                    ml = occ.multi_line_enclosing_range
+                    return (ml.start_line, ml.start_character, ml.end_line, ml.end_character)
+            except (TypeError, ValueError):
+                pass
         elif isinstance(occ, dict):
             if occ.get("single_line_enclosing_range"):
                 sl = occ["single_line_enclosing_range"]
@@ -118,12 +121,15 @@ def normalize_range(occ: Any, use_enclosing: bool = False) -> Optional[tuple[int
                 pass
 
     if has_field:
-        if occ.HasField("single_line_range"):
-            sl = occ.single_line_range
-            return (sl.line, sl.start_character, sl.line, sl.end_character)
-        if occ.HasField("multi_line_range"):
-            ml = occ.multi_line_range
-            return (ml.start_line, ml.start_character, ml.end_line, ml.end_character)
+        try:
+            if occ.HasField("single_line_range") is True:
+                sl = occ.single_line_range
+                return (sl.line, sl.start_character, sl.line, sl.end_character)
+            if occ.HasField("multi_line_range") is True:
+                ml = occ.multi_line_range
+                return (ml.start_line, ml.start_character, ml.end_line, ml.end_character)
+        except (TypeError, ValueError):
+            pass
     elif isinstance(occ, dict):
         if occ.get("single_line_range"):
             sl = occ["single_line_range"]

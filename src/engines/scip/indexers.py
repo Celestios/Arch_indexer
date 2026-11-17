@@ -142,7 +142,7 @@ def index_dart(project_dir: Path) -> Optional[Path]:
         )
         if rc != 0:
             raise subprocess.CalledProcessError(rc, "scip_dart")
-        return _move_index_to_arch(project_dir, "dart")
+        return _move_index_to_arch(project_dir, "dart", pubspec_dir)
     except subprocess.CalledProcessError as e:
         print(f"Error executing scip_dart indexer: {e}", file=sys.stderr)
         return None

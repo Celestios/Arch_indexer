@@ -37,7 +37,21 @@ def _lookup_single(target: str, repository) -> str:
         occs_raw = repository.symbols.get_occurrences_for_symbol(exact_symbol[0])
         occs = [(o["filepath"], o["start_line"], o["end_line"], o["role"]) for o in occs_raw]
         edges = repository.symbols.get_edges_for_symbol(exact_symbol[0])
-        sym_md = format_lookup_symbol(exact_symbol, occs, edges)
+
+        # Batch query filepaths of connected symbols in edges
+        other_syms = set()
+        for e in edges:
+            if not str(e[0]).startswith("local ") and not str(e[1]).startswith("local "):
+                if e[0] != exact_symbol[0]:
+                    other_syms.add(e[0])
+                if e[1] != exact_symbol[0]:
+                    other_syms.add(e[1])
+        sym_fp_map = {}
+        if other_syms:
+            meta_batch = repository.symbols.get_symbols_metadata_batch(list(other_syms))
+            sym_fp_map = {s: meta["filepath"] for s, meta in meta_batch.items() if meta.get("filepath")}
+
+        sym_md = format_lookup_symbol(exact_symbol, occs, edges, symbol_filepath_map=sym_fp_map)
         diags = repository.symbols.get_diagnostics_for_symbol(exact_symbol[0])
         if diags:
             diag_lines = ["\n### Compiler & Analyzer Diagnostics", "| Line:Col | Severity | Code | Message |", "| :--- | :--- | :--- | :--- |"]

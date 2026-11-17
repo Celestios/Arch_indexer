@@ -79,10 +79,29 @@ class AnnotationExtractor:
     def _extract_rust(node: tree_sitter.Node, code_bytes: bytes, result: Dict[str, Any]):
         # Rust outer attributes: #[...]
         result["visibility"] = "private"  # Default in Rust
+
+        # Inspect preceding siblings for outer attributes (e.g. #[no_mangle])
+        curr = node.prev_sibling
+        preceding_attrs = []
+        while curr:
+            if curr.type == "attribute_item":
+                attr_text = code_bytes[curr.start_byte:curr.end_byte].decode("utf-8", errors="replace").strip()
+                preceding_attrs.insert(0, attr_text)
+            elif curr.type in ("comment", "line_comment", "block_comment"):
+                pass
+            else:
+                break
+            curr = curr.prev_sibling
+
+        for attr in preceding_attrs:
+            if attr not in result["decorators"]:
+                result["decorators"].append(attr)
+
         for child in node.children:
             if child.type == "attribute_item":
                 attr_text = code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace").strip()
-                result["decorators"].append(attr_text)
+                if attr_text not in result["decorators"]:
+                    result["decorators"].append(attr_text)
             elif child.type == "visibility_modifier":
                 vis_text = code_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace").strip()
                 result["visibility"] = vis_text

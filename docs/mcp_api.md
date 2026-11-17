@@ -113,6 +113,20 @@ The CLI tool `arch` provides commands for workspace setup, indexing, auditing bo
     *   `--max-depth` (optional, default: `3`): Maximum depth of call chain traversal.
     *   `project_root` (optional, default: `.`): Path to the target project directory.
 
+#### `arch mcp`
+*   **Purpose**: Starts and manages the FastMCP server with lifecycle management and single-instance locking.
+*   **Syntax**:
+    ```bash
+    arch mcp [project_root] [--port <port>] [--status] [--stop] [--restart] [--headless]
+    ```
+*   **Arguments**:
+    *   `--port` (optional, default: auto/8071): Custom port for SSE transport.
+    *   `--status`: Checks the health and status of the running server (PID, port, URL).
+    *   `--stop`: Gracefully terminates the running server instance and clears the lock file.
+    *   `--restart`: Stops any existing instance first, then starts a fresh server in the foreground.
+    *   `--headless`: Runs the server headlessly as a detached background daemon, displays a clean status notice with PID and URL, and exits. Can be combined with `--restart` (e.g. `arch mcp --restart --headless`).
+
+
 ---
 
 ## 2. MCP Tools Reference

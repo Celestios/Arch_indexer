@@ -3,15 +3,21 @@ Tree-sitter language loader and parser cache.
 Manages Language and Parser instances for all supported programming languages.
 """
 from pathlib import Path
+import threading
 from typing import Dict, Optional, Tuple, Any
-import tree_sitter
+
+try:
+    import tree_sitter
+except ImportError:
+    tree_sitter = None
 
 
 class TreesitterLoader:
     """Manages compilation, loading and caching of tree-sitter parsers and languages."""
 
-    _languages: Dict[str, tree_sitter.Language] = {}
-    _parsers: Dict[str, tree_sitter.Parser] = {}
+    _languages: Dict[str, Any] = {}
+    _lock = threading.Lock()
+    _local = threading.local()
 
     # Map file extensions to normalized language names
     EXTENSION_MAP: Dict[str, str] = {
@@ -34,6 +40,7 @@ class TreesitterLoader:
         ".cxx": "cpp",
         ".cs": "csharp",
         ".rb": "ruby",
+        ".dart": "dart",
     }
 
     @classmethod
@@ -43,31 +50,46 @@ class TreesitterLoader:
         return cls.EXTENSION_MAP.get(ext)
 
     @classmethod
-    def get_language(cls, language: str) -> Optional[tree_sitter.Language]:
-        """Returns the tree_sitter.Language instance for a given language name."""
-        lang_key = language.lower()
-        if lang_key in cls._languages:
-            return cls._languages[lang_key]
-
-        lang_obj = cls._load_language(lang_key)
-        if lang_obj:
-            cls._languages[lang_key] = lang_obj
-            return lang_obj
-        return None
+    def is_available(cls) -> bool:
+        """Returns True if the tree-sitter core library is installed and available."""
+        return tree_sitter is not None
 
     @classmethod
-    def get_parser(cls, language: str) -> Optional[tree_sitter.Parser]:
-        """Returns a cached tree_sitter.Parser initialized with the target language."""
+    def get_language(cls, language: str) -> Optional[Any]:
+        """Returns the tree_sitter.Language instance for a given language name."""
+        if tree_sitter is None:
+            return None
         lang_key = language.lower()
-        if lang_key in cls._parsers:
-            return cls._parsers[lang_key]
+        with cls._lock:
+            if lang_key in cls._languages:
+                return cls._languages[lang_key]
+
+            lang_obj = cls._load_language(lang_key)
+            if lang_obj:
+                cls._languages[lang_key] = lang_obj
+                return lang_obj
+            return None
+
+    @classmethod
+    def get_parser(cls, language: str) -> Optional[Any]:
+        """Returns a thread-local cached tree_sitter.Parser initialized with the target language."""
+        if tree_sitter is None:
+            return None
+        lang_key = language.lower()
+        parsers = getattr(cls._local, "parsers", None)
+        if parsers is None:
+            parsers = {}
+            cls._local.parsers = parsers
+
+        if lang_key in parsers:
+            return parsers[lang_key]
 
         lang_obj = cls.get_language(lang_key)
         if not lang_obj:
             return None
 
         parser = tree_sitter.Parser(lang_obj)
-        cls._parsers[lang_key] = parser
+        parsers[lang_key] = parser
         return parser
 
     @classmethod

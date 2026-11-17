@@ -52,6 +52,8 @@
 
 ## M
 
+- [mcp-server-lifecycle.md](mcp-server-lifecycle.md) — Foreground MCP server execution by default, conflict diagnostic notices, lifecycle flags (--stop, --restart, --status), and detached headless daemon execution
+
 ## N
 
 ## O

@@ -11,19 +11,20 @@ class MetricsCalculator:
 
     BRANCH_NODE_TYPES: Set[str] = {
         # Conditionals
-        "if_statement", "elif_clause", "if_expression", "conditional_expression",
+        "if_statement", "elif_clause", "if_expression", "conditional_expression", "ternary_expression",
         # Loops
         "while_statement", "for_statement", "for_in_statement", "loop_expression",
+        "for_expression", "while_expression",
         # Error handling
         "except_clause", "catch_clause",
-        # Pattern matching / switch
-        "match_arm", "case_clause", "switch_statement",
+        # Pattern matching / switch branches (container switch_statement excluded to avoid double-counting)
+        "match_arm", "case_clause", "switch_case",
     }
 
     NESTING_NODE_TYPES: Set[str] = {
         "if_statement", "while_statement", "for_statement", "for_in_statement",
         "try_statement", "match_statement", "switch_statement", "with_statement",
-        "loop_expression",
+        "loop_expression", "for_expression", "while_expression",
     }
 
     @classmethod

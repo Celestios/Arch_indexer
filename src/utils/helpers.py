@@ -66,12 +66,23 @@ def matches_filter(filepath: str, filepath_filter: Optional[str]) -> bool:
 def find_definition_line(repository, symbol: str, filepath: str) -> int:
     """Find the definition line number for a symbol in a given file. Returns 1 as fallback."""
     occs = repository.symbols.get_occurrences_for_symbol(symbol)
+    norm_fp = filepath.replace("\\", "/")
     for occ in occs:
-        if occ["filepath"] == filepath and occ["role"] == 1:
+        if occ["filepath"].replace("\\", "/") == norm_fp and occ.get("role") == 1:
             return occ["start_line"]
     if occs:
         return occs[0]["start_line"]
     return 1
+
+
+def find_call_site_or_definition_line(repository, source_sym: str, target_sym: str, filepath: str) -> int:
+    """Find the call site line where target_sym is referenced in filepath, falling back to source_sym definition line."""
+    norm_fp = filepath.replace("\\", "/")
+    occs = repository.symbols.get_occurrences_for_symbol(target_sym)
+    for occ in occs:
+        if occ["filepath"].replace("\\", "/") == norm_fp and (occ.get("role", 0) & 1) == 0:
+            return occ["start_line"]
+    return find_definition_line(repository, source_sym, filepath)
 
 
 def load_config(project_root: Path) -> Dict[str, Any]:

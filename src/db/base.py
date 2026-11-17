@@ -40,9 +40,12 @@ UPSERT_SYMBOL_SQL = """
 INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, code_block)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (symbol) DO UPDATE SET
-    clean_symbol = excluded.clean_symbol,
-    filepath = excluded.filepath,
-    kind = excluded.kind,
+    clean_symbol = COALESCE(NULLIF(excluded.clean_symbol, ''), symbols.clean_symbol),
+    filepath = COALESCE(excluded.filepath, symbols.filepath),
+    kind = CASE 
+        WHEN symbols.kind IS NOT NULL AND symbols.kind <> 'UnspecifiedKind' THEN symbols.kind 
+        ELSE excluded.kind 
+    END,
     signature = CASE 
         WHEN excluded.signature IS NOT NULL AND excluded.signature <> '' THEN excluded.signature 
         ELSE symbols.signature 
@@ -53,10 +56,10 @@ ON CONFLICT (symbol) DO UPDATE SET
     END,
     change_count = CASE WHEN symbols.body_hash <> excluded.body_hash THEN COALESCE(symbols.change_count, 1) + 1 ELSE COALESCE(symbols.change_count, 1) END,
     last_modified = CASE WHEN symbols.body_hash <> excluded.body_hash THEN now() ELSE symbols.last_modified END,
-    body_hash = excluded.body_hash,
+    body_hash = COALESCE(excluded.body_hash, symbols.body_hash),
     connection_weight = excluded.connection_weight,
-    parent_symbol = excluded.parent_symbol,
-    code_block = excluded.code_block
+    parent_symbol = COALESCE(excluded.parent_symbol, symbols.parent_symbol),
+    code_block = COALESCE(excluded.code_block, symbols.code_block)
 """
 
 UPSERT_VIOLATION_SQL = """

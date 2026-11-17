@@ -3,7 +3,7 @@ from typing import Dict, List, Any, Optional
 from db.repository import Repository
 from auditor.path_tracer import PathTracer
 from auditor.config_loader import ConfigLoader
-from utils.helpers import matches_filter, find_definition_line
+from utils.helpers import matches_filter, find_definition_line, find_call_site_or_definition_line
 from utils.violation_id import ViolationId
 
 
@@ -52,7 +52,7 @@ class DependencyViolationChecker:
         if source_val != forbidden_source or not self.tracer.matches_blocklist(target_sym, blocklist):
             return []
         msg = rule.get("message", f"Package restriction violation: {source_val} cannot depend on {target_sym}")
-        line_number = find_definition_line(self.repository, target_sym, filepath)
+        line_number = find_call_site_or_definition_line(self.repository, source_sym, target_sym, filepath)
         violation_id = ViolationId.generate(source_sym, target_sym, "pkg_restrict", forbidden_source)
         rule_id = f"{field_name}_pkg_{forbidden_source}".lower().replace("/", "_").replace(".", "_")
         data = {"violation_id": violation_id, "rule_id": rule_id, "symbol": source_sym,
@@ -76,7 +76,7 @@ class DependencyViolationChecker:
         fix_hint = self._find_counterfactual_fix(target_sym, target_data, field_name, field_conf, symbol_classifications)
         if fix_hint:
             trace_msg += f"\n  Suggested Fix: {fix_hint}"
-        line_number = find_definition_line(self.repository, target_sym, filepath)
+        line_number = find_call_site_or_definition_line(self.repository, source_sym, target_sym, filepath)
 
         violation_id = ViolationId.generate(source_sym, target_sym, field_name, forbidden_source, forbidden_target)
         rule_id = f"{field_name}_{forbidden_source}_{forbidden_target}".lower().replace("/", "_").replace(".", "_")

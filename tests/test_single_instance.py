@@ -96,3 +96,158 @@ def test_check_existing_cleans_stale_lock(tmp_path):
         url = check_existing(arch_dir)
         assert url is None
         assert not (arch_dir / LOCK_FILE_NAME).exists()
+
+
+def test_stop_server_running(tmp_path):
+    from utils.single_instance import stop_server
+
+    arch_dir = tmp_path / ".arch"
+    write_lock(arch_dir, 12345, 8071)
+    with patch("utils.single_instance._pid_alive", return_value=True), patch(
+        "utils.single_instance._kill_pid", return_value=True
+    ) as mock_kill:
+        stopped = stop_server(arch_dir)
+        assert stopped == 12345
+        mock_kill.assert_called_once_with(12345)
+        assert not (arch_dir / LOCK_FILE_NAME).exists()
+
+
+def test_stop_server_not_running(tmp_path):
+    from utils.single_instance import stop_server
+
+    arch_dir = tmp_path / ".arch"
+    stopped = stop_server(arch_dir)
+    assert stopped is None
+
+
+def test_get_server_status(tmp_path):
+    from utils.single_instance import get_server_status
+
+    arch_dir = tmp_path / ".arch"
+    # Not running
+    assert get_server_status(arch_dir) is None
+
+    # Running and healthy
+    write_lock(arch_dir, 12345, 8071)
+    with patch("utils.single_instance._pid_alive", return_value=True), patch(
+        "utils.single_instance._server_alive", return_value=True
+    ):
+        status = get_server_status(arch_dir)
+        assert status is not None
+        assert status["pid"] == 12345
+        assert status["port"] == 8071
+        assert status["healthy"] is True
+
+
+def test_cmd_mcp_stop(capsys, tmp_path):
+    import argparse
+    from commands.mcp import cmd_mcp
+
+    args = argparse.Namespace(
+        project_root=str(tmp_path),
+        port=0,
+        stop=True,
+        restart=False,
+        status=False,
+        headless=False,
+        foreground=False,
+    )
+    with patch("utils.single_instance.stop_server", return_value=1234):
+        try:
+            cmd_mcp(args)
+        except SystemExit as e:
+            assert e.code == 0
+    captured = capsys.readouterr().out
+    assert "Stopped server (PID 1234)" in captured
+
+
+def test_cmd_mcp_status(capsys, tmp_path):
+    import argparse
+    from commands.mcp import cmd_mcp
+
+    args = argparse.Namespace(
+        project_root=str(tmp_path),
+        port=0,
+        stop=False,
+        restart=False,
+        status=True,
+        headless=False,
+        foreground=False,
+    )
+    mock_status = {
+        "pid": 5678,
+        "port": 8071,
+        "url": "http://127.0.0.1:8071",
+        "healthy": True,
+    }
+    with patch("utils.single_instance.get_server_status", return_value=mock_status):
+        try:
+            cmd_mcp(args)
+        except SystemExit as e:
+            assert e.code == 0
+    captured = capsys.readouterr().out
+    assert "http://127.0.0.1:8071" in captured
+    assert "5678" in captured
+    assert "Healthy" in captured
+
+
+def test_cmd_mcp_already_running_notice(capsys, tmp_path):
+    import argparse
+    from commands.mcp import cmd_mcp
+
+    args = argparse.Namespace(
+        project_root=str(tmp_path),
+        port=0,
+        stop=False,
+        restart=False,
+        status=False,
+        headless=False,
+        foreground=False,
+    )
+    mock_status = {
+        "pid": 5678,
+        "port": 8071,
+        "url": "http://127.0.0.1:8071",
+        "healthy": True,
+    }
+    with patch("utils.single_instance.get_server_status", return_value=mock_status):
+        try:
+            cmd_mcp(args)
+        except SystemExit as e:
+            assert e.code == 0
+    captured = capsys.readouterr().out
+    assert "Server is already running" in captured
+    assert "--stop" in captured
+    assert "--restart" in captured
+
+
+def test_cmd_mcp_headless_start(capsys, tmp_path):
+    import argparse
+    from commands.mcp import cmd_mcp
+
+    args = argparse.Namespace(
+        project_root=str(tmp_path),
+        port=0,
+        stop=False,
+        restart=False,
+        status=False,
+        headless=True,
+        foreground=False,
+    )
+    mock_info = {
+        "pid": 9999,
+        "port": 8071,
+        "url": "http://127.0.0.1:8071",
+        "healthy": True,
+    }
+    with patch("utils.single_instance.get_server_status", return_value=None), patch(
+        "utils.single_instance.start_headless", return_value=mock_info
+    ):
+        try:
+            cmd_mcp(args)
+        except SystemExit as e:
+            assert e.code == 0
+    captured = capsys.readouterr().out
+    assert "Server started successfully" in captured
+    assert "http://127.0.0.1:8071" in captured
+    assert "9999" in captured
