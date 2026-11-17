@@ -19,7 +19,7 @@ from interface.tools.impact import handle_impact
 from interface.tools.audit import handle_audit
 from interface.tools.compile_context import handle_compile_context
 from interface.tools.map import handle_map
-from interface.tools.reindex import handle_reindex
+from interface.tools.update import handle_update
 from interface.tools.set_status import handle_set_status
 from interface.validators import validate_direction, validate_resolution
 
@@ -345,9 +345,9 @@ def set_status(filepath: str, status: str, justification: Optional[str] = None) 
 
 
 @mcp.tool()
-def reindex(filepaths: Optional[Union[List[str], str]] = None, force: bool = False) -> str:
+def update(filepaths: Optional[Union[List[str], str]] = None, force: bool = False) -> str:
     """
-    Triggers an incremental (or forced full) re-indexing of workspace symbols and call edges.
+    Triggers an incremental (or forced full) update of workspace symbols and call edges.
     When code files are modified or refactored, use this tool to update the code graph.
     """
     db_path = get_db_path()
@@ -355,19 +355,22 @@ def reindex(filepaths: Optional[Union[List[str], str]] = None, force: bool = Fal
         return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
         repository = get_server_repository()
-        return handle_reindex(repository, get_project_root(), filepaths=filepaths, force=force)
+        return handle_update(repository, get_project_root(), filepaths=filepaths, force=force)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error re-indexing workspace: {e}"
+        return f"Error updating workspace: {e}"
 
 
-@mcp.tool()
+# Backward compatibility aliases for internal python calls (not exposed as MCP tools)
+def reindex(filepaths: Optional[Union[List[str], str]] = None, force: bool = False) -> str:
+    """Alias for update."""
+    return update(filepaths=filepaths, force=force)
+
+
 def index(filepaths: Optional[Union[List[str], str]] = None, force: bool = False) -> str:
-    """
-    Alias for reindex. Triggers an incremental or forced re-indexing of the workspace.
-    """
-    return reindex(filepaths=filepaths, force=force)
+    """Alias for update."""
+    return update(filepaths=filepaths, force=force)
 
 
 def run_server(port: int = 0):

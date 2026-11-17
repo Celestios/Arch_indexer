@@ -174,7 +174,7 @@ class SymbolsRepository(BaseRepository):
         with self.db_conn.session() as conn:
             res = conn.execute(
                 """
-                SELECT symbol, filepath, kind, signature, docstring, body_hash, classification
+                SELECT symbol, filepath, kind, signature, docstring, body_hash, classification, parent_symbol
                 FROM symbols
                 WHERE replace(filepath, '\\', '/') = ? OR filepath = ?
                 """,
@@ -188,7 +188,8 @@ class SymbolsRepository(BaseRepository):
                     "signature": r[3],
                     "docstring": r[4],
                     "body_hash": r[5],
-                    "classification": r[6] or "{}"
+                    "classification": r[6] or "{}",
+                    "parent_symbol": r[7] if len(r) > 7 else None
                 }
                 for r in res
             ]

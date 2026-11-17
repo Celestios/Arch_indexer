@@ -259,9 +259,9 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
     - `src/auditor/` ──[6 calls]──> `src/db/`
     ```
 
-### `reindex` / `index`
-*   **Purpose**: Triggers an incremental (or forced full) re-indexing of the workspace to update symbol tables, occurrences, call graph edges, and architectural compliance rules.
+### `update`
+*   **Purpose**: Triggers an incremental (or forced full) update of workspace symbols and call edges to refresh symbol tables, occurrences, call graph edges, and architectural compliance rules.
 *   **Parameters**:
-    *   `filepaths` (Union[list[str], str], optional): Target file(s) to incrementally re-index. If omitted, checks all detected languages.
+    *   `filepaths` (Union[list[str], str], optional): Target file(s) to incrementally update. If omitted, checks all detected languages.
     *   `force` (boolean, optional, default: False): If True, performs a clean full re-index.
 

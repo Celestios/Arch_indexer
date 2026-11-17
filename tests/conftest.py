@@ -15,9 +15,11 @@ class MockSettings:
 class MockFastMCP:
     def __init__(self, *args, **kwargs):
         self.settings = MockSettings()
+        self.tools = []
 
     def tool(self):
         def decorator(func):
+            self.tools.append(func.__name__)
             return func
         return decorator
 

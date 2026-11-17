@@ -3,12 +3,13 @@ from utils.helpers import demangle_scip_symbol, sanitize_docstring, infer_scip_k
 
 
 def _clean_doc_summary(doc: Optional[str]) -> str:
-    """Extract a meaningful single-line summary from docstrings, skipping code fences and signatures."""
+    """Extract a meaningful single-line summary from docstrings, skipping code fences, type annotations, and signatures."""
     if not doc:
         return ""
     lines = [line.strip() for line in doc.strip().split("\n")]
     in_fence = False
     fence_char = None
+    real_lines = []
     for l in lines:
         if not l:
             continue
@@ -17,7 +18,6 @@ def _clean_doc_summary(doc: Optional[str]) -> str:
             if not in_fence:
                 in_fence = True
                 fence_char = tag
-                # Check if closed on same line (e.g. ```text```)
                 if len(l) > 3 and l.endswith(tag):
                     in_fence = False
                 continue
@@ -26,12 +26,50 @@ def _clean_doc_summary(doc: Optional[str]) -> str:
                 continue
         if in_fence:
             continue
-        if l.startswith("class ") or l.startswith("def ") or l.endswith(":"):
-            continue
-        return l
-    # Fallback if everything was inside a fence
-    content_lines = [l for l in lines if l and not l.startswith("```") and not l.startswith("'''") and not l.startswith('"""')]
-    return content_lines[0] if content_lines else ""
+        real_lines.append(l)
+
+    if not real_lines:
+        return ""
+
+    candidate = real_lines[0]
+    # Filter out fake docstrings that echo definition or SCIP type hints
+    if candidate.startswith("def ") or candidate.startswith("class ") or candidate.endswith(":"):
+        return ""
+    if candidate.startswith("(variable)") or candidate.startswith("(function)") or candidate.startswith("(method)"):
+        return ""
+    if candidate in ("builtins.str", "builtins.int", "builtins.dict", "builtins.list", "builtins.bool", "pathlib.Path"):
+        return ""
+    if candidate.startswith("builtins.") or candidate.startswith("pathlib.") or candidate.startswith("typing."):
+        return ""
+    if candidate.endswith("(") or candidate.endswith("()"):
+        return ""
+    return candidate
+
+
+def _clean_method_signature(sig: str, name: str) -> str:
+    """Extract a clean, single-line method signature."""
+    if not sig:
+        return f"{name}()"
+    lines = [l.strip() for l in sig.strip().split("\n") if l.strip()]
+    if not lines:
+        return f"{name}()"
+
+    decorators = [l for l in lines if l.startswith("@")]
+    def_lines = [l for l in lines if not l.startswith("@")]
+
+    dec_prefix = " ".join(decorators) + " " if decorators else ""
+    def_str = def_lines[0] if def_lines else f"def {name}()"
+
+    if def_str.endswith(":"):
+        def_str = def_str[:-1].strip()
+
+    combined = f"{dec_prefix}{def_str}".strip()
+
+    clean_base = name.split("(")[0].strip()
+    if clean_base and clean_base not in combined:
+        return f"`{name}`: `{combined}`"
+
+    return f"`{combined}`"
 
 
 def format_context_results(
@@ -39,13 +77,11 @@ def format_context_results(
     symbols: List[Dict[str, Any]],
     symbol_to_lines: Dict[str, Tuple[int, int]],
 ) -> str:
-    """Format context results for a single file as markdown."""
+    """Format context results for a single file as markdown with clean tree hierarchy."""
     if not symbols:
         return f"## File Index: `{fp}`\n\n*No indexed symbols found in file. Make sure the file exists and is indexed.*"
 
-    classes = []
-    methods_and_funcs = []
-
+    processed_symbols = []
     for sym in symbols:
         raw_name = sym["symbol"]
         if raw_name.startswith("local "):
@@ -69,46 +105,157 @@ def format_context_results(
             line_range = f"L{start_line}-{end_line}" if start_line != end_line else f"L{start_line}"
 
         badge = format_classification_badge(sym.get("classification"))
-        sym_data = {
-            "symbol": clean_name,
-            "signature": sym["signature"],
-            "docstring": sanitize_docstring(sym["docstring"]),
-            "line_range": line_range,
-            "kind": kind,
-            "badge": badge,
-        }
+        doc = _clean_doc_summary(sym.get("docstring"))
 
-        if kind.lower() in ("class", "struct", "interface"):
-            classes.append(sym_data)
-        elif kind.lower() in ("field", "variable") and not sym.get("signature"):
-            continue
+        processed_symbols.append({
+            "raw_name": raw_name,
+            "clean_name": clean_name,
+            "kind": kind,
+            "signature": sym.get("signature") or "",
+            "docstring": doc,
+            "line_range": line_range,
+            "badge": badge,
+            "parent_symbol": sym.get("parent_symbol"),
+        })
+
+    classes = []
+    class_map = {}
+    non_classes = []
+
+    for s in processed_symbols:
+        if s["kind"].lower() in ("class", "struct", "interface"):
+            cl_data = {
+                **s,
+                "short_name": s["clean_name"].split(".")[-1],
+                "methods": [],
+                "fields": [],
+            }
+            classes.append(cl_data)
+            class_map[s["clean_name"]] = cl_data
+            class_map[s["raw_name"]] = cl_data
         else:
-            methods_and_funcs.append(sym_data)
+            non_classes.append(s)
+
+    top_level_funcs = []
+    top_level_vars = []
+
+    for s in non_classes:
+        parent_class = None
+
+        if s["parent_symbol"]:
+            p_clean = demangle_scip_symbol(s["parent_symbol"])
+            if p_clean in class_map:
+                parent_class = class_map[p_clean]
+            elif s["parent_symbol"] in class_map:
+                parent_class = class_map[s["parent_symbol"]]
+
+        if not parent_class:
+            for cl in classes:
+                prefix = cl["clean_name"] + "."
+                if s["clean_name"].startswith(prefix):
+                    parent_class = cl
+                    break
+
+        if not parent_class and "#" in s["raw_name"]:
+            scip_prefix = s["raw_name"].split("#")[0] + "#"
+            if scip_prefix in class_map:
+                parent_class = class_map[scip_prefix]
+
+        is_func = (
+            s["kind"].lower() in ("method", "function", "constructor")
+            or s["raw_name"].endswith(")")
+            or s["signature"].strip().startswith("def ")
+            or s["signature"].strip().startswith("@")
+        )
+
+        if parent_class:
+            prefix = parent_class["clean_name"] + "."
+            if s["clean_name"].startswith(prefix):
+                s["short_name"] = s["clean_name"][len(prefix):]
+            else:
+                s["short_name"] = s["clean_name"].split(".")[-1]
+
+            if is_func:
+                parent_class["methods"].append(s)
+            else:
+                parent_class["fields"].append(s)
+        else:
+            s["short_name"] = s["clean_name"].split(".")[-1]
+            if is_func:
+                top_level_funcs.append(s)
+            else:
+                top_level_vars.append(s)
 
     md = [f"## File Index: `{fp}`\n"]
+
+    if top_level_vars:
+        md.append("### Constants & Variables")
+        for v in top_level_vars:
+            range_str = f" [{v['line_range']}]" if v["line_range"] else ""
+            badge_str = f" `{v['badge']}`" if v.get("badge") else ""
+            sig = v["signature"].strip()
+            if sig and "\n" not in sig and "=" in sig:
+                val = sig.split("=", 1)[1].strip()
+                if len(val) > 60:
+                    val = val[:57] + "..."
+                md.append(f"- `{v['short_name']}`{badge_str}{range_str} = `{val}`")
+            elif sig and "\n" not in sig and not sig.startswith("self."):
+                md.append(f"- `{v['short_name']}`{badge_str}{range_str}: `{sig}`")
+            else:
+                md.append(f"- `{v['short_name']}`{badge_str}{range_str}")
+            if v["docstring"]:
+                md.append(f"  * {v['docstring']}")
+        md.append("")
 
     if classes:
         md.append("### Classes")
         for cl in classes:
             range_str = f" [{cl['line_range']}]" if cl["line_range"] else ""
             badge_str = f" `{cl['badge']}`" if cl.get("badge") else ""
-            md.append(f"- **{cl['symbol']}**{badge_str}{range_str} ({cl['kind']})")
-            doc = _clean_doc_summary(cl["docstring"])
-            if doc:
-                md.append(f"  * {doc}")
+            kind_label = cl["kind"].lower()
+            if kind_label in ("class", "struct", "interface"):
+                header_title = f"{kind_label} {cl['short_name']}"
+            else:
+                header_title = f"{cl['short_name']} ({cl['kind']})"
+            md.append(f"- **{header_title}**{badge_str}{range_str}")
+
+            if cl["docstring"]:
+                md.append(f"  * *Docstring*: {cl['docstring']}")
+
+            if cl["fields"]:
+                field_strs = []
+                for f in cl["fields"]:
+                    frange = f" [{f['line_range']}]" if f["line_range"] else ""
+                    fsig = f["signature"].strip()
+                    if fsig.startswith("self."):
+                        fsig = fsig[5:].strip()
+                    if fsig and "\n" not in fsig and len(fsig) <= 40:
+                        field_strs.append(f"`{fsig}`{frange}")
+                    else:
+                        field_strs.append(f"`{f['short_name']}`{frange}")
+                md.append(f"  * *Fields*: {', '.join(field_strs)}")
+
+            if cl["methods"]:
+                md.append("  * *Methods*:")
+                for m in cl["methods"]:
+                    mrange = f" [{m['line_range']}]" if m["line_range"] else ""
+                    mbadge = f" `{m['badge']}`" if m.get("badge") else ""
+                    msig = _clean_method_signature(m["signature"], m["short_name"])
+                    md.append(f"    - {msig}{mbadge}{mrange}")
+                    if m["docstring"]:
+                        md.append(f"      * {m['docstring']}")
         md.append("")
 
-    if methods_and_funcs:
-        md.append("### Methods & Functions")
-        for mf in methods_and_funcs:
-            range_str = f" [{mf['line_range']}]" if mf["line_range"] else ""
-            badge_str = f" `{mf['badge']}`" if mf.get("badge") else ""
-            md.append(f"- **{mf['symbol']}**{badge_str}{range_str}")
-            if mf["signature"]:
-                md.append(f"  * *Signature*: `{mf['signature']}`")
-            doc = _clean_doc_summary(mf["docstring"])
-            if doc:
-                md.append(f"  * *Docstring*: {doc}")
+    if top_level_funcs:
+        section_name = "### Functions" if classes else "### Methods & Functions"
+        md.append(section_name)
+        for fn in top_level_funcs:
+            range_str = f" [{fn['line_range']}]" if fn["line_range"] else ""
+            badge_str = f" `{fn['badge']}`" if fn.get("badge") else ""
+            fsig = _clean_method_signature(fn["signature"], fn["short_name"])
+            md.append(f"- {fsig}{badge_str}{range_str}")
+            if fn["docstring"]:
+                md.append(f"  * {fn['docstring']}")
         md.append("")
 
     return "\n".join(md)

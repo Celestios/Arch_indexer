@@ -128,7 +128,7 @@ def cmd_mcp(args):
     print(f"  URL:       {url}")
     print(f"  PID:       {os.getpid()}")
     print(f"  Transport: {'SSE' if port > 0 else 'stdio'}")
-    print("  Tools:     lookup, context, impact, audit, compile_context, map, reindex, set_status")
+    print("  Tools:     lookup, context, impact, audit, compile_context, map, update, set_status")
     print("Press Ctrl+C to terminate.\n", flush=True)
 
     from interface.server import run_server

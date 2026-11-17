@@ -30,6 +30,77 @@ def test_symbol_classification_badge_rendering():
     assert "[layer: Domain, tier: 2]" in context_md
 
 
+def test_format_context_results_tree_hierarchy():
+    symbols = [
+        {
+            "symbol": "db/connection/DEFAULT_DB_PATH.",
+            "signature": "DEFAULT_DB_PATH = Path(__file__).parent / 'arch.db'",
+            "docstring": "pathlib.Path",
+            "kind": "Variable",
+            "classification": None,
+        },
+        {
+            "symbol": "db/connection/DbConnection#",
+            "signature": "class DbConnection:",
+            "docstring": "Manages DuckDB database connections and initialization.",
+            "kind": "Class",
+            "classification": None,
+        },
+        {
+            "symbol": "db/connection/DbConnection#__init__().",
+            "signature": "def __init__(self, db_path: Path):",
+            "docstring": "def __init__(",
+            "kind": "Method",
+            "classification": None,
+        },
+        {
+            "symbol": "db/connection/DbConnection#db_path.",
+            "signature": "self.db_path = db_path",
+            "docstring": "(variable) db_path: Path",
+            "kind": "Field",
+            "classification": None,
+        },
+        {
+            "symbol": "db/connection/DbConnection#get_connection().",
+            "signature": "def get_connection(self) -> duckdb.DuckDBPyConnection:",
+            "docstring": "Creates and returns a connection to the database.",
+            "kind": "Method",
+            "classification": None,
+        },
+    ]
+    symbol_to_lines = {
+        "db/connection/DEFAULT_DB_PATH.": (7, 7),
+        "db/connection/DbConnection#": (9, 149),
+        "db/connection/DbConnection#__init__().": (14, 17),
+        "db/connection/DbConnection#db_path.": (15, 15),
+        "db/connection/DbConnection#get_connection().": (19, 33),
+    }
+
+    res = format_context_results("src/db/connection.py", symbols, symbol_to_lines)
+
+    # 1. Constants section exists and strips module prefix
+    assert "### Constants & Variables" in res
+    assert "- `DEFAULT_DB_PATH` [L7]" in res
+
+    # 2. Class section exists and nests members
+    assert "### Classes" in res
+    assert "- **class DbConnection** [L9-149]" in res
+    assert "*Docstring*: Manages DuckDB database connections and initialization." in res
+
+    # 3. Fields clustered and clean
+    assert "*Fields*: `db_path = db_path` [L15]" in res
+
+    # 4. Methods nested under class with inline signature and real docstring
+    assert "- `def __init__(self, db_path: Path)` [L14-17]" in res
+    assert "- `def get_connection(self) -> duckdb.DuckDBPyConnection` [L19-33]" in res
+    assert "Creates and returns a connection to the database." in res
+
+    # 5. Fake docstrings pruned
+    assert "*Docstring*: def __init__(" not in res
+    assert "pathlib.Path" not in res
+    assert "(variable)" not in res
+
+
 def test_counterfactual_fix_suggestion(tmp_path):
     root = initialize_workspace(tmp_path)
     db_conn = DbConnection(root / "arch.db")

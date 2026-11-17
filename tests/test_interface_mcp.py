@@ -408,13 +408,31 @@ def test_mcp_tools_database_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(server_config, "_resolved", {"project_root": tmp_path})
     monkeypatch.setattr(server_config, "get_db_path", lambda: non_existent)
 
-    # All 5 tools should return clean error string instead of crashing
+    # All tools should return clean error string instead of crashing
     assert "database not found" in mcp_server.lookup("target").lower()
     assert "database not found" in mcp_server.context("lib/file.dart").lower()
     assert "database not found" in mcp_server.impact("symbol").lower()
     assert "database not found" in mcp_server.compile_context("symbol").lower()
     assert "database not found" in mcp_server.audit().lower()
     assert "database not found" in mcp_server.map().lower()
+    assert "database not found" in mcp_server.update().lower()
+
+
+def test_mcp_tool_registered_names():
+    import src.interface.server as mcp_server
+    tools = getattr(mcp_server.mcp, "tools", [])
+    assert "update" in tools
+    assert "reindex" not in tools
+    assert "index" not in tools
+
+
+def test_mcp_tools_update(tmp_path, monkeypatch):
+    repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
+    import src.interface.server as mcp_server
+
+    res = mcp_server.update()
+    assert "## Workspace Update" in res
 
 
 def test_mcp_tools_map(tmp_path, monkeypatch):

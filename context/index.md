@@ -29,6 +29,7 @@
 ## C
 
 - [circuit-board-routing.md](circuit-board-routing.md) — Hierarchical orthogonal routing, horizontal trunk crossbar bridges, dynamic highway sizing, and obstacle avoidance for the circuit board diagram engine
+- [context-output-hierarchy.md](context-output-hierarchy.md) — Scope-aware tree hierarchy, member nesting, and docstring noise pruning in file context indexing
 
 ## D
 
