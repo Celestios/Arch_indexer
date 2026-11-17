@@ -104,7 +104,7 @@ def handle_map(
 ) -> str:
     """
     Provides a structured, hierarchical architectural blueprint map of the repository.
-    Supports modular target queries with independent tree depths, detail levels, and external filtering.
+    Use this tool when exploring an unfamiliar codebase, understanding subsystem boundaries and topologies, discovering inter-module call dependencies, identifying central architectural hubs, or surveying code organization at configurable depths.
     """
     # 1. Parse and normalize target queries
     parsed_targets: List[Dict[str, Any]] = []

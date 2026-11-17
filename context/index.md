@@ -57,12 +57,15 @@
 ## M
 
 - [mcp-server-lifecycle.md](mcp-server-lifecycle.md) — Foreground MCP server execution by default, conflict diagnostic notices, lifecycle flags (--stop, --restart, --status), and detached headless daemon execution
+- [mcp-tool-semantics.md](mcp-tool-semantics.md) — Skill-style generalized tool descriptions, decoupled lookup and context discovery semantics, and watcher-aware update contracts
 
 ## N
 
 ## O
 
 ## P
+
+- [pyinstaller-binary-packaging.md](pyinstaller-binary-packaging.md) — Bundling Tree-sitter query definitions and pruning legacy CodeQL and analyzer data in PyInstaller binary spec
 
 ## Q
 

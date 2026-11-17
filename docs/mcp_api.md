@@ -134,7 +134,7 @@ The CLI tool `arch` provides commands for workspace setup, indexing, auditing bo
 The FastMCP server exposes tools returning clean, token-efficient Markdown strings optimized for LLM consumption.
 
 ### `lookup`
-*   **Purpose**: Resolves symbol and file locations, definitions, occurrences, and direct call relationships.
+*   **Purpose**: Resolves symbol and file locations, definitions, occurrences, and direct call relationships. Use this tool like a targeted search or symbol-aware grep to locate a specific node, symbol, function, or class across the codebase when you don't know where it is defined or used.
 *   **Parameters**:
     *   `target` (Union[list[str], str], required): Symbol name, file path, or search query.
 *   **Output Format (Markdown)**:
@@ -146,7 +146,7 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
     ```
 
 ### `context`
-*   **Purpose**: Lightweight file Table of Contents (TOC) with line ranges, letting agents target narrow, line-range reads using their file viewer. Accepts multiple files.
+*   **Purpose**: Returns structural outlines, declared symbols, class/method signatures, and line ranges for specified files. Use this tool when you know something is located in a specific file but don't know which part, allowing you to inspect its internal structure and locate the exact section or member without reading the entire file.
 *   **Parameters**:
     *   `filepaths` (Union[list[str], str], required): A single filepath, a comma-separated string, or a list of file paths.
 *   **Output Format (Markdown)**:
@@ -164,7 +164,7 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
     ```
 
 ### `impact`
-*   **Purpose**: Blast-radius computation. Traces call chains upstream (callers) and downstream (callees) transitively.
+*   **Purpose**: Performs blast radius analysis by computing the transitive closure of upstream callers and downstream callees up to max_depth. Use this tool when evaluating the ripple effects of proposed refactors or deletions, tracing multi-hop failure propagation in defect investigations, assessing coupling between components, or discovering central hub symbols.
 *   **Parameters**:
     *   `symbol` (string, required): Fully qualified symbol name.
     *   `max_depth` (integer, optional, default: 3): Traversal depth limit.
@@ -182,7 +182,7 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
     ```
 
 ### `compile_context`
-*   **Purpose**: BFS-traverses the call graph neighborhood of a focal symbol, dynamically extracting raw source code blocks directly from the filesystem using line coordinates, and returns a unified markdown context report.
+*   **Purpose**: Compiles a bounded architectural context document by traversing the call graph neighborhood of a focal symbol. Use this tool when assembling targeted multi-hop implementation or refactoring context around a focal point, analyzing vertical execution pipelines across architectural tiers, or conducting forensic defect slicing without manually reading multiple files.
 *   **Parameters**:
     *   `symbol` (string, required): Focal symbol name.
     *   `radius` (integer, optional, default: 2): Traversals hops.
@@ -191,7 +191,7 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
     *   `out_filepath` (string, optional): Relative path to write the markdown context to.
 
 ### `audit`
-*   **Purpose**: Runs the project-wide boundary audit check.
+*   **Purpose**: Runs project-wide architectural boundary and layer compliance checks against configured rules. Use this tool when validating architectural boundaries, verifying that changes do not violate layer or module constraints, checking for circular dependencies, or enforcing structural integrity during code reviews and pre-commit checks.
 *   **Parameters**: None
 *   **Output Format (Markdown)**:
     ```markdown
@@ -203,36 +203,36 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
     ```
 
 ### `report`
-*   **Purpose**: Generates a structured overview or compliance violation report of the workspace.
+*   **Purpose**: Generates high-level summaries or compliance reports of the workspace code graph. Use this tool when creating executive architectural overviews, summarizing structural metrics and active violations for documentation, or exporting workspace dependency health in Markdown or JSON format.
 *   **Parameters**:
     *   `name` (string, required): Name of the report (`overview` or `compliance`).
     *   `format` (string, optional, default: `markdown`): Format of the output (`markdown` or `json`).
 
 ### `analyze`
-*   **Purpose**: Validates the architectural configuration ontology (`config.json`) completeness and sanity. Checks syntax, structure, allowed values reachability, and dependency rules referential integrity.
+*   **Purpose**: Validates architectural configuration ontology completeness, reachability, and referential sanity. Use this tool when authoring or updating architectural boundary rules, checking configuration syntax and schema integrity, verifying layer and tier definitions, or troubleshooting rule misconfigurations.
 *   **Parameters**: None
 
 ### `set_fields`
-*   **Purpose**: Updates manual compliance status or metadata fields for files, strictly validating them against the project ontology (`config.json`).
+*   **Purpose**: Sets manual architectural metadata fields and tags for a registered file. Use this tool when tagging files with custom architectural metadata, recording module classifications, assigning component responsibilities, or annotating files with inspection notes.
 *   **Parameters**:
     *   `filepath` (string, required): Target source file path.
     *   `fields_json` (string, required): JSON string of field-value pairs to set.
     *   `justification` (string, optional): Justification comment explaining the update.
 
 ### `clear_pending`
-*   **Purpose**: Clears the change-tracker pending audit flags for all files in the database.
+*   **Purpose**: Clears the change-tracker pending audit flags for all files in the database. Use this tool when acknowledging recorded workspace modifications, resetting incremental audit queues after reviewing changes, or resetting change tracker flags.
 *   **Parameters**:
     *   `justification` (string, required): Reason for clearing pending audits.
 
 ### `set_status`
-*   **Purpose**: Sets manual AI logical compliance status for a file (`COMPLIANT` or `VIOLATION_DETECTED`). Flagging a file as `VIOLATION_DETECTED` requires a justification comment and registers a manual logical violation in the compliance catalog.
+*   **Purpose**: Sets manual AI logical compliance status for a file (`COMPLIANT` or `VIOLATION_DETECTED`). Flagging a file as `VIOLATION_DETECTED` requires a justification comment and registers a manual logical violation in the compliance catalog. Use this tool when recording architectural review assessments, flagging logical violations or anti-patterns that static rules cannot detect, or approving documented architectural exceptions with justification.
 *   **Parameters**:
     *   `filepath` (string, required): Target source file path.
     *   `status` (string, required): Manual compliance status (`COMPLIANT` or `VIOLATION_DETECTED`).
     *   `justification` (string, optional): Justification comment (required for `VIOLATION_DETECTED`).
 
 ### `map`
-*   **Purpose**: Returns a structured, multi-level architectural blueprint map: repository totals, table-based structural nodes, key hubs, and directional call dependencies. Supports dynamic and modular queries across arbitrary repository subtrees.
+*   **Purpose**: Returns a structured, multi-level architectural blueprint map of the repository, including project totals, structural nodes, key hubs, and directional call flows. Use this tool when exploring an unfamiliar codebase, understanding subsystem boundaries and topologies, discovering inter-module call dependencies, identifying central architectural hubs, or surveying code organization at configurable depths.
 *   **Parameters**:
     *   `targets` (list of objects or JSON string, optional): List of query specs to evaluate multiple subtrees simultaneously, e.g. `[{"path": "src", "tree_depth": 1, "detail_level": "folder"}]`.
     *   `path` (string, optional, default: `""`): Starting position in the project tree (`""` for root, or e.g. `"src"`, `"tests"`, `"packages/core"`).
@@ -260,7 +260,7 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
     ```
 
 ### `update`
-*   **Purpose**: Triggers an incremental (or forced full) update of workspace symbols and call edges to refresh symbol tables, occurrences, call graph edges, and architectural compliance rules.
+*   **Purpose**: Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges. Note that the MCP watcher module already auto-updates the database in the background (tree-sitter updates are quick, while SCIP-gathered info might lag). Use this tool only for manual updates when forced synchronization or explicit re-indexing is required.
 *   **Parameters**:
     *   `filepaths` (Union[list[str], str], optional): Target file(s) to incrementally update. If omitted, checks all detected languages.
     *   `force` (boolean, optional, default: False): If True, performs a clean full re-index.

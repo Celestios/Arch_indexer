@@ -16,7 +16,8 @@ def handle_update(
     force: bool = False,
 ) -> str:
     """
-    Triggers an incremental (or forced full) update of workspace symbols and call edges.
+    Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges.
+    Note that the MCP watcher module already auto-updates the database in the background (tree-sitter updates are quick, while SCIP-gathered info might lag). Use this tool only for manual updates when forced synchronization or explicit re-indexing is required.
     """
     arch_dir = initialize_workspace(project_root)
 

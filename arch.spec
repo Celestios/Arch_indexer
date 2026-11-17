@@ -7,8 +7,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('src/db/schema.sql', 'src/db'),
-        ('src/engines/queries/*', 'engines/queries'),
-        ('src/engines/dart_analyzer/helper', 'engines/dart_analyzer/helper'),
+        ('src/engines/treesitter/queries/*', 'src/engines/treesitter/queries'),
         ('src/graph_builder/circuit_config.json', 'src/graph_builder'),
     ],
     hiddenimports=[

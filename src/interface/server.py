@@ -61,7 +61,8 @@ def close_server_connection():
 @mcp.tool()
 def lookup(target: Union[List[str], str]) -> str:
     """
-    Resolves symbol/file locations, definitions, occurrences, and call relationships.
+    Resolves symbol and file locations, definitions, occurrences, and direct call relationships.
+    Use this tool like a targeted search or symbol-aware grep to locate a specific node, symbol, function, or class across the codebase when you don't know where it is defined or used.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -78,7 +79,8 @@ def lookup(target: Union[List[str], str]) -> str:
 @mcp.tool()
 def context(filepaths: Union[List[str], str]) -> str:
     """
-    Returns class/function signature outlines and line ranges for the specified file(s).
+    Returns structural outlines, declared symbols, class/method signatures, and line ranges for specified files.
+    Use this tool when you know something is located in a specific file but don't know which part, allowing you to inspect its internal structure and locate the exact section or member without reading the entire file.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -95,8 +97,8 @@ def context(filepaths: Union[List[str], str]) -> str:
 @mcp.tool()
 def impact(symbol: str, max_depth: int = 3) -> str:
     """
-    Performs blast radius analysis for a symbol by computing the transitive closure
-    of its upstream callers and downstream callees up to max_depth.
+    Performs blast radius analysis by computing the transitive closure of upstream callers and downstream callees up to max_depth.
+    Use this tool when evaluating the ripple effects of proposed refactors or deletions, tracing multi-hop failure propagation in defect investigations, assessing coupling between components, or discovering central hub symbols.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -120,8 +122,8 @@ def compile_context(
     max_tokens: int = 4000,
 ) -> str:
     """
-    Compiles a deterministic markdown-formatted architectural context document
-    starting from a focal symbol, traversing its call graph neighborhood.
+    Compiles a bounded architectural context document by traversing the call graph neighborhood of a focal symbol.
+    Use this tool when assembling targeted multi-hop implementation or refactoring context around a focal point, analyzing vertical execution pipelines across architectural tiers, or conducting forensic defect slicing without manually reading multiple files.
     """
     direction = direction.lower()
     valid, msg = validate_direction(direction)
@@ -150,7 +152,8 @@ def compile_context(
 @mcp.tool()
 def audit() -> str:
     """
-    Runs the project-wide architectural boundary rules compliance audit against config.json.
+    Runs project-wide architectural boundary and layer compliance checks against configured rules.
+    Use this tool when validating architectural boundaries, verifying that changes do not violate layer or module constraints, checking for circular dependencies, or enforcing structural integrity during code reviews and pre-commit checks.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -170,6 +173,7 @@ def report(name: str, format: str = "markdown") -> str:
     Generates high-level summaries or compliance reports of the workspace code graph.
     name: 'overview' or 'compliance'
     format: 'markdown' or 'json'
+    Use this tool when creating executive architectural overviews, summarizing structural metrics and active violations for documentation, or exporting workspace dependency health in Markdown or JSON format.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -188,7 +192,8 @@ def report(name: str, format: str = "markdown") -> str:
 @mcp.tool()
 def analyze() -> str:
     """
-    Validates the architectural configuration ontology (config.json) completeness and sanity.
+    Validates architectural configuration ontology completeness, reachability, and referential sanity.
+    Use this tool when authoring or updating architectural boundary rules, checking configuration syntax and schema integrity, verifying layer and tier definitions, or troubleshooting rule misconfigurations.
     """
     try:
         from auditor.validator import ConfigValidator
@@ -219,7 +224,8 @@ def analyze() -> str:
 @mcp.tool()
 def set_fields(filepath: str, fields_json: str, justification: Optional[str] = None) -> str:
     """
-    Sets manual metadata fields for a file.
+    Sets manual architectural metadata fields and tags for a registered file.
+    Use this tool when tagging files with custom architectural metadata, recording module classifications, assigning component responsibilities, or annotating files with inspection notes.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -265,6 +271,7 @@ def set_fields(filepath: str, fields_json: str, justification: Optional[str] = N
 def clear_pending(justification: str) -> str:
     """
     Clears the pending audit flag on all files in the database.
+    Use this tool when acknowledging recorded workspace modifications, resetting incremental audit queues after reviewing changes, or resetting change tracker flags.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -284,7 +291,7 @@ def clear_pending(justification: str) -> str:
 
 @mcp.tool()
 def clear_pending_audits(justification: str = "Manual clear") -> str:
-    """Alias for clear_pending."""
+    """Alias for clear_pending. Use this tool when clearing pending audit flags across tracked files in the database."""
     return clear_pending(justification)
 
 
@@ -297,15 +304,8 @@ def map(
     include_external: bool = False,
 ) -> str:
     """
-    Returns a structured, multi-level architectural blueprint map of the repository.
-
-    Parameters:
-    - targets: Optional list of query dicts, e.g. [{"path": "src", "tree_depth": 1, "detail_level": "folder"}].
-               Allows querying multiple subtrees simultaneously.
-    - path: Starting position in the project tree ("" for repo root, "src", "tests", "lib", etc.).
-    - tree_depth: How many folder levels deep to group/aggregate (1 = immediate subfolders, 2 = sub-subfolders, 0 = flat).
-    - detail_level: Granularity level: "folder" | "file" | "class" | "symbol" (or 1..5).
-    - include_external: Whether to include third-party/built-in symbols (default: False).
+    Returns a structured, multi-level architectural blueprint map of the repository, including project totals, structural nodes, key hubs, and directional call flows.
+    Use this tool when exploring an unfamiliar codebase, understanding subsystem boundaries and topologies, discovering inter-module call dependencies, identifying central architectural hubs, or surveying code organization at configurable depths.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -329,8 +329,8 @@ def map(
 @mcp.tool()
 def set_status(filepath: str, status: str, justification: Optional[str] = None) -> str:
     """
-    Sets manual AI logical compliance status for a file (COMPLIANT or VIOLATION_DETECTED).
-    Flagging a file as VIOLATION_DETECTED requires a justification.
+    Sets manual AI logical compliance status for a file (COMPLIANT or VIOLATION_DETECTED). Flagging a file as VIOLATION_DETECTED requires a justification.
+    Use this tool when recording architectural review assessments, flagging logical violations or anti-patterns that static rules cannot detect, or approving documented architectural exceptions with justification.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -347,8 +347,8 @@ def set_status(filepath: str, status: str, justification: Optional[str] = None) 
 @mcp.tool()
 def update(filepaths: Optional[Union[List[str], str]] = None, force: bool = False) -> str:
     """
-    Triggers an incremental (or forced full) update of workspace symbols and call edges.
-    When code files are modified or refactored, use this tool to update the code graph.
+    Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges.
+    Note that the MCP watcher module already auto-updates the database in the background (tree-sitter updates are quick, while SCIP-gathered info might lag). Use this tool only for manual updates when forced synchronization or explicit re-indexing is required.
     """
     db_path = get_db_path()
     if not db_path.exists():
