@@ -13,7 +13,7 @@ def load_include_dirs(project_root: Path) -> Optional[Set[str]]:
     config = load_config(project_root)
     if not config:
         return None
-    dirs = [k for k, v in config.items() if isinstance(v, dict)]
+    dirs = [k for k, v in config.items() if isinstance(v, dict) and k not in ("exclude", ".")]
     return set(dirs) if dirs else None
 
 

@@ -37,6 +37,11 @@ def workspace_session(args):
     db_conn = DbConnection(arch_dir / "arch.db")
     repository = Repository(db_conn)
     try:
+        from utils.single_instance import register_workspace
+        register_workspace(project_root)
+    except Exception:
+        pass
+    try:
         yield project_root, arch_dir, repository
     finally:
         db_conn.close()

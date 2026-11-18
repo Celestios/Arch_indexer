@@ -43,8 +43,24 @@ def _select_languages(languages):
         return languages
 
 
-def _select_include_dirs(project_root, arch_dir):
-    """Interactively prompt user to select directories to index. Writes selection to config.json."""
+def _select_include_dirs(project_root, arch_dir, force: bool = False):
+    """Interactively prompt user to select directories to index if not configured. Writes selection to config.json."""
+    config_path = arch_dir / "config.json"
+    existing_config = {}
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                existing_config = json.load(f)
+        except Exception:
+            existing_config = {}
+
+    # If directories are already defined in config.json and not forcing rebuild, reuse them
+    if not force and existing_config:
+        configured_dirs = [k.rstrip("/\\") for k, v in existing_config.items() if isinstance(v, dict) and k not in ("exclude", ".")]
+        if configured_dirs:
+            print(f"Using configured directories from {config_path.name}: {', '.join(configured_dirs)}")
+            return configured_dirs
+
     skip_dirs = {".git", ".arch", ".venv", "__pycache__", "node_modules", ".mypy_cache", ".pytest_cache", "build", "dist"}
     code_exts = {".rs", ".dart", ".py", ".go", ".js", ".ts", ".java"}
 
@@ -61,7 +77,7 @@ def _select_include_dirs(project_root, arch_dir):
 
     code_dirs = sorted(code_dirs, key=str.lower)
     if not code_dirs:
-        return
+        return []
 
     selected = code_dirs
     if sys.stdin.isatty():
@@ -81,12 +97,19 @@ def _select_include_dirs(project_root, arch_dir):
         except (KeyboardInterrupt, EOFError, ValueError):
             print("\nDefaulting to all directories.")
 
-    config_path = arch_dir / "config.json"
-    if not config_path.exists():
-        config = {d: {} for d in selected}
+    # Save selection into config.json
+    try:
+        for d in selected:
+            d_key = f"{d}/"
+            if d not in existing_config and d_key not in existing_config:
+                existing_config[d_key] = {}
         with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
+            json.dump(existing_config, f, indent=2)
+    except Exception as e:
+        print(f"  Warning: Failed to save directories to config.json: {e}", file=sys.stderr)
+
     print(f"  Indexed directories: {', '.join(selected)}")
+    return selected
 
 
 def _run_scip_indexer(project_root, repository, selected_languages, force):
@@ -140,7 +163,7 @@ def cmd_init(args):
 
     # 3. User selections
     selected_languages = _select_languages(languages)
-    _select_include_dirs(project_root, arch_dir)
+    _select_include_dirs(project_root, arch_dir, force=getattr(args, 'force', False))
 
     # 4. Create shared repository for indexing and linking
     db_conn = DbConnection(arch_dir / "arch.db")
@@ -159,6 +182,10 @@ def cmd_init(args):
 
     # 5a. Run Tree-sitter AST Indexer (Stage 1: Declarations, Signatures, Docstrings, Metrics)
     print("\n--- Running Tree-sitter AST Indexer ---")
+    from engines.treesitter.loader import TreesitterLoader
+    for lang in selected_languages:
+        if not TreesitterLoader.get_parser(lang):
+            print(f"  Note: Tree-sitter parser for '{lang}' not available; semantic indexing will run via SCIP.")
     try:
         ast_sym_count = TreesitterEngine.sync_project_to_db(repository, project_root, languages=selected_languages)
         print(f"  Tree-sitter: Extracted {ast_sym_count} symbols with exact signatures and docstrings.")

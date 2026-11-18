@@ -439,12 +439,19 @@ def initialize_workspace(project_root: Path) -> Path:
         except Exception as e:
             print(f"Warning: Failed to synchronize compliance rules from config.json: {e}", file=sys.stderr)
 
-        # 4. Mine historical git co-change coupling
+        # 4. Historical git co-change coupling ingestion (disabled)
+        # try:
+        #     from change_tracker.git_coupling import GitCouplingMiner
+        #     pairs_count = GitCouplingMiner.mine_git_co_changes(project_root, repository)
+        #     if pairs_count > 0:
+        #         print(f"Mined {pairs_count} historical git co-change relationships.")
+        # except Exception:
+        #     pass
+
+        # 5. Register in machine-wide daemon registry
         try:
-            from change_tracker.git_coupling import GitCouplingMiner
-            pairs_count = GitCouplingMiner.mine_git_co_changes(project_root, repository)
-            if pairs_count > 0:
-                print(f"Mined {pairs_count} historical git co-change relationships.")
+            from utils.single_instance import register_workspace
+            register_workspace(project_root)
         except Exception:
             pass
     except Exception as e:

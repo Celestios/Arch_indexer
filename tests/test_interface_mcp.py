@@ -6,6 +6,19 @@ from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
 from auditor.analyzer import Auditor
+from interface.project_registry import ProjectRegistry
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def clean_test_env(tmp_path, monkeypatch):
+    global_dir = tmp_path / "global_arch"
+    monkeypatch.setenv("ARCH_GLOBAL_DIR", str(global_dir))
+    monkeypatch.delenv("ARCH_PROJECT_ROOT", raising=False)
+    ProjectRegistry.reset_instance()
+    yield
+    monkeypatch.delenv("ARCH_PROJECT_ROOT", raising=False)
+    ProjectRegistry.reset_instance()
 
 
 def setup_workspace(tmp_path):
@@ -416,14 +429,19 @@ def test_mcp_tools_database_missing(tmp_path, monkeypatch):
     assert "database not found" in mcp_server.audit().lower()
     assert "database not found" in mcp_server.map().lower()
     assert "database not found" in mcp_server.update().lower()
+    assert "database not found" in mcp_server.graph().lower()
 
 
 def test_mcp_tool_registered_names():
     import src.interface.server as mcp_server
     tools = getattr(mcp_server.mcp, "tools", [])
     assert "update" in tools
+    assert "graph" in tools
     assert "reindex" not in tools
     assert "index" not in tools
+    assert "projects" not in tools
+    assert "register_project" not in tools
+    assert "unregister_project" not in tools
 
 
 def test_mcp_tools_update(tmp_path, monkeypatch):

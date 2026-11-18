@@ -148,8 +148,9 @@ class TreesitterEngine:
         and synchronizes files, symbols, and definitions into DuckDB.
         Returns total number of symbols extracted.
         """
-        from utils.exclusions import load_include_dirs
+        from utils.exclusions import load_include_dirs, load_exclude_patterns, is_included, is_excluded
         include_dirs = load_include_dirs(project_root)
+        exclude_patterns = load_exclude_patterns(project_root)
         total_symbols = 0
 
         target_files = []
@@ -159,14 +160,14 @@ class TreesitterEngine:
                 if p.exists() and p.is_file():
                     target_files.append(p)
         else:
-            skip_dirs = {".git", ".arch", ".venv", "venv", "__pycache__", "node_modules", "build", "dist", "target"}
             for ext in TreesitterLoader.EXTENSION_MAP.keys():
                 for p in project_root.rglob(f"*{ext}"):
                     try:
                         rel = p.relative_to(project_root)
-                        if any(part in skip_dirs or part.startswith(".") for part in rel.parts):
+                        rel_str = str(rel).replace("\\", "/")
+                        if is_excluded(rel_str, exclude_patterns):
                             continue
-                        if include_dirs and not any(part in include_dirs for part in rel.parts):
+                        if include_dirs and not is_included(rel_str, include_dirs, exclude_patterns):
                             continue
                         lang = TreesitterLoader.detect_language(p)
                         if languages and lang not in languages:

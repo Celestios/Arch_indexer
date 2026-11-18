@@ -43,3 +43,20 @@ A critical bug caused symbols across the workspace (such as `db.connection.DbCon
 3. **Windows path normalization in ingester**: On Windows, SCIP occurrences and edges contained backslash paths (`src\\main.py`), while `changed_set` contained normalized forward slashes (`src/main.py`), causing occurrences and edges to be filtered out during ingestion. Normalized all paths to forward slashes in `IndexIngester`.
 
 **Reason:** Eliminating range collapse restores accurate occurrence coordinates and call graph caller mappings. Protecting database symbol metadata ensures the two engines cooperate without data clobbering.
+
+---
+
+## Tree-sitter Dart parser integration and path-inclusion normalization
+
+**Id:** 5c8e3101-9a72-4cf4-9de2-984e7be0f81d
+**Type:** decision
+**Status:** active
+**Evidence:** confirmed
+**Source:** maintainer session, 2026-11-18
+**Revisit when:** Tree-sitter upstream provides native unified multi-language loaders without separate per-language binary packages
+
+Tree-sitter AST parsing was extended to support Dart via `tree-sitter-dart>=0.1.0`, and file traversal filtering in `TreesitterEngine.sync_project_to_db` was refactored from ad-hoc path string checks to `is_included()` and `is_excluded()` from `utils.exclusions`.
+
+**Reason:** In Flutter/Dart codebases, Tree-sitter previously extracted 0 symbols because `tree-sitter-dart` was absent from dependencies. Furthermore, when `.arch/config.json` contained directory prefixes with trailing slashes (e.g. `"lib/"`), raw substring comparisons (`part in include_dirs`) failed to match path segments (`"lib"`), causing Tree-sitter to silently skip all workspace files.
+
+**Rejected alternative (SCIP-only indexing for Dart):** Relying solely on `scip-dart` without Tree-sitter was rejected because SCIP lacks sub-millisecond AST synchronization on file save and cannot extract multi-line signatures or docstrings in real time when files contain transient syntax errors.

@@ -13,8 +13,10 @@ def handle_context(filepaths, repository) -> str:
         if not symbols:
             all_files = repository.files.get_all_files_metadata()
             matched = None
+            norm_fp = fp.replace("\\", "/").lower()
             for real_fp in all_files.keys():
-                if real_fp.replace("\\", "/").endswith(fp.replace("\\", "/")):
+                norm_real = real_fp.replace("\\", "/").lower()
+                if norm_fp.endswith(norm_real) or norm_real.endswith(norm_fp):
                     matched = real_fp
                     break
             if matched:

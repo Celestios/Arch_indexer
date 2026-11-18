@@ -42,6 +42,8 @@
 
 ## G
 
+- [git-coupling-and-initialization.md](git-coupling-and-initialization.md) — Disabling historical git co-change ingestion due to non-atomic commit pollution, and idempotent directory configuration in workspace initialization
+
 ## H
 
 ## I

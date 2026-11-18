@@ -10,9 +10,10 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 from mcp.server.fastmcp import FastMCP
-from db.connection import DbConnection
 from db.repository import Repository
-from interface.server_config import get_project_root, get_db_path
+from interface.project_registry import ProjectRegistry
+from change_tracker.watcher_manager import WatcherManager
+from interface.server_config import get_project_root as get_default_project_root
 from interface.tools.context import handle_context
 from interface.tools.lookup import handle_lookup
 from interface.tools.impact import handle_impact
@@ -21,54 +22,91 @@ from interface.tools.compile_context import handle_compile_context
 from interface.tools.map import handle_map
 from interface.tools.update import handle_update
 from interface.tools.set_status import handle_set_status
+from interface.tools.graph import handle_graph
 from interface.validators import validate_direction, validate_resolution
 
 mcp = FastMCP("arch")
 
-_shared_db_conn: Optional[DbConnection] = None
-_shared_repository: Optional[Repository] = None
+
+def _resolve_context(
+    project_root: Optional[str] = None,
+    filepath: Optional[str] = None,
+) -> tuple[Path, Repository]:
+    """Helper to resolve project root and active repository."""
+    registry = ProjectRegistry.get_instance()
+    resolved_root = registry.resolve_project(project_root=project_root, filepath=filepath)
+    repository = registry.get_repository(project_root=resolved_root)
+    return resolved_root, repository
 
 
-def get_server_repository() -> Repository:
-    """Get or create cached Repository/DbConnection for the MCP server lifecycle."""
-    global _shared_db_conn, _shared_repository
-    db_path = get_db_path()
-    if not db_path.exists():
-        raise FileNotFoundError(f"Arch database not found at {db_path}. Please run 'arch init' first.")
-    if _shared_db_conn is None or _shared_db_conn.db_path != db_path:
-        if _shared_db_conn is not None:
-            try:
-                _shared_db_conn.close()
-            except Exception:
-                pass
-        _shared_db_conn = DbConnection(db_path)
-        _shared_repository = Repository(_shared_db_conn)
-    return _shared_repository
+def get_server_repository(
+    project_root: Optional[Union[str, Path]] = None,
+    filepath: Optional[Union[str, Path]] = None,
+) -> Repository:
+    """Get or create cached Repository from the ProjectRegistry."""
+    registry = ProjectRegistry.get_instance()
+    return registry.get_repository(project_root=project_root, filepath=filepath)
 
 
 def close_server_connection():
-    """Explicitly close cached server database connection."""
-    global _shared_db_conn, _shared_repository
-    if _shared_db_conn is not None:
-        try:
-            _shared_db_conn.close()
-        except Exception:
-            pass
-        _shared_db_conn = None
-        _shared_repository = None
+    """Explicitly close all cached server database connections."""
+    ProjectRegistry.reset_instance()
 
 
 @mcp.tool()
-def lookup(target: Union[List[str], str]) -> str:
+def graph(
+    project_root: Optional[str] = None,
+    output_path: Optional[str] = "circuit_board.html",
+    scope: Optional[str] = "src",
+    include_tests: bool = False,
+    include_occurrences: bool = False,
+    include_external: bool = False,
+    include_parameters: bool = False,
+    max_refs: Optional[int] = None,
+    open_browser: bool = False,
+) -> str:
+    """
+    Builds the interactive Electronic PCB Circuit Diagram HTML architecture visualizer directly from the DuckDB index.
+    Generates a standalone, zoomable HTML schematic visualizer representing modules, classes, and dependency traces.
+    project_root: Optional target workspace root directory.
+    output_path: Destination HTML file path (defaults to <project_root>/circuit_board.html).
+    scope: Directory or package scope filter (default: "src").
+    include_tests: Include test files in the graph visualizer.
+    include_occurrences: Include raw symbol occurrence vias.
+    include_external: Include external third-party dependencies.
+    include_parameters: Include parameter variable nodes.
+    max_refs: Maximum reference occurrences per symbol.
+    open_browser: Whether to open the generated HTML in the default web browser.
+    """
+    try:
+        resolved_root, _ = _resolve_context(project_root=project_root)
+        return handle_graph(
+            project_root=resolved_root,
+            output_path=output_path,
+            scope=scope,
+            include_tests=include_tests,
+            include_occurrences=include_occurrences,
+            include_external=include_external,
+            include_parameters=include_parameters,
+            max_refs=max_refs,
+            open_browser=open_browser,
+        )
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error generating architecture circuit visualizer: {e}"
+
+
+@mcp.tool()
+def lookup(target: Union[List[str], str], project_root: Optional[str] = None) -> str:
     """
     Resolves symbol and file locations, definitions, occurrences, and direct call relationships.
-    Use this tool like a targeted search or symbol-aware grep to locate a specific node, symbol, function, or class across the codebase when you don't know where it is defined or used.
+    Use this tool like a targeted search or symbol-aware grep to locate a specific node, symbol, function, or class across the codebase.
+    project_root: Optional workspace root directory.
     """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
+    filepath_hint = target if isinstance(target, str) and ("/" in target or "\\" in target) else None
     try:
-        repository = get_server_repository()
+        _, repository = _resolve_context(project_root=project_root, filepath=filepath_hint)
         return handle_lookup(target, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -77,16 +115,15 @@ def lookup(target: Union[List[str], str]) -> str:
 
 
 @mcp.tool()
-def context(filepaths: Union[List[str], str]) -> str:
+def context(filepaths: Union[List[str], str], project_root: Optional[str] = None) -> str:
     """
     Returns structural outlines, declared symbols, class/method signatures, and line ranges for specified files.
-    Use this tool when you know something is located in a specific file but don't know which part, allowing you to inspect its internal structure and locate the exact section or member without reading the entire file.
+    Use this tool when you know something is located in a specific file but don't know which part.
+    project_root: Optional workspace root directory.
     """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
+    filepath_hint = filepaths if isinstance(filepaths, str) else (filepaths[0] if filepaths else None)
     try:
-        repository = get_server_repository()
+        _, repository = _resolve_context(project_root=project_root, filepath=filepath_hint)
         return handle_context(filepaths, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -95,16 +132,14 @@ def context(filepaths: Union[List[str], str]) -> str:
 
 
 @mcp.tool()
-def impact(symbol: str, max_depth: int = 3) -> str:
+def impact(symbol: str, max_depth: int = 3, project_root: Optional[str] = None) -> str:
     """
     Performs blast radius analysis by computing the transitive closure of upstream callers and downstream callees up to max_depth.
-    Use this tool when evaluating the ripple effects of proposed refactors or deletions, tracing multi-hop failure propagation in defect investigations, assessing coupling between components, or discovering central hub symbols.
+    Use this tool when evaluating the ripple effects of proposed refactors or deletions.
+    project_root: Optional workspace root directory.
     """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        repository = get_server_repository()
+        _, repository = _resolve_context(project_root=project_root)
         return handle_impact(symbol, max_depth, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -120,10 +155,11 @@ def compile_context(
     resolution: str = "signature",
     out_filepath: Optional[str] = None,
     max_tokens: int = 4000,
+    project_root: Optional[str] = None,
 ) -> str:
     """
     Compiles a bounded architectural context document by traversing the call graph neighborhood of a focal symbol.
-    Use this tool when assembling targeted multi-hop implementation or refactoring context around a focal point, analyzing vertical execution pipelines across architectural tiers, or conducting forensic defect slicing without manually reading multiple files.
+    project_root: Optional workspace root directory.
     """
     direction = direction.lower()
     valid, msg = validate_direction(direction)
@@ -135,13 +171,10 @@ def compile_context(
     if not valid:
         return f"Error: {msg}"
 
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        repository = get_server_repository()
+        resolved_root, repository = _resolve_context(project_root=project_root)
         return handle_compile_context(
-            symbol, radius, direction, resolution, out_filepath, repository, get_project_root(), max_tokens
+            symbol, radius, direction, resolution, out_filepath, repository, resolved_root, max_tokens
         )
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -150,17 +183,14 @@ def compile_context(
 
 
 @mcp.tool()
-def audit() -> str:
+def audit(project_root: Optional[str] = None) -> str:
     """
     Runs project-wide architectural boundary and layer compliance checks against configured rules.
-    Use this tool when validating architectural boundaries, verifying that changes do not violate layer or module constraints, checking for circular dependencies, or enforcing structural integrity during code reviews and pre-commit checks.
+    project_root: Optional workspace root directory.
     """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        repository = get_server_repository()
-        return handle_audit(repository, get_project_root())
+        resolved_root, repository = _resolve_context(project_root=project_root)
+        return handle_audit(repository, resolved_root)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -168,18 +198,15 @@ def audit() -> str:
 
 
 @mcp.tool()
-def report(name: str, format: str = "markdown") -> str:
+def report(name: str, format: str = "markdown", project_root: Optional[str] = None) -> str:
     """
     Generates high-level summaries or compliance reports of the workspace code graph.
     name: 'overview' or 'compliance'
     format: 'markdown' or 'json'
-    Use this tool when creating executive architectural overviews, summarizing structural metrics and active violations for documentation, or exporting workspace dependency health in Markdown or JSON format.
+    project_root: Optional workspace root directory.
     """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        repository = get_server_repository()
+        _, repository = _resolve_context(project_root=project_root)
         from reporter.generator import Reporter
         reporter = Reporter(repository)
         return reporter.generate_report(name, format)
@@ -190,15 +217,15 @@ def report(name: str, format: str = "markdown") -> str:
 
 
 @mcp.tool()
-def analyze() -> str:
+def analyze(project_root: Optional[str] = None) -> str:
     """
     Validates architectural configuration ontology completeness, reachability, and referential sanity.
-    Use this tool when authoring or updating architectural boundary rules, checking configuration syntax and schema integrity, verifying layer and tier definitions, or troubleshooting rule misconfigurations.
+    project_root: Optional workspace root directory.
     """
     try:
+        resolved_root, _ = _resolve_context(project_root=project_root)
         from auditor.validator import ConfigValidator
-        project_root = get_project_root()
-        validator = ConfigValidator(project_root)
+        validator = ConfigValidator(resolved_root)
         res = validator.validate()
         lines = ["=== Configuration Sanity & Completeness Analysis ==="]
         if res["warnings"]:
@@ -222,21 +249,23 @@ def analyze() -> str:
 
 
 @mcp.tool()
-def set_fields(filepath: str, fields_json: str, justification: Optional[str] = None) -> str:
+def set_fields(
+    filepath: str,
+    fields_json: str,
+    justification: Optional[str] = None,
+    project_root: Optional[str] = None,
+) -> str:
     """
     Sets manual architectural metadata fields and tags for a registered file.
-    Use this tool when tagging files with custom architectural metadata, recording module classifications, assigning component responsibilities, or annotating files with inspection notes.
+    project_root: Optional workspace root directory.
     """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
         fields = json.loads(fields_json)
     except Exception as e:
         return f"Error: Invalid JSON fields payload: {e}"
 
     try:
-        repository = get_server_repository()
+        resolved_root, repository = _resolve_context(project_root=project_root, filepath=filepath)
         from utils.session import resolve_filepath
         resolved = resolve_filepath(repository, filepath)
         if not resolved:
@@ -258,7 +287,7 @@ def set_fields(filepath: str, fields_json: str, justification: Optional[str] = N
 
         repository.files.update_file_manual_fields(resolved, current_fields, justification)
         from auditor.analyzer import Auditor
-        auditor = Auditor(repository, get_project_root())
+        auditor = Auditor(repository, resolved_root)
         auditor.run_audit()
         return f"Successfully updated manual fields for '{resolved}' to: {current_fields}."
     except FileNotFoundError as e:
@@ -268,19 +297,16 @@ def set_fields(filepath: str, fields_json: str, justification: Optional[str] = N
 
 
 @mcp.tool()
-def clear_pending(justification: str) -> str:
+def clear_pending(justification: str, project_root: Optional[str] = None) -> str:
     """
     Clears the pending audit flag on all files in the database.
-    Use this tool when acknowledging recorded workspace modifications, resetting incremental audit queues after reviewing changes, or resetting change tracker flags.
+    project_root: Optional workspace root directory.
     """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        repository = get_server_repository()
+        resolved_root, repository = _resolve_context(project_root=project_root)
         repository.files.clear_all_pending_audits(justification)
         from auditor.analyzer import Auditor
-        auditor = Auditor(repository, get_project_root())
+        auditor = Auditor(repository, resolved_root)
         auditor.run_audit()
         return "Successfully cleared pending audit status for all files."
     except FileNotFoundError as e:
@@ -290,9 +316,9 @@ def clear_pending(justification: str) -> str:
 
 
 @mcp.tool()
-def clear_pending_audits(justification: str = "Manual clear") -> str:
-    """Alias for clear_pending. Use this tool when clearing pending audit flags across tracked files in the database."""
-    return clear_pending(justification)
+def clear_pending_audits(justification: str = "Manual clear", project_root: Optional[str] = None) -> str:
+    """Alias for clear_pending."""
+    return clear_pending(justification, project_root=project_root)
 
 
 @mcp.tool()
@@ -302,16 +328,14 @@ def map(
     tree_depth: int = 1,
     detail_level: str = "folder",
     include_external: bool = False,
+    project_root: Optional[str] = None,
 ) -> str:
     """
-    Returns a structured, multi-level architectural blueprint map of the repository, including project totals, structural nodes, key hubs, and directional call flows.
-    Use this tool when exploring an unfamiliar codebase, understanding subsystem boundaries and topologies, discovering inter-module call dependencies, identifying central architectural hubs, or surveying code organization at configurable depths.
+    Returns a structured, multi-level architectural blueprint map of the repository.
+    project_root: Optional workspace root directory.
     """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        repository = get_server_repository()
+        _, repository = _resolve_context(project_root=project_root, filepath=path or None)
         return handle_map(
             repository,
             targets=targets,
@@ -327,17 +351,19 @@ def map(
 
 
 @mcp.tool()
-def set_status(filepath: str, status: str, justification: Optional[str] = None) -> str:
+def set_status(
+    filepath: str,
+    status: str,
+    justification: Optional[str] = None,
+    project_root: Optional[str] = None,
+) -> str:
     """
-    Sets manual AI logical compliance status for a file (COMPLIANT or VIOLATION_DETECTED). Flagging a file as VIOLATION_DETECTED requires a justification.
-    Use this tool when recording architectural review assessments, flagging logical violations or anti-patterns that static rules cannot detect, or approving documented architectural exceptions with justification.
+    Sets manual AI logical compliance status for a file (COMPLIANT or VIOLATION_DETECTED).
+    project_root: Optional workspace root directory.
     """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
     try:
-        repository = get_server_repository()
-        return handle_set_status(repository, get_project_root(), filepath, status, justification)
+        resolved_root, repository = _resolve_context(project_root=project_root, filepath=filepath)
+        return handle_set_status(repository, resolved_root, filepath, status, justification)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -345,36 +371,45 @@ def set_status(filepath: str, status: str, justification: Optional[str] = None) 
 
 
 @mcp.tool()
-def update(filepaths: Optional[Union[List[str], str]] = None, force: bool = False) -> str:
+def update(
+    filepaths: Optional[Union[List[str], str]] = None,
+    force: bool = False,
+    project_root: Optional[str] = None,
+) -> str:
     """
     Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges.
-    Note that the MCP watcher module already auto-updates the database in the background (tree-sitter updates are quick, while SCIP-gathered info might lag). Use this tool only for manual updates when forced synchronization or explicit re-indexing is required.
+    project_root: Optional workspace root directory.
     """
-    db_path = get_db_path()
-    if not db_path.exists():
-        return f"Error: Arch database not found at {db_path}. Please run 'arch init' first."
+    filepath_hint = filepaths if isinstance(filepaths, str) else (filepaths[0] if filepaths else None)
     try:
-        repository = get_server_repository()
-        return handle_update(repository, get_project_root(), filepaths=filepaths, force=force)
+        resolved_root, repository = _resolve_context(project_root=project_root, filepath=filepath_hint)
+        return handle_update(repository, resolved_root, filepaths=filepaths, force=force)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error updating workspace: {e}"
 
 
-# Backward compatibility aliases for internal python calls (not exposed as MCP tools)
-def reindex(filepaths: Optional[Union[List[str], str]] = None, force: bool = False) -> str:
-    """Alias for update."""
-    return update(filepaths=filepaths, force=force)
+# Backward compatibility aliases for internal python calls
+def reindex(filepaths: Optional[Union[List[str], str]] = None, force: bool = False, project_root: Optional[str] = None) -> str:
+    return update(filepaths=filepaths, force=force, project_root=project_root)
 
 
-def index(filepaths: Optional[Union[List[str], str]] = None, force: bool = False) -> str:
-    """Alias for update."""
-    return update(filepaths=filepaths, force=force)
+def index(filepaths: Optional[Union[List[str], str]] = None, force: bool = False, project_root: Optional[str] = None) -> str:
+    return update(filepaths=filepaths, force=force, project_root=project_root)
 
 
 def run_server(port: int = 0):
     try:
+        # Pre-register default project root if available
+        default_root = get_default_project_root()
+        if (default_root / ".arch" / "arch.db").exists():
+            try:
+                registry = ProjectRegistry.get_instance()
+                registry.register_project(default_root, start_watcher=True)
+            except Exception:
+                pass
+
         if port > 0:
             if hasattr(mcp, "settings"):
                 mcp.settings.port = port
@@ -382,6 +417,7 @@ def run_server(port: int = 0):
         else:
             mcp.run()
     finally:
+        WatcherManager.get_instance().stop_all()
         close_server_connection()
 
 
@@ -391,4 +427,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

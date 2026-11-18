@@ -12,6 +12,15 @@ from utils.single_instance import (
     read_lock,
     write_lock,
 )
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolate_global_arch_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARCH_GLOBAL_DIR", str(tmp_path / "global_arch"))
+    monkeypatch.delenv("ARCH_PROJECT_ROOT", raising=False)
+    yield
+    monkeypatch.delenv("ARCH_PROJECT_ROOT", raising=False)
 
 
 def test_write_and_read_lock(tmp_path):
@@ -63,7 +72,9 @@ def test_server_alive_scenarios():
 
 def test_acquire_server_fresh(tmp_path):
     arch_dir = tmp_path / ".arch"
-    with patch("utils.single_instance._find_open_port", return_value=8075):
+    with patch("utils.single_instance._port_open", return_value=True), patch(
+        "utils.single_instance._find_open_port", return_value=8075
+    ):
         url = acquire_server(arch_dir)
         assert url is None  # None means this instance acquired slot
         lock = read_lock(arch_dir)
