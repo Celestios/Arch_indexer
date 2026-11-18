@@ -191,3 +191,144 @@ def test_clean_symbol_storage_and_querying(tmp_path):
     assert user_sym["clean_symbol"] == "domain.user.User"
 
     db_conn.close()
+
+
+def test_scip_ingester_fuzzy_line_match(tmp_path):
+    db_file = tmp_path / "test_fuzzy.db"
+    db_conn = DbConnection(db_file)
+    repo = Repository(db_conn)
+
+    # 1. Pre-populate Tree-sitter declaration at line 10 (e.g. @override on line 10)
+    repo.symbols.upsert_symbol(
+        symbol="lib.src.service.Service.handleRequest",
+        clean_symbol="lib.src.service.Service.handleRequest",
+        filepath="src/service.dart",
+        kind="Method",
+        signature="@override void handleRequest()",
+        docstring="Handles client request",
+        code_block="{\n  print('handling');\n}",
+        body_hash="ts_hash_123"
+    )
+    repo.symbols.add_occurrences_bulk([
+        {
+            "symbol": "lib.src.service.Service.handleRequest",
+            "filepath": "src/service.dart",
+            "start_line": 10,
+            "start_col": 0,
+            "end_line": 10,
+            "end_col": 20,
+            "role": 1
+        }
+    ])
+
+    # 2. SCIP index anchors definition on identifier at line 12 (offset of 2 lines)
+    scip_sym_id = "scip-dart dart pkg 1.0.0 src/service.dart/Service#handleRequest()."
+    parsed_data = {
+        "symbols": {
+            scip_sym_id: {
+                "symbol": scip_sym_id,
+                "filepath": "src/service.dart",
+                "kind": "Method",
+                "signature": "",
+                "docstring": "",
+                "code_block": None,
+                "body_hash": None,
+                "parent_symbol": "src/service.dart/Service#"
+            }
+        },
+        "occurrences": [
+            {
+                "symbol": scip_sym_id,
+                "filepath": "src/service.dart",
+                "start_line": 12,
+                "start_col": 2,
+                "end_line": 12,
+                "end_col": 15,
+                "role": 1
+            }
+        ],
+        "edges": []
+    }
+
+    IndexIngester.ingest_index(repo, parsed_data, project_root=None, force=False)
+
+    # 3. Verify SCIP symbol merged Tree-sitter AST attributes
+    merged = repo.symbols.get_symbol(scip_sym_id)
+    assert merged is not None
+    assert merged["signature"] == "@override void handleRequest()"
+    assert merged["code_block"] == "{\n  print('handling');\n}"
+    assert merged["body_hash"] == "ts_hash_123"
+
+    # 4. Verify duplicate Tree-sitter symbol row was superseded and deleted
+    old_ts = repo.symbols.get_symbol("lib.src.service.Service.handleRequest")
+    assert old_ts is None
+
+    db_conn.close()
+
+
+def test_scip_ingester_preserves_test_and_non_scip_files(tmp_path):
+    db_file = tmp_path / "test_preserve.db"
+    db_conn = DbConnection(db_file)
+    repo = Repository(db_conn)
+
+    # 1. Create files on disk and pre-populate Tree-sitter symbols in production file and test file
+    src_dir = tmp_path / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    (src_dir / "core.rs").write_text("pub fn core_run() {}", encoding="utf-8")
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "test_core.rs").write_text("pub fn test_basic_flow() {}", encoding="utf-8")
+
+    repo.files.upsert_files_bulk([
+        {"filepath": "src/core.rs", "language": "rust", "sha256": "h1"},
+        {"filepath": "tests/test_core.rs", "language": "rust", "sha256": "h2"}
+    ])
+    repo.symbols.upsert_symbol(
+        symbol="tests.test_core.test_basic_flow",
+        clean_symbol="tests.test_core.test_basic_flow",
+        filepath="tests/test_core.rs",
+        kind="Function",
+        signature="fn test_basic_flow()",
+        docstring="",
+        body_hash="ts_test_hash"
+    )
+
+    # 2. SCIP index only contains src/core.rs (tests/ is not indexed by SCIP)
+    scip_sym_id = "rust-analyzer cargo core 0.1.0 src/core.rs/core_run()."
+    parsed_data = {
+        "symbols": {
+            scip_sym_id: {
+                "symbol": scip_sym_id,
+                "filepath": "src/core.rs",
+                "kind": "Function",
+                "signature": "fn core_run()",
+                "docstring": "",
+                "code_block": None,
+                "body_hash": "scip_hash",
+                "parent_symbol": None
+            }
+        },
+        "occurrences": [
+            {
+                "symbol": scip_sym_id,
+                "filepath": "src/core.rs",
+                "start_line": 1,
+                "start_col": 7,
+                "end_line": 1,
+                "end_col": 15,
+                "role": 1
+            }
+        ],
+        "edges": []
+    }
+
+    IndexIngester.ingest_index(repo, parsed_data, project_root=tmp_path, force=False)
+
+    # 3. Verify tests/ symbol is still preserved in DB
+    test_sym = repo.symbols.get_symbol("tests.test_core.test_basic_flow")
+    assert test_sym is not None
+    assert test_sym["filepath"] == "tests/test_core.rs"
+
+    db_conn.close()
+

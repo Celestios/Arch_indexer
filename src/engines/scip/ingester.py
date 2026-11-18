@@ -1,5 +1,7 @@
 import sys
 import json
+import re
+import collections
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -76,7 +78,12 @@ class IndexIngester:
                         exists_on_disk = (project_root / fp).exists()
                     except Exception:
                         pass
-                if not exists_on_disk:
+                else:
+                    try:
+                        exists_on_disk = Path(fp).exists()
+                    except Exception:
+                        pass
+                if not exists_on_disk and (project_root is not None or Path(fp).is_absolute()):
                     deleted_files.append(fp)
 
         # 2. Determine which files actually changed (incremental)
@@ -172,6 +179,7 @@ class IndexIngester:
         existing_symbols = {}
         existing_by_clean = {}
         existing_by_line = {}
+        existing_occs_by_fp = collections.defaultdict(list)
         from utils.helpers import demangle_scip_symbol
         if changed_files:
             existing_symbols = repository.symbols.get_symbols_by_filepaths(list(changed_set))
@@ -191,6 +199,7 @@ class IndexIngester:
                 for sid, fp, s_line in occ_rows:
                     if sid in existing_symbols:
                         existing_by_line[(fp, s_line)] = (sid, existing_symbols[sid])
+                        existing_occs_by_fp[fp].append((sid, s_line, existing_symbols[sid]))
 
         # Map SCIP symbol definition lines from parsed occurrences
         scip_def_lines = {}
@@ -216,7 +225,7 @@ class IndexIngester:
             }
             removed_symbols = [
                 sym_id for sym_id, sym in existing_symbols.items()
-                if (not sym.get("filepath") or sym.get("filepath") in changed_set)
+                if (sym.get("filepath") and sym.get("filepath") in changed_set)
                 and sym_id not in filtered_symbols
                 and (sym.get("filepath"), sym.get("clean_symbol") or sym_id) not in upgraded_clean
             ]
@@ -241,7 +250,20 @@ class IndexIngester:
                 if not existing_entry:
                     s_line = scip_def_lines.get((sym_fp, sym_id))
                     if s_line is not None:
+                        # 1. Exact line match
                         existing_entry = existing_by_line.get((sym_fp, s_line))
+                        # 2. Fuzzy line match window (+/- 2 lines) with leaf name match
+                        if not existing_entry:
+                            scip_leaf = re.split(r"[/:\\.#]", clean.rstrip("()").replace("().", ""))[-1].lower().replace("_", "")
+                            min_delta = 999
+                            for ex_id, ex_line, ex_data in existing_occs_by_fp.get(sym_fp, []):
+                                delta = abs(s_line - ex_line)
+                                if delta <= 2:
+                                    ex_clean = ex_data.get("clean_symbol") or ex_id
+                                    ex_leaf = re.split(r"[/:\\.#]", ex_clean.rstrip("()").replace("().", ""))[-1].lower().replace("_", "")
+                                    if ex_leaf == scip_leaf and delta < min_delta:
+                                        min_delta = delta
+                                        existing_entry = (ex_id, ex_data)
 
             existing_id, existing = existing_entry if existing_entry else (None, None)
             if existing_id and existing_id != sym_id:
