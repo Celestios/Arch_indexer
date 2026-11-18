@@ -88,16 +88,22 @@ class DatabaseReader:
             if r[0]
         }
 
-        # Check if code_block column exists in symbols table for backward compatibility
+        # Check if code_block and clean_symbol columns exist in symbols table
         cols = [c[1] for c in conn.execute("PRAGMA table_info('symbols')").fetchall()]
         has_code_col = "code_block" in cols
+        has_clean_col = "clean_symbol" in cols
 
-        query = "SELECT symbol, filepath, kind, signature, docstring, connection_weight"
+        col_names = ["symbol", "filepath", "kind", "signature", "docstring", "connection_weight"]
         if has_code_col:
-            query += ", code_block"
-        query += " FROM symbols"
+            col_names.append("code_block")
+        if has_clean_col:
+            col_names.append("clean_symbol")
 
+        query = f"SELECT {', '.join(col_names)} FROM symbols"
         rows = conn.execute(query).fetchall()
+
+        code_idx = col_names.index("code_block") if has_code_col else -1
+        clean_idx = col_names.index("clean_symbol") if has_clean_col else -1
 
         symbols = []
         for row in rows:
@@ -108,12 +114,14 @@ class DatabaseReader:
             signature = row[3]
             docstring = row[4]
             conn_weight = row[5] or 0
-            code_block = row[6] if has_code_col and len(row) > 6 else None
+            code_block = row[code_idx] if code_idx != -1 and len(row) > code_idx else None
+            clean_sym = row[clean_idx] if clean_idx != -1 and len(row) > clean_idx else None
 
-            parsed = ScipParser.parse_scip_symbol(raw_sym, filepath=filepath, known_files=known_files)
+            parsed = ScipParser.parse_scip_symbol(raw_sym, filepath=filepath, known_files=known_files, clean_symbol=clean_sym)
             ports = ScipParser.parse_signature_ports(docstring, signature)
             symbols.append({
                 "symbol": raw_sym,
+                "clean_symbol": clean_sym,
                 "filepath": filepath,
                 "kind": kind,
                 "signature": signature,

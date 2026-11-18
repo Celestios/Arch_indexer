@@ -3,13 +3,13 @@ import contextlib
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Union
 
 
 def handle_graph(
     project_root: Path,
     output_path: Optional[str] = None,
-    scope: Optional[str] = "src",
+    scope: Optional[Union[str, List[str]]] = None,
     include_tests: bool = False,
     include_occurrences: bool = False,
     include_external: bool = False,
@@ -21,6 +21,16 @@ def handle_graph(
     db_path = project_root / ".arch" / "arch.db"
     if not db_path.exists():
         return f"Error: Arch database not found at {db_path}. Please run 'arch init' in '{project_root}' first."
+
+    # If no scope explicitly provided, default to registered directories in .arch/config.json
+    if scope is None:
+        try:
+            from utils.exclusions import load_include_dirs
+            inc_dirs = load_include_dirs(project_root)
+            if inc_dirs:
+                scope = sorted(list(inc_dirs))
+        except Exception:
+            pass
 
     config_path: Optional[str] = None
     candidate = project_root / "circuit_config.json"
@@ -47,6 +57,7 @@ def handle_graph(
                 scope=scope,
                 config_path=config_path,
                 open_browser=open_browser,
+                project_root=project_root,
             )
 
         return f"Successfully generated architecture circuit visualizer at: {abs_output}"

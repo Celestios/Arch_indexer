@@ -22,7 +22,11 @@ def register(subparsers):
 def cmd_mcp(args):
     """Manages and starts the machine-global FastMCP daemon."""
     project_root = get_project_root(args)
-    os.environ["ARCH_PROJECT_ROOT"] = str(project_root)
+    passed_root = getattr(args, "project_root", None)
+    if (project_root / ".arch" / "arch.db").exists() or (passed_root and passed_root != "."):
+        os.environ["ARCH_PROJECT_ROOT"] = str(project_root)
+    elif "ARCH_PROJECT_ROOT" in os.environ and not (Path(os.environ["ARCH_PROJECT_ROOT"]) / ".arch" / "arch.db").exists():
+        del os.environ["ARCH_PROJECT_ROOT"]
 
     req_port = getattr(args, "port", 0)
 

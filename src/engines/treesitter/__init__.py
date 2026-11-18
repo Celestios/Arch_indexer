@@ -6,6 +6,7 @@ skeleton folding, structural metrics, and syntax rule checks.
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Union, Set
 import hashlib
+import re
 
 from engines.treesitter.loader import TreesitterLoader
 from engines.treesitter.extractor import TreesitterExtractor, SymbolDeclaration
@@ -24,9 +25,10 @@ class TreesitterEngine:
         cls,
         filepath: Union[str, Path],
         source: Optional[Union[str, bytes]] = None,
+        project_root: Optional[Path] = None,
     ) -> List[SymbolDeclaration]:
         """Extract all symbol declarations from a file."""
-        return TreesitterExtractor.extract_symbols_from_file(filepath, source)
+        return TreesitterExtractor.extract_symbols_from_file(filepath, source, project_root)
 
     @classmethod
     def fold_code(cls, source: Union[str, bytes], language: str) -> str:
@@ -56,6 +58,7 @@ class TreesitterEngine:
         repository,
         filepath: Union[str, Path],
         source: Optional[Union[str, bytes]] = None,
+        project_root: Optional[Path] = None,
     ) -> List[SymbolDeclaration]:
         """
         Fast Tier 1 synchronization (< 2ms):
@@ -63,7 +66,17 @@ class TreesitterEngine:
         Preserves existing SCIP symbol primary keys and edges if present.
         """
         fp = Path(filepath)
-        norm_fp = str(filepath).replace("\\", "/")
+        if project_root:
+            try:
+                norm_fp = str(fp.resolve().relative_to(Path(project_root).resolve())).replace("\\", "/")
+            except Exception:
+                norm_fp = str(filepath).replace("\\", "/")
+        else:
+            norm_fp = str(filepath).replace("\\", "/")
+
+        norm_fp = norm_fp.replace("\\", "/")
+        if norm_fp.startswith("./"):
+            norm_fp = norm_fp[2:]
 
         if source is None:
             if not fp.exists():
@@ -74,7 +87,7 @@ class TreesitterEngine:
         else:
             code_bytes = source
 
-        declarations = cls.extract_symbols(fp, code_bytes)
+        declarations = cls.extract_symbols(fp, code_bytes, project_root=project_root)
         if not declarations:
             return []
 
@@ -84,20 +97,68 @@ class TreesitterEngine:
         repository.files.upsert_file(norm_fp, sha256_hash, lang)
 
         # 2. Get existing symbols in DB for this file to reconcile SCIP IDs
-        existing = repository.symbols.get_symbols_by_filepaths([norm_fp])
+        query_paths = [norm_fp]
+        try:
+            abs_fp = str(fp.resolve()).replace("\\", "/")
+            if abs_fp != norm_fp:
+                query_paths.append(abs_fp)
+        except Exception:
+            pass
+        existing = repository.symbols.get_symbols_by_filepaths(query_paths)
         clean_to_existing: Dict[str, str] = {}
         for sym_id, data in existing.items():
             c_sym = data.get("clean_symbol") or sym_id
             clean_to_existing[c_sym] = sym_id
 
+        # Also get existing definition occurrences for this file to reconcile by line
+        line_to_existing: Dict[int, str] = {}
+        occ_list: List[tuple] = []
+        with repository.db_conn.session() as conn:
+            occ_rows = conn.execute(
+                "SELECT symbol, start_line FROM occurrences WHERE (replace(filepath, '\\', '/') = ? OR filepath = ?) AND (role & 1) != 0",
+                (norm_fp, norm_fp)
+            ).fetchall()
+            for r in occ_rows:
+                line_to_existing[r[1]] = r[0]
+                occ_list.append((r[0], r[1]))
+
         # 3. Upsert symbols
         symbols_to_upsert = []
         occurrences_to_insert = []
+        superseded_treesitter_symbols = []
+
+        from utils.helpers import demangle_scip_symbol
 
         for decl in declarations:
-            # If a SCIP symbol exists for this clean_symbol, keep SCIP's symbol ID
-            target_symbol_id = clean_to_existing.get(decl.clean_symbol, decl.clean_symbol)
+            # If a SCIP symbol exists for this declaration (via clean_symbol or occurrence coordinate), keep SCIP's symbol ID
+            target_symbol_id = clean_to_existing.get(decl.clean_symbol)
+            if not target_symbol_id:
+                # 1. Exact line match
+                target_symbol_id = line_to_existing.get(decl.start_line)
+            if not target_symbol_id:
+                # 2. Fuzzy line match window (+/- 2 lines) with leaf name match (e.g. for decorators/multiline signatures)
+                decl_leaf = decl.name.lower().replace("_", "")
+                min_delta = 999
+                best_match = None
+                for sym_id, s_line in occ_list:
+                    delta = abs(decl.start_line - s_line)
+                    if delta <= 2:
+                        scip_clean = demangle_scip_symbol(sym_id)
+                        scip_leaf = re.split(r"[/:\\.#]", scip_clean.rstrip("()").replace("().", ""))[-1].lower().replace("_", "")
+                        if scip_leaf == decl_leaf:
+                            if delta < min_delta:
+                                min_delta = delta
+                                best_match = sym_id
+                if best_match:
+                    target_symbol_id = best_match
+
+            if not target_symbol_id:
+                target_symbol_id = decl.clean_symbol
+
             decl.symbol = target_symbol_id
+
+            if target_symbol_id != decl.clean_symbol and decl.clean_symbol in existing:
+                superseded_treesitter_symbols.append(decl.clean_symbol)
 
             symbols_to_upsert.append({
                 "symbol": target_symbol_id,
@@ -122,14 +183,22 @@ class TreesitterEngine:
                 "role": 1,  # SCIP SymbolRole.Definition
             })
 
+        # Remove any superseded duplicate Tree-sitter rows
+        if superseded_treesitter_symbols:
+            with repository.db_conn.session() as conn:
+                conn.execute(
+                    "DELETE FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))",
+                    (superseded_treesitter_symbols,)
+                )
+
         # Upsert symbols
         repository.symbols.upsert_symbols_bulk(symbols_to_upsert)
 
         # Replace definition occurrences for this file
         with repository.db_conn.session() as conn:
             conn.execute(
-                "DELETE FROM occurrences WHERE filepath = ? AND role = 1",
-                (norm_fp,)
+                "DELETE FROM occurrences WHERE (replace(filepath, '\\', '/') = ? OR filepath = ?) AND role = 1",
+                (norm_fp, norm_fp)
             )
         repository.symbols.add_occurrences_bulk(occurrences_to_insert)
 
@@ -149,6 +218,7 @@ class TreesitterEngine:
         Returns total number of symbols extracted.
         """
         from utils.exclusions import load_include_dirs, load_exclude_patterns, is_included, is_excluded
+        project_root = Path(project_root)
         include_dirs = load_include_dirs(project_root)
         exclude_patterns = load_exclude_patterns(project_root)
         total_symbols = 0
@@ -178,7 +248,7 @@ class TreesitterEngine:
 
         for p in target_files:
             try:
-                decls = cls.sync_file_to_db(repository, p)
+                decls = cls.sync_file_to_db(repository, p, project_root=project_root)
                 total_symbols += len(decls)
             except Exception:
                 pass

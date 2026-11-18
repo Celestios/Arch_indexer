@@ -249,23 +249,15 @@ class ProjectRegistry:
             if cwd_root is not None:
                 return cwd_root
 
-            # 5. Explicit environment override
+            # 5. Explicit environment override (only if valid db exists)
             if "ARCH_PROJECT_ROOT" in os.environ:
                 env_val = os.environ["ARCH_PROJECT_ROOT"]
                 db_root = find_project_root_with_db(env_val)
                 if db_root is not None:
                     return db_root
                 env_root = Path(env_val).resolve()
-                if env_root.exists():
+                if (env_root / ".arch" / "arch.db").exists():
                     return env_root
-
-            try:
-                if server_cfg is not None and hasattr(server_cfg, "get_project_root"):
-                    return server_cfg.get_project_root()
-                from interface.server_config import get_project_root
-                return get_project_root()
-            except Exception:
-                pass
 
             # 6. Check loaded projects with valid DB
             valid_loaded = [ctx.root for ctx in self._projects.values() if (ctx.root / ".arch" / "arch.db").exists()]
@@ -288,7 +280,11 @@ class ProjectRegistry:
             # 8. Fallback to server_config or CWD
             try:
                 from interface.server_config import get_project_root
-                return get_project_root()
+                cfg_root = get_project_root()
+                db_root = find_project_root_with_db(cfg_root)
+                if db_root is not None:
+                    return db_root
+                return cfg_root
             except Exception:
                 return Path.cwd().resolve()
 

@@ -5,7 +5,9 @@ and global hub designations without hardcoded database assumptions.
 """
 
 import os
-from typing import Dict, List, Any, Optional, Tuple
+import re
+from typing import Dict, List, Any, Optional, Tuple, Union, Set
+from pathlib import Path
 from .types import NodeType, EdgeType, NODE_COLORS, NODE_SIZES, EDGE_COLORS
 from .entities import GraphNode, GraphEdge
 from ..serialization.compressor import compress_circuit_data
@@ -25,16 +27,30 @@ class GraphModel:
         include_external: bool = False,
         exclude_tests: bool = True,
         exclude_parameters: bool = True,
-        scope: Optional[str] = "src",
+        scope: Optional[Union[str, List[str], Set[str]]] = None,
         hub_threshold: int = 6,
+        project_root: Optional[Union[str, Path]] = None,
     ):
         self.include_occurrences = include_occurrences
         self.max_refs_per_symbol = max_refs_per_symbol
         self.include_external = include_external
         self.exclude_tests = exclude_tests
         self.exclude_parameters = exclude_parameters
-        self.scope = scope.replace("\\", "/").rstrip("/") if scope else None
         self.hub_threshold = hub_threshold
+        self.project_root = Path(project_root).resolve() if project_root else None
+
+        if isinstance(scope, (list, set, tuple)):
+            self.scopes = [s.replace("\\", "/").strip("/") for s in scope if s]
+            self.scope = ",".join(self.scopes)
+        elif isinstance(scope, str) and scope.strip() and scope.lower() not in ("all", "*"):
+            if "," in scope:
+                self.scopes = [s.strip().replace("\\", "/").strip("/") for s in scope.split(",") if s.strip()]
+            else:
+                self.scopes = [scope.replace("\\", "/").strip("/")]
+            self.scope = scope
+        else:
+            self.scopes = None
+            self.scope = None
 
         self.nodes: Dict[str, GraphNode] = {}
         self.edges: List[GraphEdge] = []
@@ -91,9 +107,22 @@ class GraphModel:
             parts = clean.split("/")
             if "tests" in parts or "test" in parts:
                 return False
-        if not self.scope:
+
+        if not self.scopes:
             return True
-        return clean.startswith(self.scope + "/") or clean == self.scope
+
+        # Normalize relative to project_root if clean is absolute
+        rel_clean = clean
+        if self.project_root:
+            try:
+                rel_clean = str(Path(clean).relative_to(self.project_root)).replace("\\", "/")
+            except Exception:
+                pass
+
+        for s in self.scopes:
+            if rel_clean.startswith(s + "/") or rel_clean == s or clean.startswith(s + "/") or clean == s:
+                return True
+        return False
 
     def add_node(self, node: GraphNode):
         if node.id not in self.nodes:
@@ -239,6 +268,13 @@ class GraphModel:
             node_label = s["label"]
             if (parent_cls_id or ntype in (NodeType.METHOD, NodeType.CONSTRUCTOR)) and "#" in node_label:
                 node_label = node_label.split("#")[-1]
+            if "." in node_label or "/" in node_label or "\\" in node_label:
+                has_parens = node_label.endswith("()") or node_label.endswith("().")
+                base = node_label[:-3] if node_label.endswith("().") else (node_label[:-2] if node_label.endswith("()") else node_label)
+                leaf = re.split(r"[/:\\.]", base)[-1]
+                if "#" in leaf:
+                    leaf = leaf.split("#")[-1]
+                node_label = (leaf + "()") if has_parens else leaf
 
             self.add_node(
                 GraphNode(
@@ -427,6 +463,8 @@ class GraphModel:
             "nodes": [n.to_dict() for n in self.nodes.values()],
             "links": [e.to_dict() for e in self.edges],
             "packages": list(self.packages.values()),
+            "project_root": str(self.project_root) if self.project_root else None,
+            "scope": self.scope,
             "stats": {
                 "total_nodes": len(self.nodes),
                 "total_edges": len(self.edges),

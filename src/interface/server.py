@@ -1,6 +1,11 @@
 import os
 import sys
 import json
+import asyncio
+import functools
+import contextvars
+import urllib.request
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Optional, List, Union, Dict, Any
 
@@ -9,9 +14,9 @@ src_dir = Path(__file__).resolve().parent.parent
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 from db.repository import Repository
-from interface.project_registry import ProjectRegistry
+from interface.project_registry import ProjectRegistry, find_project_root_with_db
 from change_tracker.watcher_manager import WatcherManager
 from interface.server_config import get_project_root as get_default_project_root
 from interface.tools.context import handle_context
@@ -26,15 +31,85 @@ from interface.tools.graph import handle_graph
 from interface.validators import validate_direction, validate_resolution
 
 mcp = FastMCP("arch")
+_explicit_project_root = contextvars.ContextVar("_explicit_project_root", default=None)
 
 
-def _resolve_context(
-    project_root: Optional[str] = None,
+def uri_to_path(uri: str) -> Path:
+    """Converts a file:// URI or local path string to a resolved Path."""
+    parsed = urlparse(uri)
+    if parsed.scheme == "file":
+        host = parsed.netloc or ""
+        path = urllib.request.url2pathname(parsed.path)
+        if host:
+            path = f"\\\\{host}{path}"
+        return Path(path).resolve()
+    return Path(uri).resolve()
+
+
+def _tool():
+    """Registers an async tool with FastMCP while enabling synchronous execution in test suites."""
+    def decorator(fn):
+        mcp.tool()(fn)
+
+        @functools.wraps(fn)
+        def caller(*args, project_root: Optional[Union[str, Path]] = None, **kwargs):
+            token = _explicit_project_root.set(project_root)
+            try:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop and loop.is_running():
+                    return fn(*args, **kwargs)
+                return asyncio.run(fn(*args, **kwargs))
+            finally:
+                _explicit_project_root.reset(token)
+
+        return caller
+    return decorator
+
+
+async def _resolve_context(
+    ctx: Optional[Context] = None,
     filepath: Optional[str] = None,
 ) -> tuple[Path, Repository]:
-    """Helper to resolve project root and active repository."""
+    """Helper to resolve active workspace root and repository.
+
+    1. Explicit project_root override via contextvar (for internal tests/callers).
+    2. Primary: MCP client workspace roots via ctx.session.list_roots().
+    3. Filepath ancestry check for .arch/arch.db.
+    4. Fallback to ProjectRegistry cascading resolution (active_project in ~/.arch/projects.json, CWD, etc.).
+    """
     registry = ProjectRegistry.get_instance()
-    resolved_root = registry.resolve_project(project_root=project_root, filepath=filepath)
+
+    # 1. Explicit internal override
+    override_root = _explicit_project_root.get()
+    if override_root:
+        db_root = find_project_root_with_db(override_root)
+        target = db_root if db_root is not None else Path(override_root).resolve()
+        return target, registry.get_repository(project_root=target)
+
+    # 2. Primary: Ask Antigravity/client for open workspaces
+    if ctx is not None:
+        try:
+            session = ctx.session
+            if session is not None:
+                roots_result = await session.list_roots()
+                roots = getattr(roots_result, "roots", []) or []
+                for r in roots:
+                    uri = str(getattr(r, "uri", ""))
+                    if uri:
+                        candidate = uri_to_path(uri)
+                        db_root = find_project_root_with_db(candidate)
+                        if db_root is not None:
+                            return db_root, registry.get_repository(project_root=db_root)
+                        if (candidate / ".arch" / "arch.db").exists():
+                            return candidate, registry.get_repository(project_root=candidate)
+        except Exception:
+            pass
+
+    # 3. ProjectRegistry resolution (server_config, filepath ancestry, active_project, CWD)
+    resolved_root = registry.resolve_project(filepath=filepath)
     repository = registry.get_repository(project_root=resolved_root)
     return resolved_root, repository
 
@@ -53,24 +128,23 @@ def close_server_connection():
     ProjectRegistry.reset_instance()
 
 
-@mcp.tool()
-def graph(
-    project_root: Optional[str] = None,
+@_tool()
+async def graph(
     output_path: Optional[str] = "circuit_board.html",
-    scope: Optional[str] = "src",
+    scope: Optional[Union[str, List[str]]] = None,
     include_tests: bool = False,
     include_occurrences: bool = False,
     include_external: bool = False,
     include_parameters: bool = False,
     max_refs: Optional[int] = None,
     open_browser: bool = False,
+    ctx: Context = None,
 ) -> str:
     """
     Builds the interactive Electronic PCB Circuit Diagram HTML architecture visualizer directly from the DuckDB index.
     Generates a standalone, zoomable HTML schematic visualizer representing modules, classes, and dependency traces.
-    project_root: Optional target workspace root directory.
     output_path: Destination HTML file path (defaults to <project_root>/circuit_board.html).
-    scope: Directory or package scope filter (default: "src").
+    scope: Directory or package scope filter (defaults to registered paths in .arch/config.json).
     include_tests: Include test files in the graph visualizer.
     include_occurrences: Include raw symbol occurrence vias.
     include_external: Include external third-party dependencies.
@@ -79,7 +153,7 @@ def graph(
     open_browser: Whether to open the generated HTML in the default web browser.
     """
     try:
-        resolved_root, _ = _resolve_context(project_root=project_root)
+        resolved_root, _ = await _resolve_context(ctx=ctx)
         return handle_graph(
             project_root=resolved_root,
             output_path=output_path,
@@ -97,16 +171,15 @@ def graph(
         return f"Error generating architecture circuit visualizer: {e}"
 
 
-@mcp.tool()
-def lookup(target: Union[List[str], str], project_root: Optional[str] = None) -> str:
+@_tool()
+async def lookup(target: Union[List[str], str], ctx: Context = None) -> str:
     """
     Resolves symbol and file locations, definitions, occurrences, and direct call relationships.
     Use this tool like a targeted search or symbol-aware grep to locate a specific node, symbol, function, or class across the codebase.
-    project_root: Optional workspace root directory.
     """
     filepath_hint = target if isinstance(target, str) and ("/" in target or "\\" in target) else None
     try:
-        _, repository = _resolve_context(project_root=project_root, filepath=filepath_hint)
+        _, repository = await _resolve_context(ctx=ctx, filepath=filepath_hint)
         return handle_lookup(target, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -114,16 +187,15 @@ def lookup(target: Union[List[str], str], project_root: Optional[str] = None) ->
         return f"Error executing index search: {e}"
 
 
-@mcp.tool()
-def context(filepaths: Union[List[str], str], project_root: Optional[str] = None) -> str:
+@_tool()
+async def context(filepaths: Union[List[str], str], ctx: Context = None) -> str:
     """
     Returns structural outlines, declared symbols, class/method signatures, and line ranges for specified files.
     Use this tool when you know something is located in a specific file but don't know which part.
-    project_root: Optional workspace root directory.
     """
     filepath_hint = filepaths if isinstance(filepaths, str) else (filepaths[0] if filepaths else None)
     try:
-        _, repository = _resolve_context(project_root=project_root, filepath=filepath_hint)
+        _, repository = await _resolve_context(ctx=ctx, filepath=filepath_hint)
         return handle_context(filepaths, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -131,15 +203,14 @@ def context(filepaths: Union[List[str], str], project_root: Optional[str] = None
         return f"Error retrieving context: {e}"
 
 
-@mcp.tool()
-def impact(symbol: str, max_depth: int = 3, project_root: Optional[str] = None) -> str:
+@_tool()
+async def impact(symbol: str, max_depth: int = 3, ctx: Context = None) -> str:
     """
     Performs blast radius analysis by computing the transitive closure of upstream callers and downstream callees up to max_depth.
     Use this tool when evaluating the ripple effects of proposed refactors or deletions.
-    project_root: Optional workspace root directory.
     """
     try:
-        _, repository = _resolve_context(project_root=project_root)
+        _, repository = await _resolve_context(ctx=ctx)
         return handle_impact(symbol, max_depth, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -147,19 +218,18 @@ def impact(symbol: str, max_depth: int = 3, project_root: Optional[str] = None) 
         return f"Error computing blast radius: {e}"
 
 
-@mcp.tool()
-def compile_context(
+@_tool()
+async def compile_context(
     symbol: str,
     radius: int = 2,
     direction: str = "downstream",
     resolution: str = "signature",
     out_filepath: Optional[str] = None,
     max_tokens: int = 4000,
-    project_root: Optional[str] = None,
+    ctx: Context = None,
 ) -> str:
     """
     Compiles a bounded architectural context document by traversing the call graph neighborhood of a focal symbol.
-    project_root: Optional workspace root directory.
     """
     direction = direction.lower()
     valid, msg = validate_direction(direction)
@@ -172,7 +242,7 @@ def compile_context(
         return f"Error: {msg}"
 
     try:
-        resolved_root, repository = _resolve_context(project_root=project_root)
+        resolved_root, repository = await _resolve_context(ctx=ctx)
         return handle_compile_context(
             symbol, radius, direction, resolution, out_filepath, repository, resolved_root, max_tokens
         )
@@ -182,14 +252,13 @@ def compile_context(
         return f"Error compiling architectural context: {e}"
 
 
-@mcp.tool()
-def audit(project_root: Optional[str] = None) -> str:
+@_tool()
+async def audit(ctx: Context = None) -> str:
     """
     Runs project-wide architectural boundary and layer compliance checks against configured rules.
-    project_root: Optional workspace root directory.
     """
     try:
-        resolved_root, repository = _resolve_context(project_root=project_root)
+        resolved_root, repository = await _resolve_context(ctx=ctx)
         return handle_audit(repository, resolved_root)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -197,16 +266,15 @@ def audit(project_root: Optional[str] = None) -> str:
         return f"Error running audit: {e}"
 
 
-@mcp.tool()
-def report(name: str, format: str = "markdown", project_root: Optional[str] = None) -> str:
+@_tool()
+async def report(name: str, format: str = "markdown", ctx: Context = None) -> str:
     """
     Generates high-level summaries or compliance reports of the workspace code graph.
     name: 'overview' or 'compliance'
     format: 'markdown' or 'json'
-    project_root: Optional workspace root directory.
     """
     try:
-        _, repository = _resolve_context(project_root=project_root)
+        _, repository = await _resolve_context(ctx=ctx)
         from reporter.generator import Reporter
         reporter = Reporter(repository)
         return reporter.generate_report(name, format)
@@ -216,14 +284,13 @@ def report(name: str, format: str = "markdown", project_root: Optional[str] = No
         return f"Error generating report: {e}"
 
 
-@mcp.tool()
-def analyze(project_root: Optional[str] = None) -> str:
+@_tool()
+async def analyze(ctx: Context = None) -> str:
     """
     Validates architectural configuration ontology completeness, reachability, and referential sanity.
-    project_root: Optional workspace root directory.
     """
     try:
-        resolved_root, _ = _resolve_context(project_root=project_root)
+        resolved_root, _ = await _resolve_context(ctx=ctx)
         from auditor.validator import ConfigValidator
         validator = ConfigValidator(resolved_root)
         res = validator.validate()
@@ -248,16 +315,15 @@ def analyze(project_root: Optional[str] = None) -> str:
         return f"Error analyzing configuration: {e}"
 
 
-@mcp.tool()
-def set_fields(
+@_tool()
+async def set_fields(
     filepath: str,
     fields_json: str,
     justification: Optional[str] = None,
-    project_root: Optional[str] = None,
+    ctx: Context = None,
 ) -> str:
     """
     Sets manual architectural metadata fields and tags for a registered file.
-    project_root: Optional workspace root directory.
     """
     try:
         fields = json.loads(fields_json)
@@ -265,7 +331,7 @@ def set_fields(
         return f"Error: Invalid JSON fields payload: {e}"
 
     try:
-        resolved_root, repository = _resolve_context(project_root=project_root, filepath=filepath)
+        resolved_root, repository = await _resolve_context(ctx=ctx, filepath=filepath)
         from utils.session import resolve_filepath
         resolved = resolve_filepath(repository, filepath)
         if not resolved:
@@ -296,14 +362,13 @@ def set_fields(
         return f"Error setting fields: {e}"
 
 
-@mcp.tool()
-def clear_pending(justification: str, project_root: Optional[str] = None) -> str:
+@_tool()
+async def clear_pending(justification: str, ctx: Context = None) -> str:
     """
     Clears the pending audit flag on all files in the database.
-    project_root: Optional workspace root directory.
     """
     try:
-        resolved_root, repository = _resolve_context(project_root=project_root)
+        resolved_root, repository = await _resolve_context(ctx=ctx)
         repository.files.clear_all_pending_audits(justification)
         from auditor.analyzer import Auditor
         auditor = Auditor(repository, resolved_root)
@@ -315,27 +380,26 @@ def clear_pending(justification: str, project_root: Optional[str] = None) -> str
         return f"Error clearing pending audits: {e}"
 
 
-@mcp.tool()
-def clear_pending_audits(justification: str = "Manual clear", project_root: Optional[str] = None) -> str:
+@_tool()
+async def clear_pending_audits(justification: str = "Manual clear", ctx: Context = None) -> str:
     """Alias for clear_pending."""
-    return clear_pending(justification, project_root=project_root)
+    return clear_pending(justification)
 
 
-@mcp.tool()
-def map(
+@_tool()
+async def map(
     targets: Optional[Union[List[Dict[str, Any]], str]] = None,
     path: str = "",
     tree_depth: int = 1,
     detail_level: str = "folder",
     include_external: bool = False,
-    project_root: Optional[str] = None,
+    ctx: Context = None,
 ) -> str:
     """
     Returns a structured, multi-level architectural blueprint map of the repository.
-    project_root: Optional workspace root directory.
     """
     try:
-        _, repository = _resolve_context(project_root=project_root, filepath=path or None)
+        _, repository = await _resolve_context(ctx=ctx, filepath=path or None)
         return handle_map(
             repository,
             targets=targets,
@@ -350,19 +414,18 @@ def map(
         return f"Error building architectural graph map: {e}"
 
 
-@mcp.tool()
-def set_status(
+@_tool()
+async def set_status(
     filepath: str,
     status: str,
     justification: Optional[str] = None,
-    project_root: Optional[str] = None,
+    ctx: Context = None,
 ) -> str:
     """
     Sets manual AI logical compliance status for a file (COMPLIANT or VIOLATION_DETECTED).
-    project_root: Optional workspace root directory.
     """
     try:
-        resolved_root, repository = _resolve_context(project_root=project_root, filepath=filepath)
+        resolved_root, repository = await _resolve_context(ctx=ctx, filepath=filepath)
         return handle_set_status(repository, resolved_root, filepath, status, justification)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -370,19 +433,18 @@ def set_status(
         return f"Error setting status: {e}"
 
 
-@mcp.tool()
-def update(
+@_tool()
+async def update(
     filepaths: Optional[Union[List[str], str]] = None,
     force: bool = False,
-    project_root: Optional[str] = None,
+    ctx: Context = None,
 ) -> str:
     """
     Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges.
-    project_root: Optional workspace root directory.
     """
     filepath_hint = filepaths if isinstance(filepaths, str) else (filepaths[0] if filepaths else None)
     try:
-        resolved_root, repository = _resolve_context(project_root=project_root, filepath=filepath_hint)
+        resolved_root, repository = await _resolve_context(ctx=ctx, filepath=filepath_hint)
         return handle_update(repository, resolved_root, filepaths=filepaths, force=force)
     except FileNotFoundError as e:
         return f"Error: {e}"

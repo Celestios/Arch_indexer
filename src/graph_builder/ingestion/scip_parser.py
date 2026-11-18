@@ -93,14 +93,17 @@ class ScipParser:
         return {"inputs": inputs, "output": ret_type}
 
     @staticmethod
+    @staticmethod
     def parse_scip_symbol(
         symbol_str: str,
         filepath: Optional[str] = None,
         known_files: Optional[Set[str]] = None,
+        clean_symbol: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Parses a SCIP symbol string into structured components without hardcoded repo names.
         Determines `is_external` dynamically based on workspace file membership.
+        Cleanly extracts short `label` stripping dot-separated module paths.
         """
         if not symbol_str:
             return {
@@ -151,15 +154,19 @@ class ScipParser:
             display_name = clean_desc.rstrip("#/.")
             if clean_desc.endswith("()."):
                 base = clean_desc[:-3].rstrip("#/.")
-                segments = re.split(r"[/:#]", base)
+                segments = re.split(r"[/:#.]", base)
                 short_name = segments[-1] + "()"
             else:
-                segments = re.split(r"[/:#]", display_name)
+                segments = re.split(r"[/:#.]", display_name)
                 short_name = segments[-1] if segments else display_name
 
             short_name = re.sub(r"\.\([a-zA-Z0-9_]+\)$", "", short_name)
             if "#" in short_name:
                 short_name = short_name.split("#")[-1]
+            if "." in short_name and not short_name.endswith("()"):
+                short_name = short_name.split(".")[-1]
+            elif "." in short_name and short_name.endswith("()"):
+                short_name = short_name[:-2].split(".")[-1] + "()"
 
             return {
                 "raw": symbol_str,
@@ -173,8 +180,12 @@ class ScipParser:
                 "is_parameter": is_parameter,
             }
 
-        cleaned = symbol_str.replace("`", "").rstrip("#/.")
-        label = re.split(r"[/:\\]", cleaned)[-1]
+        source_text = clean_symbol or symbol_str
+        cleaned = source_text.replace("`", "").rstrip("#/.")
+        has_parens = cleaned.endswith("()") or cleaned.endswith("().")
+        base = cleaned[:-3] if cleaned.endswith("().") else (cleaned[:-2] if cleaned.endswith("()") else cleaned)
+        leaf = re.split(r"[/:\\.#]", base)[-1]
+        label = (leaf + "()") if has_parens else leaf
         return {
             "raw": symbol_str,
             "label": label or symbol_str,

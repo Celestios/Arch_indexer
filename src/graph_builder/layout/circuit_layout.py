@@ -248,7 +248,11 @@ class CircuitLayoutEngine:
 
         # 1. Build Recursive Directory Funnel Tree
         funnel = TopologicalZoneClassifier.build_directory_funnel(
-            packages_dict, nodes, links, scope=graph_dict.get("scope")
+            packages_dict,
+            nodes,
+            links,
+            scope=graph_dict.get("scope"),
+            project_root=graph_dict.get("project_root"),
         )
         root_tree = funnel["root"]
 

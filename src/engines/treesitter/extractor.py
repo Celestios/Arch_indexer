@@ -12,6 +12,7 @@ Extracts:
 - Structural metrics (complexity, nesting depth, LOC)
 """
 import hashlib
+import re
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import tree_sitter
@@ -46,10 +47,26 @@ class SymbolDeclaration:
         loc: int = 1,
     ):
         self.name = name
+        if clean_symbol:
+            # Strip drive letters (e.g. C:, D:, C:/, D:\, D:.)
+            cs = re.sub(r"^[a-zA-Z]:[./\\]*", "", clean_symbol)
+            cs = cs.replace("\\", "/")
+            for root_marker in ("/src/", "/lib/", "/app/", "/test/", "/tests/", ".src.", ".lib.", ".app.", ".test.", ".tests."):
+                if root_marker in cs:
+                    cs = cs[cs.rfind(root_marker) + len(root_marker):]
+                    break
+            for prefix in ("src/", "lib/", "app/", "test/", "tests/", "src.", "lib.", "app.", "test.", "tests."):
+                if cs.startswith(prefix):
+                    cs = cs[len(prefix):]
+                    break
+            cs = cs.lstrip("./\\").replace("/", ".")
+            cs = re.sub(r"\.+", ".", cs).strip(".")
+            clean_symbol = cs
+
         self.clean_symbol = clean_symbol
         self.symbol = clean_symbol  # Default symbol ID to clean_symbol; can be reconciled with SCIP
         self.kind = kind
-        self.filepath = filepath
+        self.filepath = str(filepath).replace("\\", "/")
         self.start_line = start_line
         self.start_col = start_col
         self.end_line = end_line
@@ -106,6 +123,10 @@ class TreesitterExtractor:
         else:
             norm_fp = str(filepath).replace("\\", "/")
 
+        norm_fp = norm_fp.replace("\\", "/")
+        if norm_fp.startswith("./"):
+            norm_fp = norm_fp[2:]
+
         if source is None:
             if not fp.exists():
                 return []
@@ -145,6 +166,17 @@ class TreesitterExtractor:
     def _derive_module_prefix(cls, filepath: str) -> str:
         """Derives a dot-separated module prefix from filepath (e.g. src/db/connection.py -> db.connection)."""
         p = filepath.replace("\\", "/")
+        # Strip Windows drive letter (e.g. C:/, D:/, C:)
+        p = re.sub(r"^[a-zA-Z]:/*", "", p)
+        # Strip leading slashes
+        p = p.lstrip("/")
+
+        # If it's an absolute path that still contains common root folders, take from that root folder
+        for root_marker in ("/src/", "/lib/", "/app/", "/test/", "/tests/"):
+            if root_marker in p:
+                p = p[p.rfind(root_marker) + 1:]
+                break
+
         # Remove common root folders
         for prefix in ("src/", "lib/", "app/", "test/", "tests/"):
             if p.startswith(prefix):
@@ -156,6 +188,7 @@ class TreesitterExtractor:
         stem = stem.replace("/", ".")
         if stem.endswith(".__init__"):
             stem = stem[:-9]
+        stem = re.sub(r"\.+", ".", stem).strip(".")
         return stem
 
     @classmethod

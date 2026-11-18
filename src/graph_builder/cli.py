@@ -4,7 +4,8 @@ Core Runner for the Modular Electronic Circuit Board HTML Graph Builder.
 
 import os
 import webbrowser
-from typing import Optional
+from typing import Optional, Union, List, Set
+from pathlib import Path
 
 from .config import CircuitConfig
 from .ingestion.db_reader import DatabaseReader
@@ -22,12 +23,18 @@ def build_graph_html(
     include_external: bool = False,
     exclude_tests: bool = True,
     exclude_parameters: bool = True,
-    scope: Optional[str] = "src",
+    scope: Optional[Union[str, List[str], Set[str]]] = None,
     config_path: Optional[str] = None,
     open_browser: bool = False,
+    project_root: Optional[Union[str, Path]] = None,
 ) -> str:
     cfg = CircuitConfig.load(config_path)
     effective_max_refs = max_refs_per_symbol if max_refs_per_symbol is not None else cfg.max_refs_per_symbol
+
+    if project_root is None:
+        p_db = Path(db_path).resolve()
+        if p_db.parent.name == ".arch":
+            project_root = p_db.parent.parent
 
     print(f"[*] Connecting to database: {db_path}")
     reader = DatabaseReader(db_path=db_path)
@@ -37,7 +44,8 @@ def build_graph_html(
         f"{stats['occurrences_count']} occurrences, {stats['edges_count']} edges"
     )
 
-    print(f"[*] Building knowledge graph model (scope: {scope or 'all'}, exclude_tests: {exclude_tests})...")
+    scope_desc = ",".join(scope) if isinstance(scope, (list, set, tuple)) else (scope or "all")
+    print(f"[*] Building knowledge graph model (scope: {scope_desc}, exclude_tests: {exclude_tests})...")
     model = GraphModel(
         include_occurrences=include_occurrences,
         max_refs_per_symbol=effective_max_refs,
@@ -46,6 +54,7 @@ def build_graph_html(
         exclude_parameters=exclude_parameters,
         scope=scope,
         hub_threshold=cfg.hub_threshold,
+        project_root=project_root,
     )
     model.build_from_reader(reader)
     graph_dict = model.to_dict()

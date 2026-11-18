@@ -5,7 +5,8 @@ creating columns per depth level and zones per folder while sorting siblings by 
 """
 
 import os
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union, Set
+from pathlib import Path
 from ..domain.types import ZONE_PALETTE
 
 
@@ -17,15 +18,32 @@ class TopologicalZoneClassifier:
     """
 
     @staticmethod
-    def _normalize_rel_parts(filepath: str, scope: Optional[str] = None) -> List[str]:
+    def _normalize_rel_parts(
+        filepath: str,
+        scope: Optional[Union[str, List[str], Set[str]]] = None,
+        project_root: Optional[Union[str, Path]] = None,
+    ) -> List[str]:
         clean = filepath.replace("\\", "/").strip("/")
-        if scope:
-            clean_scope = scope.replace("\\", "/").strip("/")
-            if clean.startswith(clean_scope + "/"):
-                clean = clean[len(clean_scope) + 1 :]
+        if project_root:
+            try:
+                clean = str(Path(clean).relative_to(project_root)).replace("\\", "/").strip("/")
+            except Exception:
+                pass
+
+        scopes = []
+        if isinstance(scope, (list, set, tuple)):
+            scopes = [s.replace("\\", "/").strip("/") for s in scope if s]
+        elif isinstance(scope, str) and scope:
+            scopes = [s.strip().replace("\\", "/").strip("/") for s in scope.split(",") if s.strip()]
+
+        for s in scopes:
+            if clean.startswith(s + "/"):
+                clean = clean[len(s) + 1 :]
+                break
+
         parts = [p for p in clean.split("/") if p]
         # Strip common single top-level wrapper if no explicit scope stripped it
-        if not scope and len(parts) >= 2 and parts[0] in ("src", "lib", "app", "pkg", "packages"):
+        if not scopes and len(parts) >= 2 and parts[0] in ("src", "lib", "app", "pkg", "packages"):
             parts = parts[1:]
         return parts
 
@@ -35,7 +53,8 @@ class TopologicalZoneClassifier:
         packages_dict: Dict[str, Dict[str, Any]],
         nodes: List[Dict[str, Any]],
         links: List[Dict[str, Any]],
-        scope: Optional[str] = None,
+        scope: Optional[Union[str, List[str], Set[str]]] = None,
+        project_root: Optional[Union[str, Path]] = None,
     ) -> Dict[str, Any]:
         """
         Builds a recursive directory tree where each folder node holds:
@@ -61,7 +80,7 @@ class TopologicalZoneClassifier:
         }
 
         for fp in packages_dict.keys():
-            parts = cls._normalize_rel_parts(fp, scope=scope)
+            parts = cls._normalize_rel_parts(fp, scope=scope, project_root=project_root)
             if len(parts) <= 1:
                 file_to_dir[fp] = ""
                 dir_nodes[""]["files"].append(fp)

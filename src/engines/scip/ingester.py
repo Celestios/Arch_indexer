@@ -171,6 +171,7 @@ class IndexIngester:
 
         existing_symbols = {}
         existing_by_clean = {}
+        existing_by_line = {}
         from utils.helpers import demangle_scip_symbol
         if changed_files:
             existing_symbols = repository.symbols.get_symbols_by_filepaths(list(changed_set))
@@ -178,7 +179,25 @@ class IndexIngester:
                 fp = sdata.get("filepath")
                 csym = sdata.get("clean_symbol") or sid
                 if fp and csym:
-                    existing_by_clean[(fp, csym)] = sdata
+                    existing_by_clean[(fp, csym)] = (sid, sdata)
+
+            # Query existing definition occurrences before they are cleared to match by start_line
+            placeholders = ",".join("?" for _ in changed_set)
+            with repository.db_conn.session() as conn:
+                occ_rows = conn.execute(
+                    f"SELECT symbol, replace(filepath, '\\', '/'), start_line FROM occurrences WHERE replace(filepath, '\\', '/') IN ({placeholders}) AND (role & 1) != 0",
+                    list(changed_set)
+                ).fetchall()
+                for sid, fp, s_line in occ_rows:
+                    if sid in existing_symbols:
+                        existing_by_line[(fp, s_line)] = (sid, existing_symbols[sid])
+
+        # Map SCIP symbol definition lines from parsed occurrences
+        scip_def_lines = {}
+        for occ in parsed_data.get("occurrences", []):
+            if (occ.get("role", 0) & 1) != 0 and occ.get("symbol") and occ.get("filepath"):
+                fp_norm = occ["filepath"].replace("\\", "/")
+                scip_def_lines[(fp_norm, occ["symbol"])] = occ["start_line"]
 
         # 1b. Delete old edges, symbols, and occurrences for changed files before re-ingesting.
         # Order matters: edges first, then occurrences, then symbols.
@@ -209,29 +228,47 @@ class IndexIngester:
                     )
 
         symbols_to_ingest = []
+        superseded_ts_symbols = set()
+
         for sym_id, sym in filtered_symbols.items():
-            existing = existing_symbols.get(sym_id)
-            if not existing and sym.get("filepath"):
+            sym_fp = sym.get("filepath")
+            existing_entry = None
+            if sym_id in existing_symbols:
+                existing_entry = (sym_id, existing_symbols[sym_id])
+            elif sym_fp:
                 clean = demangle_scip_symbol(sym["symbol"])
-                existing = existing_by_clean.get((sym["filepath"], clean))
+                existing_entry = existing_by_clean.get((sym_fp, clean))
+                if not existing_entry:
+                    s_line = scip_def_lines.get((sym_fp, sym_id))
+                    if s_line is not None:
+                        existing_entry = existing_by_line.get((sym_fp, s_line))
+
+            existing_id, existing = existing_entry if existing_entry else (None, None)
+            if existing_id and existing_id != sym_id:
+                superseded_ts_symbols.add(existing_id)
 
             sig = sym.get("signature")
             doc = sym.get("docstring")
             parent_sym = sym.get("parent_symbol")
             code_block = sym.get("code_block")
+            body_hash = sym.get("body_hash")
+
             if existing:
-                # Prioritize existing high-fidelity Tree-sitter signatures and docstrings
+                # Merge code_block, body_hash, and AST signatures into the canonical symbol
                 if existing.get("signature"):
                     sig = existing["signature"]
-                if existing.get("docstring"):
+                if existing.get("docstring") and not doc:
                     doc = existing["docstring"]
                 if existing.get("parent_symbol") and not parent_sym:
                     parent_sym = existing["parent_symbol"]
                 if existing.get("code_block") and not code_block:
                     code_block = existing["code_block"]
+                if existing.get("body_hash") and not body_hash:
+                    body_hash = existing["body_hash"]
 
+            effective_body_hash = body_hash or sym.get("body_hash")
             if not existing or (
-                existing.get("body_hash") != sym.get("body_hash")
+                existing.get("body_hash") != effective_body_hash
                 or existing.get("kind") != sym.get("kind")
                 or (sig and existing.get("signature") != sig)
                 or (doc and existing.get("docstring") != doc)
@@ -245,10 +282,18 @@ class IndexIngester:
                     "kind": sym["kind"],
                     "signature": sig,
                     "docstring": doc,
-                    "body_hash": sym["body_hash"],
+                    "body_hash": effective_body_hash,
                     "parent_symbol": parent_sym,
                     "code_block": code_block,
                 })
+
+        # Delete any temporary duplicate Tree-sitter rows superseded by canonical SCIP IDs
+        if superseded_ts_symbols:
+            with repository.db_conn.session() as conn:
+                conn.execute(
+                    "DELETE FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))",
+                    (list(superseded_ts_symbols),)
+                )
 
         skipped = total_symbols - len(symbols_to_ingest)
         if skipped > 0:

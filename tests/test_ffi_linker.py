@@ -113,3 +113,60 @@ def test_linker_clears_old_ffi_edges_before_relink(tmp_path):
         assert res[0][0] == 1.0
 
     db_conn.close()
+
+
+def test_link_scip_bridges_direct(tmp_path):
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash)
+            VALUES
+                ('dart_app_handle_add_spring', 'lib.bridge.api.dart.AppHandle.addAnchorSpring()', 'lib/bridge/api.dart', 'Method', 'void addAnchorSpring()', '', 'h1'),
+                ('rust_app_handle_add_spring', 'centrode_core.bridge.api.impl.[AppHandle]add_anchor_spring()', 'native/bridge/api.rs', 'Method', 'pub fn add_anchor_spring(&self)', '', 'h2'),
+                ('dart_init_engine', 'lib.bridge.api.dart.initCoreEngine()', 'lib/bridge/api.dart', 'Function', 'void initCoreEngine()', '', 'h3'),
+                ('rust_init_engine', 'centrode_core.bridge.api.init_core_engine()', 'native/bridge/api.rs', 'Function', 'pub fn init_core_engine()', '', 'h4'),
+                ('dart_app_handle_new', 'lib.bridge.api.dart.AppHandle.newInstance()', 'lib/bridge/api.dart', 'Constructor', 'AppHandle.newInstance()', '', 'h5'),
+                ('rust_app_handle_new', 'centrode_core.bridge.api.impl.[AppHandle]new()', 'native/bridge/api.rs', 'Constructor', 'pub fn new()', '', 'h6')
+        """)
+
+    linker = FfiLinker(repository)
+    edges_created = linker.link_scip_bridges()
+
+    assert edges_created == 3
+
+    with db_conn.session() as conn:
+        res = conn.execute(
+            "SELECT source, target, relation FROM edges WHERE relation = 'FFI_Binds' ORDER BY source"
+        ).fetchall()
+        assert len(res) == 3
+        sources = [r[0] for r in res]
+        targets = [r[1] for r in res]
+        assert "dart_app_handle_add_spring" in sources
+        assert "rust_app_handle_add_spring" in targets
+        assert "dart_init_engine" in sources
+        assert "rust_init_engine" in targets
+        assert "dart_app_handle_new" in sources
+        assert "rust_app_handle_new" in targets
+
+    db_conn.close()
+
+
+def test_link_scip_bridges_excludes_boilerplate(tmp_path):
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash)
+            VALUES
+                ('dart_gen_sym', 'lib.bridge.api.freezed.AppHandle.addAnchorSpring()', 'lib/bridge/api.freezed.dart', 'Method', 'void addAnchorSpring()', '', 'h1'),
+                ('rust_app_handle_add_spring', 'centrode_core.bridge.api.impl.[AppHandle]add_anchor_spring()', 'native/bridge/api.rs', 'Method', 'pub fn add_anchor_spring(&self)', '', 'h2')
+        """)
+
+    linker = FfiLinker(repository)
+    edges_created = linker.link_scip_bridges()
+
+    # Boilerplate freezed file should be excluded
+    assert edges_created == 0
+
+    db_conn.close()
