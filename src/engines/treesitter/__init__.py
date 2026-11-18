@@ -230,21 +230,36 @@ class TreesitterEngine:
                 if p.exists() and p.is_file():
                     target_files.append(p)
         else:
-            for ext in TreesitterLoader.EXTENSION_MAP.keys():
-                for p in project_root.rglob(f"*{ext}"):
-                    try:
-                        rel = p.relative_to(project_root)
-                        rel_str = str(rel).replace("\\", "/")
-                        if is_excluded(rel_str, exclude_patterns):
-                            continue
-                        if include_dirs and not is_included(rel_str, include_dirs, exclude_patterns):
-                            continue
-                        lang = TreesitterLoader.detect_language(p)
-                        if languages and lang not in languages:
-                            continue
-                        target_files.append(p)
-                    except ValueError:
-                        continue
+            import os
+            IGNORE_DIRS = {'.git', 'target', 'build', '.dart_tool', 'node_modules', '.venv', '__pycache__', '.arch', 'dist', 'bin'}
+            target_roots = [project_root / d for d in include_dirs] if include_dirs else [project_root]
+            valid_exts = set(TreesitterLoader.EXTENSION_MAP.keys())
+
+            for root_path in target_roots:
+                if not root_path.exists():
+                    continue
+                if root_path.is_file():
+                    target_files.append(root_path)
+                    continue
+                for root, dirs, files in os.walk(root_path):
+                    dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith('.')]
+                    for f in files:
+                        ext = os.path.splitext(f)[1].lower()
+                        if ext in valid_exts:
+                            p = Path(root) / f
+                            try:
+                                rel = p.relative_to(project_root)
+                                rel_str = str(rel).replace("\\", "/")
+                                if is_excluded(rel_str, exclude_patterns):
+                                    continue
+                                if include_dirs and not is_included(rel_str, include_dirs, exclude_patterns):
+                                    continue
+                                lang = TreesitterLoader.detect_language(p)
+                                if languages and lang not in languages:
+                                    continue
+                                target_files.append(p)
+                            except ValueError:
+                                continue
 
         for p in target_files:
             try:
