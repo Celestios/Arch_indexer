@@ -1,15 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Build from project venv: .venv/Scripts/python.exe -m PyInstaller arch.spec --noconfirm
 
+from PyInstaller.utils.hooks import collect_all
+
+ts_dart_datas, ts_dart_binaries, ts_dart_hidden = collect_all('tree_sitter_dart')
+
 a = Analysis(
     ['src\\main.py'],
     pathex=['src'],
-    binaries=[],
+    binaries=ts_dart_binaries,
     datas=[
         ('src/db/schema.sql', 'src/db'),
         ('src/engines/treesitter/queries/*', 'src/engines/treesitter/queries'),
         ('src/graph_builder/circuit_config.json', 'src/graph_builder'),
-    ],
+    ] + ts_dart_datas,
     hiddenimports=[
         'uuid', 'mcp', 'mcp.server.fastmcp', 'mcp.server.fastmcp.server',
         'mcp.server.fastmcp.tools', 'mcp.server.fastmcp.resources',
@@ -36,8 +40,8 @@ a = Analysis(
         'interface.project_registry',
         'change_tracker.watcher_manager',
         'tree_sitter', 'tree_sitter_python', 'tree_sitter_rust',
-        'tree_sitter_typescript', 'tree_sitter_dart',
-    ],
+        'tree_sitter_typescript', 'tree_sitter_dart', 'tree_sitter_dart._binding',
+    ] + ts_dart_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
