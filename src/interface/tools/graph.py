@@ -14,6 +14,7 @@ def handle_graph(
     include_occurrences: bool = False,
     include_external: bool = False,
     include_parameters: bool = False,
+    exclude_boilerplate: bool = True,
     max_refs: Optional[int] = None,
     open_browser: bool = False,
 ) -> str:
@@ -54,6 +55,7 @@ def handle_graph(
                 include_external=include_external,
                 exclude_tests=not include_tests,
                 exclude_parameters=not include_parameters,
+                exclude_boilerplate=exclude_boilerplate,
                 scope=scope,
                 config_path=config_path,
                 open_browser=open_browser,

@@ -27,6 +27,7 @@ class GraphModel:
         include_external: bool = False,
         exclude_tests: bool = True,
         exclude_parameters: bool = True,
+        exclude_boilerplate: bool = True,
         scope: Optional[Union[str, List[str], Set[str]]] = None,
         hub_threshold: int = 6,
         project_root: Optional[Union[str, Path]] = None,
@@ -36,6 +37,7 @@ class GraphModel:
         self.include_external = include_external
         self.exclude_tests = exclude_tests
         self.exclude_parameters = exclude_parameters
+        self.exclude_boilerplate = exclude_boilerplate
         self.hub_threshold = hub_threshold
         self.project_root = Path(project_root).resolve() if project_root else None
 
@@ -106,6 +108,11 @@ class GraphModel:
         if self.exclude_tests:
             parts = clean.split("/")
             if "tests" in parts or "test" in parts:
+                return False
+
+        if self.exclude_boilerplate:
+            from engines.ffi_linker import is_boilerplate
+            if is_boilerplate(clean):
                 return False
 
         if not self.scopes:

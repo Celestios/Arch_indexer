@@ -23,6 +23,7 @@ def build_graph_html(
     include_external: bool = False,
     exclude_tests: bool = True,
     exclude_parameters: bool = True,
+    exclude_boilerplate: bool = True,
     scope: Optional[Union[str, List[str], Set[str]]] = None,
     config_path: Optional[str] = None,
     open_browser: bool = False,
@@ -45,13 +46,14 @@ def build_graph_html(
     )
 
     scope_desc = ",".join(scope) if isinstance(scope, (list, set, tuple)) else (scope or "all")
-    print(f"[*] Building knowledge graph model (scope: {scope_desc}, exclude_tests: {exclude_tests})...")
+    print(f"[*] Building knowledge graph model (scope: {scope_desc}, exclude_tests: {exclude_tests}, exclude_boilerplate: {exclude_boilerplate})...")
     model = GraphModel(
         include_occurrences=include_occurrences,
         max_refs_per_symbol=effective_max_refs,
         include_external=include_external,
         exclude_tests=exclude_tests,
         exclude_parameters=exclude_parameters,
+        exclude_boilerplate=exclude_boilerplate,
         scope=scope,
         hub_threshold=cfg.hub_threshold,
         project_root=project_root,
