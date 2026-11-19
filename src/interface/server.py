@@ -53,8 +53,47 @@ def _tool():
 
         @functools.wraps(fn)
         def caller(*args, project_root: Optional[Union[str, Path]] = None, **kwargs):
-            token = _explicit_project_root.set(project_root)
+            if project_root is not None:
+                kwargs["project_root"] = str(project_root)
+            token = _explicit_project_root.set(str(project_root) if project_root else None)
             try:
+                import inspect
+                sig = inspect.signature(fn)
+                if "project_root" in sig.parameters and "project_root" not in kwargs:
+                    param_names = list(sig.parameters.keys())
+                    root_idx = param_names.index("project_root")
+                    if len(args) <= root_idx:
+                        # Fallback for Python/test callers: resolve from contextvar, filepath ancestry, server_config, or registry
+                        fallback = _explicit_project_root.get()
+                        if not fallback:
+                            fp = kwargs.get("filepath") or kwargs.get("filepaths") or kwargs.get("path")
+                            if not fp and len(args) > 0:
+                                cand = args[0]
+                                if isinstance(cand, list) and cand:
+                                    cand = cand[0]
+                                if isinstance(cand, (str, Path)) and Path(cand).is_absolute():
+                                    fp = cand
+                            if fp and isinstance(fp, (str, Path)) and Path(fp).is_absolute():
+                                db_root = find_project_root_with_db(fp)
+                                if db_root is not None:
+                                    fallback = str(db_root)
+
+                        if not fallback:
+                            server_cfg = sys.modules.get("interface.server_config")
+                            if server_cfg and hasattr(server_cfg, "_resolved") and "project_root" in server_cfg._resolved:
+                                fallback = str(server_cfg._resolved["project_root"])
+
+                        if not fallback:
+                            if "ARCH_PROJECT_ROOT" in os.environ:
+                                fallback = os.environ["ARCH_PROJECT_ROOT"]
+                            else:
+                                reg = ProjectRegistry.get_instance()
+                                try:
+                                    fallback = str(reg.resolve_project())
+                                except Exception:
+                                    fallback = str(Path.cwd().resolve())
+                        kwargs["project_root"] = fallback
+
                 try:
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
@@ -71,25 +110,33 @@ def _tool():
 
 async def _resolve_context(
     ctx: Optional[Context] = None,
+    project_root: Optional[Union[str, Path]] = None,
     filepath: Optional[str] = None,
 ) -> tuple[Path, Repository]:
     """Helper to resolve active workspace root and repository.
 
-    1. Explicit project_root override via contextvar (for internal tests/callers).
-    2. Primary: MCP client workspace roots via ctx.session.list_roots().
-    3. Filepath ancestry check for .arch/arch.db.
+    1. Explicit project_root argument or internal override via contextvar.
+    2. Primary: MCP client workspace roots via ctx.session.list_roots() (if supported).
+    3. Filepath ancestry check for .arch/arch.db (for absolute filepaths).
     4. Fallback to ProjectRegistry cascading resolution (active_project in ~/.arch/projects.json, CWD, etc.).
     """
     registry = ProjectRegistry.get_instance()
 
-    # 1. Explicit internal override
-    override_root = _explicit_project_root.get()
-    if override_root:
-        db_root = find_project_root_with_db(override_root)
-        target = db_root if db_root is not None else Path(override_root).resolve()
+    # 1. Explicit internal override or parameter
+    effective_root = project_root or _explicit_project_root.get()
+    if effective_root:
+        db_root = find_project_root_with_db(effective_root)
+        if db_root is not None:
+            return db_root, registry.get_repository(project_root=db_root)
+        # If effective_root had no db, check if filepath is absolute and has a db
+        if filepath and Path(filepath).is_absolute():
+            fp_root = find_project_root_with_db(filepath)
+            if fp_root is not None:
+                return fp_root, registry.get_repository(project_root=fp_root)
+        target = Path(effective_root).resolve()
         return target, registry.get_repository(project_root=target)
 
-    # 2. Primary: Ask Antigravity/client for open workspaces
+    # 2. Ask Antigravity/client for open workspaces via roots/list if supported
     if ctx is not None:
         try:
             session = ctx.session
@@ -108,8 +155,14 @@ async def _resolve_context(
         except Exception:
             pass
 
-    # 3. ProjectRegistry resolution (server_config, filepath ancestry, active_project, CWD)
-    resolved_root = registry.resolve_project(filepath=filepath)
+    # 3. Path from filepath hint
+    if filepath:
+        db_root = find_project_root_with_db(filepath)
+        if db_root is not None:
+            return db_root, registry.get_repository(project_root=db_root)
+
+    # 4. ProjectRegistry resolution (server_config, active_project, CWD)
+    resolved_root = registry.resolve_project(project_root=project_root, filepath=filepath)
     repository = registry.get_repository(project_root=resolved_root)
     return resolved_root, repository
 
@@ -130,6 +183,7 @@ def close_server_connection():
 
 @_tool()
 async def graph(
+    project_root: str,
     output_path: Optional[str] = "circuit_board.html",
     scope: Optional[Union[str, List[str]]] = None,
     include_tests: bool = False,
@@ -143,6 +197,7 @@ async def graph(
     """
     Builds the interactive Electronic PCB Circuit Diagram HTML architecture visualizer directly from the DuckDB index.
     Generates a standalone, zoomable HTML schematic visualizer representing modules, classes, and dependency traces.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
     output_path: Destination HTML file path (defaults to <project_root>/circuit_board.html).
     scope: Directory or package scope filter (defaults to registered paths in .arch/config.json).
     include_tests: Include test files in the graph visualizer.
@@ -153,7 +208,7 @@ async def graph(
     open_browser: Whether to open the generated HTML in the default web browser.
     """
     try:
-        resolved_root, _ = await _resolve_context(ctx=ctx)
+        resolved_root, _ = await _resolve_context(ctx=ctx, project_root=project_root)
         return handle_graph(
             project_root=resolved_root,
             output_path=output_path,
@@ -172,14 +227,16 @@ async def graph(
 
 
 @_tool()
-async def lookup(target: Union[List[str], str], ctx: Context = None) -> str:
+async def lookup(target: Union[List[str], str], project_root: str, ctx: Context = None) -> str:
     """
     Resolves symbol and file locations, definitions, occurrences, and direct call relationships.
     Use this tool like a targeted search or symbol-aware grep to locate a specific node, symbol, function, or class across the codebase.
+    target: Symbol name(s) or file path(s) to locate.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
     """
     filepath_hint = target if isinstance(target, str) and ("/" in target or "\\" in target) else None
     try:
-        _, repository = await _resolve_context(ctx=ctx, filepath=filepath_hint)
+        _, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
         return handle_lookup(target, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -188,15 +245,17 @@ async def lookup(target: Union[List[str], str], ctx: Context = None) -> str:
 
 
 @_tool()
-async def context(filepaths: Union[List[str], str], ctx: Context = None) -> str:
+async def context(filepaths: Union[List[str], str], project_root: str, ctx: Context = None) -> str:
     """
     Returns structural outlines, declared symbols, class/method signatures, and line ranges for specified files.
     Use this tool when you know something is located in a specific file but don't know which part.
+    filepaths: File path or list of file paths to inspect.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
     """
     filepath_hint = filepaths if isinstance(filepaths, str) else (filepaths[0] if filepaths else None)
     try:
-        _, repository = await _resolve_context(ctx=ctx, filepath=filepath_hint)
-        return handle_context(filepaths, repository)
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
+        return handle_context(filepaths, repository, project_root=resolved_root)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -204,13 +263,16 @@ async def context(filepaths: Union[List[str], str], ctx: Context = None) -> str:
 
 
 @_tool()
-async def impact(symbol: str, max_depth: int = 3, ctx: Context = None) -> str:
+async def impact(symbol: str, project_root: str, max_depth: int = 3, ctx: Context = None) -> str:
     """
     Performs blast radius analysis by computing the transitive closure of upstream callers and downstream callees up to max_depth.
     Use this tool when evaluating the ripple effects of proposed refactors or deletions.
+    symbol: Focal symbol identifier to analyze.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
+    max_depth: Maximum call graph traversal depth (default 3).
     """
     try:
-        _, repository = await _resolve_context(ctx=ctx)
+        _, repository = await _resolve_context(ctx=ctx, project_root=project_root)
         return handle_impact(symbol, max_depth, repository)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -221,6 +283,7 @@ async def impact(symbol: str, max_depth: int = 3, ctx: Context = None) -> str:
 @_tool()
 async def compile_context(
     symbol: str,
+    project_root: str,
     radius: int = 2,
     direction: str = "downstream",
     resolution: str = "signature",
@@ -230,6 +293,13 @@ async def compile_context(
 ) -> str:
     """
     Compiles a bounded architectural context document by traversing the call graph neighborhood of a focal symbol.
+    symbol: Focal symbol identifier.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
+    radius: Hop distance radius in call graph.
+    direction: 'upstream', 'downstream', or 'both'.
+    resolution: 'signature' or 'full'.
+    out_filepath: Optional output destination markdown file.
+    max_tokens: Maximum token budget.
     """
     direction = direction.lower()
     valid, msg = validate_direction(direction)
@@ -242,7 +312,7 @@ async def compile_context(
         return f"Error: {msg}"
 
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx)
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
         return handle_compile_context(
             symbol, radius, direction, resolution, out_filepath, repository, resolved_root, max_tokens
         )
@@ -253,12 +323,13 @@ async def compile_context(
 
 
 @_tool()
-async def audit(ctx: Context = None) -> str:
+async def audit(project_root: str, ctx: Context = None) -> str:
     """
     Runs project-wide architectural boundary and layer compliance checks against configured rules.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
     """
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx)
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
         return handle_audit(repository, resolved_root)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -267,14 +338,15 @@ async def audit(ctx: Context = None) -> str:
 
 
 @_tool()
-async def report(name: str, format: str = "markdown", ctx: Context = None) -> str:
+async def report(name: str, project_root: str, format: str = "markdown", ctx: Context = None) -> str:
     """
     Generates high-level summaries or compliance reports of the workspace code graph.
     name: 'overview' or 'compliance'
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
     format: 'markdown' or 'json'
     """
     try:
-        _, repository = await _resolve_context(ctx=ctx)
+        _, repository = await _resolve_context(ctx=ctx, project_root=project_root)
         from reporter.generator import Reporter
         reporter = Reporter(repository)
         return reporter.generate_report(name, format)
@@ -285,12 +357,13 @@ async def report(name: str, format: str = "markdown", ctx: Context = None) -> st
 
 
 @_tool()
-async def analyze(ctx: Context = None) -> str:
+async def analyze(project_root: str, ctx: Context = None) -> str:
     """
     Validates architectural configuration ontology completeness, reachability, and referential sanity.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
     """
     try:
-        resolved_root, _ = await _resolve_context(ctx=ctx)
+        resolved_root, _ = await _resolve_context(ctx=ctx, project_root=project_root)
         from auditor.validator import ConfigValidator
         validator = ConfigValidator(resolved_root)
         res = validator.validate()
@@ -319,11 +392,16 @@ async def analyze(ctx: Context = None) -> str:
 async def set_fields(
     filepath: str,
     fields_json: str,
+    project_root: str,
     justification: Optional[str] = None,
     ctx: Context = None,
 ) -> str:
     """
     Sets manual architectural metadata fields and tags for a registered file.
+    filepath: Target file path.
+    fields_json: JSON string of metadata key-values.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
+    justification: Optional reason for the update.
     """
     try:
         fields = json.loads(fields_json)
@@ -331,7 +409,7 @@ async def set_fields(
         return f"Error: Invalid JSON fields payload: {e}"
 
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, filepath=filepath)
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath)
         from utils.session import resolve_filepath
         resolved = resolve_filepath(repository, filepath)
         if not resolved:
@@ -363,12 +441,14 @@ async def set_fields(
 
 
 @_tool()
-async def clear_pending(justification: str, ctx: Context = None) -> str:
+async def clear_pending(justification: str, project_root: str, ctx: Context = None) -> str:
     """
     Clears the pending audit flag on all files in the database.
+    justification: Reason for clearing pending audits.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
     """
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx)
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
         repository.files.clear_all_pending_audits(justification)
         from auditor.analyzer import Auditor
         auditor = Auditor(repository, resolved_root)
@@ -381,13 +461,14 @@ async def clear_pending(justification: str, ctx: Context = None) -> str:
 
 
 @_tool()
-async def clear_pending_audits(justification: str = "Manual clear", ctx: Context = None) -> str:
+async def clear_pending_audits(project_root: str, justification: str = "Manual clear", ctx: Context = None) -> str:
     """Alias for clear_pending."""
-    return clear_pending(justification)
+    return clear_pending(justification=justification, project_root=project_root, ctx=ctx)
 
 
 @_tool()
 async def map(
+    project_root: str,
     targets: Optional[Union[List[Dict[str, Any]], str]] = None,
     path: str = "",
     tree_depth: int = 1,
@@ -397,9 +478,15 @@ async def map(
 ) -> str:
     """
     Returns a structured, multi-level architectural blueprint map of the repository.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
+    targets: Optional target folder(s) or file pattern(s).
+    path: Relative path within project to start mapping from.
+    tree_depth: Depth of directory tree to include.
+    detail_level: 'folder' or 'file'.
+    include_external: Include external dependencies.
     """
     try:
-        _, repository = await _resolve_context(ctx=ctx, filepath=path or None)
+        _, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=path or None)
         return handle_map(
             repository,
             targets=targets,
@@ -418,14 +505,19 @@ async def map(
 async def set_status(
     filepath: str,
     status: str,
+    project_root: str,
     justification: Optional[str] = None,
     ctx: Context = None,
 ) -> str:
     """
     Sets manual AI logical compliance status for a file (COMPLIANT or VIOLATION_DETECTED).
+    filepath: Target file path.
+    status: 'COMPLIANT' or 'VIOLATION_DETECTED'.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
+    justification: Optional explanation for the status change.
     """
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, filepath=filepath)
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath)
         return handle_set_status(repository, resolved_root, filepath, status, justification)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -435,16 +527,20 @@ async def set_status(
 
 @_tool()
 async def update(
+    project_root: str,
     filepaths: Optional[Union[List[str], str]] = None,
     force: bool = False,
     ctx: Context = None,
 ) -> str:
     """
     Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges.
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
+    filepaths: Optional specific file paths to re-index.
+    force: Force full rebuild regardless of file modification timestamps.
     """
     filepath_hint = filepaths if isinstance(filepaths, str) else (filepaths[0] if filepaths else None)
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, filepath=filepath_hint)
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
         return handle_update(repository, resolved_root, filepaths=filepaths, force=force)
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -463,15 +559,6 @@ def index(filepaths: Optional[Union[List[str], str]] = None, force: bool = False
 
 def run_server(port: int = 0):
     try:
-        # Pre-register default project root if available
-        default_root = get_default_project_root()
-        if (default_root / ".arch" / "arch.db").exists():
-            try:
-                registry = ProjectRegistry.get_instance()
-                registry.register_project(default_root, start_watcher=True)
-            except Exception:
-                pass
-
         if port > 0:
             if hasattr(mcp, "settings"):
                 mcp.settings.port = port

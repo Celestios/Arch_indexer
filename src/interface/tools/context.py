@@ -1,14 +1,24 @@
+import os
+from pathlib import Path
 from interface.formatters import format_context_results
 from interface.validators import validate_filepaths
 from utils.helpers import demangle_scip_symbol
 
 
-def handle_context(filepaths, repository) -> str:
+def handle_context(filepaths, repository, project_root=None) -> str:
     """Provide a structural index of files. Returns markdown."""
     paths = validate_filepaths(filepaths)
     out_md = []
 
     for fp in paths:
+        if project_root and os.path.isabs(fp):
+            try:
+                rel = os.path.relpath(fp, project_root).replace("\\", "/")
+                if not rel.startswith(".."):
+                    fp = rel
+            except Exception:
+                pass
+
         symbols = repository.symbols.get_symbols_in_file(fp)
         if not symbols:
             all_files = repository.files.get_all_files_metadata()

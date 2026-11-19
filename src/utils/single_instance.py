@@ -334,7 +334,9 @@ def register_workspace(project_root: Path, global_dir: Optional[Path] = None) ->
         "registered_at": projects.get(root_str, {}).get("registered_at", now),
         "last_accessed": now,
     }
-    data["active_project"] = root_str
+    curr_active = data.get("active_project")
+    if not curr_active or not (Path(curr_active) / ".arch" / "arch.db").exists():
+        data["active_project"] = root_str
 
     reg_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return data

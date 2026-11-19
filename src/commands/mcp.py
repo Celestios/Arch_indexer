@@ -45,10 +45,11 @@ def cmd_mcp(args):
 
     # Handle --stdio mode for IDEs (Antigravity, Cursor, etc.)
     if getattr(args, "stdio", False):
-        try:
-            register_workspace(project_root, global_arch_dir)
-        except Exception:
-            pass
+        if passed_root and passed_root != ".":
+            try:
+                register_workspace(project_root, global_arch_dir)
+            except Exception:
+                pass
         from interface.server import run_server
         run_server(port=0)
         sys.exit(0)

@@ -118,6 +118,7 @@ class ProjectRegistry:
         self,
         project_root: Union[str, Path],
         start_watcher: bool = True,
+        set_active: Optional[bool] = None,
     ) -> ProjectContext:
         """Initializes or retrieves an isolated project context.
 
@@ -173,7 +174,12 @@ class ProjectRegistry:
                 "registered_at": projects.get(norm_key, {}).get("registered_at", now),
                 "last_accessed": now,
             }
-            data["active_project"] = norm_key
+            if set_active is True:
+                data["active_project"] = norm_key
+            elif set_active is None:
+                curr_active = data.get("active_project")
+                if not curr_active or not (Path(curr_active) / ".arch" / "arch.db").exists():
+                    data["active_project"] = norm_key
             self._write_persisted_projects(data)
 
             # Ensure watcher is running if watcher_manager is available
@@ -185,6 +191,19 @@ class ProjectRegistry:
                     pass
 
             return ctx
+
+    def set_active_project(self, project_root: Union[str, Path]) -> bool:
+        """Sets the active project in global persisted metadata."""
+        root_path = Path(project_root).resolve()
+        db_root = find_project_root_with_db(root_path)
+        if db_root is not None:
+            root_path = db_root
+        norm_key = normalize_path(root_path)
+        with self._lock:
+            data = self._read_persisted_projects()
+            data["active_project"] = norm_key
+            self._write_persisted_projects(data)
+        return True
 
     def resolve_project(
         self,

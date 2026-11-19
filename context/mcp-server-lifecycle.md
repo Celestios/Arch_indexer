@@ -29,3 +29,18 @@ The `arch mcp` and `arch mcp --restart` commands accept an optional `--headless`
 **Reason:** Automated workflow scripts, CI runners, and background orchestrators need to spin up the MCP server without blocking the terminal session or script runner. Decoupling this capability into an explicit `--headless` modifier preserves foreground live logging as the developer default while granting full background daemonization on demand. Performing a startup health check before exiting ensures failures (such as port collisions or missing databases) are immediately caught and reported rather than exiting silently with a dead process.
 
 **Rejected alternative:** Relying on shell-level backgrounding (`Start-Job` / `&`) was rejected because process group boundaries, console handle inheritance, and job object lifecycles vary across OS environments and frequently kill child servers upon parent shell exit. Exiting immediately without the HTTP health verification handshake was rejected because any initialization error would leave the user assuming the server was operational.
+
+## Non-mutating stdio server startup preventing active_project clobbering in multi-project registry
+
+**Id:** 62bc09e4-5598-4025-9c9a-32c7f349c746
+**Type:** decision
+**Status:** active
+**Evidence:** confirmed
+**Source:** maintainer architecture decision, 2026-11-19
+**Revisit when:** MCP daemon transitions to per-window isolated ephemeral transport instances
+
+Starting the FastMCP server in stdio mode (`run_server()` in `src/interface/server.py` and `arch mcp --stdio` in `src/commands/mcp.py`) does not automatically register the server's launch directory into `~/.arch/projects.json` and does not overwrite `active_project`. Project contexts and database connections are instantiated lazily on demand when tools are invoked with a specific `project_root`. Furthermore, `ProjectRegistry.register_project` only initializes the `active_project` pointer if no valid active project is currently set, or if explicitly requested.
+
+**Reason:** When IDEs (such as Antigravity) launch global MCP background processes, the process is spawned with whatever working directory was active when the editor initialized or from the application binary directory. Previously, `run_server()` called `registry.register_project(default_root)` unconditionally upon boot. If `arch.db` existed in the launching directory (e.g. `Arch_indexer`), this boot sequence silently overwrote `active_project` in `~/.arch/projects.json` to `Arch_indexer`, hijacking tool calls from any other opened projects. By decoupling server process boot from workspace activation, the registry preserves user-selected active projects across editor restarts.
+
+**Rejected alternative:** Overwriting `active_project` on every server boot was rejected because global background servers serve multiple projects concurrently and must not mutate persistent user preferences based solely on where the host process binary happened to be spawned.
