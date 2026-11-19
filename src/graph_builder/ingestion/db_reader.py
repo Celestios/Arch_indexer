@@ -40,7 +40,17 @@ class DatabaseReader:
 
     def connect(self) -> duckdb.DuckDBPyConnection:
         if self._conn is None:
-            self._conn = duckdb.connect(self.db_path, read_only=True)
+            try:
+                self._conn = duckdb.connect(self.db_path, read_only=True)
+            except Exception as e:
+                if "different configuration" in str(e):
+                    self._conn = duckdb.connect(self.db_path)
+                elif "Failure while replaying WAL file" in str(e):
+                    from db.connection import DbConnection
+                    db_helper = DbConnection(Path(self.db_path))
+                    self._conn = db_helper.get_connection()
+                else:
+                    raise
         return self._conn
 
     def close(self):
