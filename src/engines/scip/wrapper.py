@@ -8,7 +8,6 @@ from engines.scip.indexers import (
 )
 from engines.scip.parser import ScipParser
 from engines.scip.ingester import IndexIngester
-from engines.edge_weights import EdgeWeightCalculator
 
 
 class ScipWrapper:
@@ -115,62 +114,13 @@ class ScipWrapper:
         return ScipParser.parse_index(scip_file, project_root, changed_files=changed_files)
 
     @staticmethod
-    def _get_symbol_layer(filepath: str, config: Dict[str, Any]) -> str:
-        if not filepath:
-            return ""
-        norm_path = filepath.replace("\\", "/")
-        best_prefix = ""
-        best_conf = None
-        for prefix, prefix_conf in config.items():
-            if not isinstance(prefix_conf, dict):
-                continue
-            if norm_path.startswith(prefix) and len(prefix) > len(best_prefix):
-                best_prefix = prefix
-                best_conf = prefix_conf
-        if not best_conf:
-            return ""
-
-        layer_conf = best_conf.get("automatic_fields", {}).get("layer", {})
-        if not layer_conf:
-            return ""
-
-        assigned_val = layer_conf.get("default", "")
-        rules = layer_conf.get("assignment_rules", [])
-        for rule in rules:
-            conds = rule.get("conditions", {})
-            val = rule.get("value")
-            if conds.get("path_prefix") and norm_path.startswith(conds["path_prefix"]):
-                assigned_val = val
-                break
-        return assigned_val
-
-    @staticmethod
-    def calculate_edge_weight(source_filepath: str, target_filepath: str, config: Dict[str, Any]) -> float:
-        if not source_filepath or not target_filepath:
-            return 1.0
-
-        src_layer = ScipWrapper._get_symbol_layer(source_filepath, config)
-        tgt_layer = ScipWrapper._get_symbol_layer(target_filepath, config)
-
-        src_fields = {"layer": src_layer} if src_layer else None
-        tgt_fields = {"layer": tgt_layer} if tgt_layer else None
-        all_barriers = EdgeWeightCalculator.collect_barriers(config)
-        weight = EdgeWeightCalculator.calculate_weight(src_fields, tgt_fields, all_barriers)
-
-        if src_layer and tgt_layer and src_layer != tgt_layer:
-            for prefix_conf in config.values():
-                rules = prefix_conf.get("automatic_fields", {}).get("layer", {}).get("rules", [])
-                for rule in rules:
-                    if rule.get("source") == src_layer and rule.get("target") == tgt_layer:
-                        weight *= 0.5
-                        break
-        return weight
-
-    @staticmethod
     def ingest_index(repository, parsed_data, project_root=None, force=False, config=None):
         """
         Ingests the parsed symbols, occurrences, and edges into the database.
         Uses incremental ingestion: only processes files whose content has changed.
+
+        The `config` parameter is retained for API compatibility; edge weights are
+        now computed during the audit phase (see EdgeWeightUpdater).
         """
         return IndexIngester.ingest_index(
             repository, parsed_data, project_root, force, config

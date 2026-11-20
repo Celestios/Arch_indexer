@@ -1,4 +1,3 @@
-import json
 import re
 import collections
 from pathlib import Path
@@ -356,32 +355,17 @@ class IndexIngester:
         total_edges = len(filtered_edges)
         print(f"[SCIP Ingest] Ingesting {total_edges} edges from changed files...")
 
-        if config is None:
-            config = {}
-            if project_root:
-                config_path = project_root / ".arch" / "config.json"
-                if config_path.exists():
-                    try:
-                        with open(config_path, "r", encoding="utf-8") as f:
-                            config = json.load(f)
-                    except Exception:
-                        pass
-
-        from engines.scip.wrapper import ScipWrapper
-
         edges_to_ingest = []
         for idx, edge in enumerate(filtered_edges, 1):
             caller_sym = edge["source"]
             callee_sym = edge["target"]
-            caller_fp = parsed_data["symbols"].get(caller_sym, {}).get("filepath")
-            callee_fp = parsed_data["symbols"].get(callee_sym, {}).get("filepath")
 
-            weight = ScipWrapper.calculate_edge_weight(caller_fp, callee_fp, config)
+            # Weights are assigned during the audit phase, not during ingestion.
             edges_to_ingest.append({
                 "source": caller_sym,
                 "target": callee_sym,
                 "relation": edge["relation"],
-                "weight": weight
+                "weight": 1.0
             })
             if idx % 100 == 0 or idx == total_edges:
                 print_progress(idx, total_edges, prefix="[SCIP Ingest] Edges")

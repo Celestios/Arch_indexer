@@ -33,9 +33,8 @@ def cmd_set_status(args):
 
         repository.compliance.delete_manual_violations(filepath)
         if status == "VIOLATION_DETECTED":
-            import hashlib
-            violation_text = f"manual_logical_audit_{filepath}_{args.justification}"
-            violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
+            from utils.violation_id import ViolationId
+            violation_id = ViolationId.generate("manual_logical_audit", filepath, args.justification)
 
             repository.compliance.add_violation(
                 violation_id=violation_id,

@@ -204,6 +204,7 @@ class FilesRepository(BaseRepository):
                 SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification
                 FROM files
                 WHERE replace(filepath, '\\', '/') LIKE ? OR replace(filepath, '\\', '/') = ?
+                LIMIT ?
                 """,
-                (f"%{normalized}%", normalized)
+                (f"%{normalized}%", normalized, limit)
             ).fetchall()
