@@ -220,6 +220,9 @@ class ScipParser:
                         rel = str(p).replace("\\", "/")
                 else:
                     rel = str(p).replace("\\", "/")
+                rel = rel.replace("\\", "/")
+                if rel.startswith("./"):
+                    rel = rel[2:]
                 changed_set.add(rel)
 
         include_dirs = load_include_dirs(project_root) if project_root else None
@@ -241,6 +244,19 @@ class ScipParser:
         scip_run_dir = None
         if project_root:
             scip_run_dir = _detect_scip_run_dir(scip_file, project_root, index.metadata.project_root)
+
+        def _normalize_scip_doc_path(doc_path: str) -> str:
+            rel = doc_path.replace("\\", "/")
+            if project_root and scip_run_dir:
+                try:
+                    abs_path = scip_run_dir / rel
+                    rel = str(abs_path.relative_to(project_root)).replace("\\", "/")
+                except ValueError:
+                    pass
+            rel = rel.replace("\\", "/")
+            if rel.startswith("./"):
+                rel = rel[2:]
+            return rel
 
         parsed_data = {
             "metadata": {
@@ -314,14 +330,7 @@ class ScipParser:
 
         # 2. First pass: Extract local symbol definitions & hover/docstrings
         for document in index.documents:
-            filepath = document.relative_path
-            resolved_filepath = filepath
-            if project_root and scip_run_dir:
-                try:
-                    abs_path = scip_run_dir / filepath
-                    resolved_filepath = str(abs_path.relative_to(project_root)).replace("\\", "/")
-                except ValueError:
-                    pass
+            resolved_filepath = _normalize_scip_doc_path(document.relative_path)
 
             if is_excluded(resolved_filepath, exclude_patterns):
                 continue
@@ -477,14 +486,7 @@ class ScipParser:
             defs.sort(key=lambda d: d["end_line"] - d["start_line"])
 
         for document in index.documents:
-            filepath = document.relative_path
-            resolved_filepath = filepath
-            if project_root and scip_run_dir:
-                try:
-                    abs_path = scip_run_dir / filepath
-                    resolved_filepath = str(abs_path.relative_to(project_root)).replace("\\", "/")
-                except ValueError:
-                    pass
+            resolved_filepath = _normalize_scip_doc_path(document.relative_path)
 
             if is_excluded(resolved_filepath, exclude_patterns):
                 continue

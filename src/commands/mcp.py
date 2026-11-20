@@ -19,118 +19,101 @@ def register(subparsers):
     p.set_defaults(func=cmd_mcp)
 
 
-def cmd_mcp(args):
-    """Manages and starts the machine-global FastMCP daemon."""
-    project_root = get_project_root(args)
+def _handle_stdio(args, project_root, global_arch_dir):
     passed_root = getattr(args, "project_root", None)
-    if (project_root / ".arch" / "arch.db").exists() or (passed_root and passed_root != "."):
-        os.environ["ARCH_PROJECT_ROOT"] = str(project_root)
-    elif "ARCH_PROJECT_ROOT" in os.environ and not (Path(os.environ["ARCH_PROJECT_ROOT"]) / ".arch" / "arch.db").exists():
-        del os.environ["ARCH_PROJECT_ROOT"]
+    if passed_root and passed_root != ".":
+        try:
+            from utils.single_instance import register_workspace
+            register_workspace(project_root, global_arch_dir)
+        except Exception:
+            pass
+    from interface.server import run_server
+    run_server(port=0)
+    sys.exit(0)
 
-    req_port = getattr(args, "port", 0)
 
-    from utils.single_instance import (
-        acquire_server,
-        get_global_arch_dir,
-        get_server_status,
-        read_lock,
-        register_workspace,
-        start_headless,
-        stop_server,
-    )
+def _handle_stop(global_arch_dir):
+    from utils.single_instance import stop_server
+    stopped_pid = stop_server(global_arch_dir)
+    if stopped_pid:
+        print(f"[Arch MCP] Stopped server (PID {stopped_pid}).")
+    else:
+        print("[Arch MCP] No running server found.")
+    sys.exit(0)
 
-    global_arch_dir = get_global_arch_dir()
-    cmd_prefix = "arch" if getattr(sys, "frozen", False) else "python src/main.py"
 
-    # Handle --stdio mode for IDEs (Antigravity, Cursor, etc.)
-    if getattr(args, "stdio", False):
-        if passed_root and passed_root != ".":
-            try:
-                register_workspace(project_root, global_arch_dir)
-            except Exception:
-                pass
-        from interface.server import run_server
-        run_server(port=0)
+def _handle_status(global_arch_dir):
+    from utils.single_instance import get_server_status
+    status = get_server_status(global_arch_dir)
+    if status and status.get("healthy"):
+        print("[Arch MCP] Server is running:")
+        print(f"  URL:     {status['url']}")
+        print(f"  PID:     {status['pid']}")
+        print(f"  Port:    {status['port']}")
+        print("  Status:  Healthy")
+        try:
+            from interface.project_registry import ProjectRegistry
+            reg = ProjectRegistry.get_instance(global_dir=global_arch_dir)
+            projs = reg.list_projects()
+            if projs:
+                print(f"\nRegistered Workspaces ({len(projs)}):")
+                for p in projs:
+                    marker = " (active)" if p["is_active"] else ""
+                    print(f"  - {p['name']}: {p['root']}{marker}")
+        except Exception:
+            pass
+    elif status:
+        print("[Arch MCP] Server process exists but is unresponsive:")
+        print(f"  URL:     {status['url']}")
+        print(f"  PID:     {status['pid']}")
+        print("  Status:  Unresponsive")
+    else:
+        print("[Arch MCP] Server is not running.")
+    sys.exit(0)
+
+
+def _handle_restart(global_arch_dir):
+    from utils.single_instance import stop_server
+    stopped_pid = stop_server(global_arch_dir)
+    if stopped_pid:
+        print(f"[Arch MCP] Stopped existing server (PID {stopped_pid}).")
+
+
+def _handle_headless(args, project_root, global_arch_dir, req_port, cmd_prefix):
+    from utils.single_instance import get_server_status, register_workspace, start_headless
+    existing = get_server_status(global_arch_dir)
+    if existing and existing.get("healthy"):
+        try:
+            register_workspace(project_root, global_arch_dir)
+        except Exception:
+            pass
+        print("[Arch MCP] Server is already running:")
+        print(f"  URL:     {existing['url']}")
+        print(f"  PID:     {existing['pid']}")
+        print("  Status:  Healthy")
+        print(f"  Registered workspace: {project_root}")
+        print("\nOptions:")
+        print(f"  - Stop server:            {cmd_prefix} mcp --stop")
+        print(f"  - Restart headlessly:     {cmd_prefix} mcp --restart --headless")
         sys.exit(0)
 
-    # 1. Handle --stop
-    if getattr(args, "stop", False):
-        stopped_pid = stop_server(global_arch_dir)
-        if stopped_pid:
-            print(f"[Arch MCP] Stopped server (PID {stopped_pid}).")
-        else:
-            print("[Arch MCP] No running server found.")
+    print("[Arch MCP] Starting server headlessly in background...")
+    info = start_headless(project_root, port=req_port)
+    if info and info.get("healthy"):
+        print("[Arch MCP] Server started successfully:")
+        print(f"  URL:     {info['url']}")
+        print(f"  PID:     {info['pid']}")
+        print(f"  Logs:    ~/.arch/daemon.log")
+        print("  Status:  Healthy")
+        print(f"\nTo stop it:    {cmd_prefix} mcp --stop")
         sys.exit(0)
+    else:
+        print("[Arch MCP] Failed to start server headlessly. Check ~/.arch/daemon.log for details.", file=sys.stderr)
+        sys.exit(1)
 
-    # 2. Handle --status
-    if getattr(args, "status", False):
-        status = get_server_status(global_arch_dir)
-        if status and status.get("healthy"):
-            print("[Arch MCP] Server is running:")
-            print(f"  URL:     {status['url']}")
-            print(f"  PID:     {status['pid']}")
-            print(f"  Port:    {status['port']}")
-            print("  Status:  Healthy")
-            try:
-                from interface.project_registry import ProjectRegistry
-                reg = ProjectRegistry.get_instance(global_dir=global_arch_dir)
-                projs = reg.list_projects()
-                if projs:
-                    print(f"\nRegistered Workspaces ({len(projs)}):")
-                    for p in projs:
-                        marker = " (active)" if p["is_active"] else ""
-                        print(f"  - {p['name']}: {p['root']}{marker}")
-            except Exception:
-                pass
-        elif status:
-            print("[Arch MCP] Server process exists but is unresponsive:")
-            print(f"  URL:     {status['url']}")
-            print(f"  PID:     {status['pid']}")
-            print("  Status:  Unresponsive")
-        else:
-            print("[Arch MCP] Server is not running.")
-        sys.exit(0)
 
-    # 3. Handle --restart
-    if getattr(args, "restart", False):
-        stopped_pid = stop_server(global_arch_dir)
-        if stopped_pid:
-            print(f"[Arch MCP] Stopped existing server (PID {stopped_pid}).")
-
-    # 4. Handle --headless
-    if getattr(args, "headless", False):
-        existing = get_server_status(global_arch_dir)
-        if existing and existing.get("healthy"):
-            try:
-                register_workspace(project_root, global_arch_dir)
-            except Exception:
-                pass
-            print("[Arch MCP] Server is already running:")
-            print(f"  URL:     {existing['url']}")
-            print(f"  PID:     {existing['pid']}")
-            print("  Status:  Healthy")
-            print(f"  Registered workspace: {project_root}")
-            print("\nOptions:")
-            print(f"  - Stop server:            {cmd_prefix} mcp --stop")
-            print(f"  - Restart headlessly:     {cmd_prefix} mcp --restart --headless")
-            sys.exit(0)
-
-        print("[Arch MCP] Starting server headlessly in background...")
-        info = start_headless(project_root, port=req_port)
-        if info and info.get("healthy"):
-            print("[Arch MCP] Server started successfully:")
-            print(f"  URL:     {info['url']}")
-            print(f"  PID:     {info['pid']}")
-            print(f"  Logs:    ~/.arch/daemon.log")
-            print("  Status:  Healthy")
-            print(f"\nTo stop it:    {cmd_prefix} mcp --stop")
-            sys.exit(0)
-        else:
-            print("[Arch MCP] Failed to start server headlessly. Check ~/.arch/daemon.log for details.", file=sys.stderr)
-            sys.exit(1)
-
-    # 5. Foreground mode (default or internal child)
+def _handle_foreground(args, project_root, global_arch_dir, req_port, cmd_prefix):
+    from utils.single_instance import get_server_status, register_workspace, acquire_server, read_lock
     is_foreground_worker = getattr(args, "foreground", False)
     if not is_foreground_worker:
         existing = get_server_status(global_arch_dir)
@@ -176,3 +159,41 @@ def cmd_mcp(args):
 
     from interface.server import run_server
     run_server(port=port)
+
+
+def cmd_mcp(args):
+    """Manages and starts the machine-global FastMCP daemon."""
+    project_root = get_project_root(args)
+    passed_root = getattr(args, "project_root", None)
+    if (project_root / ".arch" / "arch.db").exists() or (passed_root and passed_root != "."):
+        os.environ["ARCH_PROJECT_ROOT"] = str(project_root)
+    elif "ARCH_PROJECT_ROOT" in os.environ and not (Path(os.environ["ARCH_PROJECT_ROOT"]) / ".arch" / "arch.db").exists():
+        del os.environ["ARCH_PROJECT_ROOT"]
+
+    from utils.single_instance import get_global_arch_dir
+    global_arch_dir = get_global_arch_dir()
+    cmd_prefix = "arch" if getattr(sys, "frozen", False) else "python src/main.py"
+    req_port = getattr(args, "port", 0)
+
+    # Handle --stdio mode for IDEs (Antigravity, Cursor, etc.)
+    if getattr(args, "stdio", False):
+        return _handle_stdio(args, project_root, global_arch_dir)
+
+    # 1. Handle --stop
+    if getattr(args, "stop", False):
+        return _handle_stop(global_arch_dir)
+
+    # 2. Handle --status
+    if getattr(args, "status", False):
+        return _handle_status(global_arch_dir)
+
+    # 3. Handle --restart
+    if getattr(args, "restart", False):
+        _handle_restart(global_arch_dir)
+
+    # 4. Handle --headless
+    if getattr(args, "headless", False):
+        return _handle_headless(args, project_root, global_arch_dir, req_port, cmd_prefix)
+
+    # 5. Foreground mode (default or internal child)
+    return _handle_foreground(args, project_root, global_arch_dir, req_port, cmd_prefix)

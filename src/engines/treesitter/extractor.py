@@ -65,7 +65,10 @@ class SymbolDeclaration:
         self.clean_symbol = clean_symbol
         self.symbol = clean_symbol  # Default symbol ID to clean_symbol; can be reconciled with SCIP
         self.kind = kind
-        self.filepath = str(filepath).replace("\\", "/")
+        norm_fp = str(filepath).replace("\\", "/")
+        if norm_fp.startswith("./"):
+            norm_fp = norm_fp[2:]
+        self.filepath = norm_fp
         self.start_line = start_line
         self.start_col = start_col
         self.end_line = end_line

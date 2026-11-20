@@ -1,42 +1,39 @@
 import re
 import collections
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Set, Tuple
 
 from engines.scip.utils import print_progress
-from utils.helpers import ext_to_lang
+from utils.helpers import ext_to_lang, demangle_scip_symbol
+from change_tracker.tracker import ChangeTracker
+from engines.reconciler import reconcile_symbol_id
 
 try:
     from engines import scip_pb2
 except ImportError:
     import scip_pb2
 
-from change_tracker.tracker import ChangeTracker
-
 
 class IndexIngester:
     """Handles incremental ingestion of parsed SCIP data into the database."""
 
-    @staticmethod
-    def ingest_index(repository, parsed_data: Dict[str, Any],
-                     project_root: Optional[Path] = None, force: bool = False,
-                     config: Optional[Dict[str, Any]] = None):
-        """
-        Ingests the parsed symbols, occurrences, and edges into the database.
-        Optionally uses an embedder to compute vector representations for symbol docstrings.
-        Uses incremental ingestion: only processes files whose content has changed.
-        """
-        from change_tracker.tracker import ChangeTracker
-
-        # 1. Register files first
+    @classmethod
+    def _resolve_changed_and_deleted(
+        cls,
+        repository,
+        parsed_data: Dict[str, Any],
+        project_root: Optional[Path] = None,
+        force: bool = False,
+    ) -> Tuple[List[str], List[str], List[str], List[str]]:
+        """Resolves changed files, deleted files, unchanged files, and hashes."""
         files_to_register = set()
         for f in parsed_data.get("files", []):
             if f:
                 files_to_register.add(f.replace("\\", "/"))
-        for occ in parsed_data["occurrences"]:
+        for occ in parsed_data.get("occurrences", []):
             if occ.get("filepath"):
                 files_to_register.add(occ["filepath"].replace("\\", "/"))
-        for sym in parsed_data["symbols"].values():
+        for sym in parsed_data.get("symbols", {}).values():
             if sym.get("filepath"):
                 files_to_register.add(sym["filepath"].replace("\\", "/"))
 
@@ -81,7 +78,7 @@ class IndexIngester:
                 if not exists_on_disk and (project_root is not None or Path(fp).is_absolute()):
                     deleted_files.append(fp)
 
-        # 2. Determine which files actually changed (incremental)
+        # Determine which files actually changed (incremental)
         changed_files = []
         unchanged_files = []
         if project_root and not force:
@@ -105,7 +102,7 @@ class IndexIngester:
 
         # Safety Check / Shrink Guard (skip for incremental)
         if force or not unchanged_files:
-            new_symbols_count = sum(1 for v in parsed_data["symbols"].values() if v["filepath"])
+            new_symbols_count = sum(1 for v in parsed_data.get("symbols", {}).values() if v.get("filepath"))
             existing_symbols_count = 0
             langs_tuple = tuple(languages_in_index)
             if langs_tuple:
@@ -137,13 +134,23 @@ class IndexIngester:
                         "Refusing to overwrite. This might be due to a failed SCIP extraction. Pass force=True to override."
                     )
 
+        return file_list, changed_files, unchanged_files, deleted_files
+
+    @classmethod
+    def _ingest_files_table(
+        cls,
+        repository,
+        file_list: List[str],
+        deleted_files: List[str],
+        project_root: Optional[Path] = None,
+    ):
+        """Writes file records to repository.files and cascades deleted files."""
         if deleted_files:
             for fp in deleted_files:
                 print(f"[SCIP Ingest] Cleaning up deleted file from database: {fp}")
             from db.cascade import CascadeCleanupService
             CascadeCleanupService(repository).delete_files_bulk(deleted_files)
 
-        # Register files in bulk with actual SHA-256 hashes
         files_to_ingest = []
         for fp in file_list:
             sha256_val = "initial_hash"
@@ -157,15 +164,18 @@ class IndexIngester:
 
         repository.files.upsert_files_bulk(files_to_ingest)
 
-        if not changed_files and not deleted_files:
-            print("[SCIP Ingest] No files changed. Skipping symbol/occurrence/edge ingestion.")
-            return
-
-        # 2. Ingest symbols (only changed files + all external symbols)
+    @classmethod
+    def _reconcile_and_stage_symbols(
+        cls,
+        repository,
+        parsed_data: Dict[str, Any],
+        changed_files: List[str],
+    ) -> Dict[str, Any]:
+        """Maps SCIP symbols, invokes reconcile_symbol_id, and stages symbol/occurrence/diagnostic/edge records."""
         changed_set = {fp.replace("\\", "/") for fp in changed_files}
         filtered_symbols = {
             k: {**v, "filepath": v["filepath"].replace("\\", "/") if v.get("filepath") else None}
-            for k, v in parsed_data["symbols"].items()
+            for k, v in parsed_data.get("symbols", {}).items()
             if v.get("filepath") is None or v["filepath"].replace("\\", "/") in changed_set
         }
         total_symbols = len(filtered_symbols)
@@ -175,8 +185,7 @@ class IndexIngester:
         clean_to_existing_by_fp = collections.defaultdict(dict)
         line_to_existing_by_fp = collections.defaultdict(dict)
         occs_by_fp = collections.defaultdict(list)
-        from utils.helpers import demangle_scip_symbol
-        from engines.reconciler import reconcile_symbol_id
+
         if changed_files:
             existing_symbols = repository.symbols.get_symbols_by_filepaths(list(changed_set))
             for sid, sdata in existing_symbols.items():
@@ -203,34 +212,6 @@ class IndexIngester:
             if (occ.get("role", 0) & 1) != 0 and occ.get("symbol") and occ.get("filepath"):
                 fp_norm = occ["filepath"].replace("\\", "/")
                 scip_def_lines[(fp_norm, occ["symbol"])] = occ["start_line"]
-
-        # 1b. Delete old edges, symbols, and occurrences for changed files before re-ingesting.
-        # Order matters: edges first, then occurrences, then symbols.
-        if force:
-            repository.edges.delete_edges_for_files(changed_files)
-            repository.symbols.delete_occurrences_for_files(changed_files)
-            repository.symbols.delete_diagnostics_for_files(changed_files)
-            repository.symbols.delete_symbols_for_files(changed_files)
-        elif changed_files:
-            repository.edges.delete_edges_for_files(changed_files)
-            repository.symbols.delete_occurrences_for_files(changed_files)
-            repository.symbols.delete_diagnostics_for_files(changed_files)
-            upgraded_clean = {
-                (v["filepath"], demangle_scip_symbol(k))
-                for k, v in filtered_symbols.items() if v.get("filepath")
-            }
-            removed_symbols = [
-                sym_id for sym_id, sym in existing_symbols.items()
-                if (sym.get("filepath") and sym.get("filepath") in changed_set)
-                and sym_id not in filtered_symbols
-                and (sym.get("filepath"), sym.get("clean_symbol") or sym_id) not in upgraded_clean
-            ]
-            if removed_symbols:
-                with repository.db_conn.session() as conn:
-                    conn.execute(
-                        "DELETE FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))",
-                        (removed_symbols,)
-                    )
 
         symbols_to_ingest = []
         superseded_ts_symbols = set()
@@ -295,6 +276,99 @@ class IndexIngester:
                     "code_block": code_block,
                 })
 
+        skipped = total_symbols - len(symbols_to_ingest)
+        if skipped > 0:
+            print(f"  Skipped {skipped} unchanged symbols.")
+
+        # Occurrences
+        filtered_occurrences = [
+            {**occ, "filepath": occ["filepath"].replace("\\", "/")}
+            for occ in parsed_data.get("occurrences", [])
+            if occ.get("filepath") and occ["filepath"].replace("\\", "/") in changed_set
+        ]
+
+        # Diagnostics
+        filtered_diagnostics = [
+            {**d, "filepath": d["filepath"].replace("\\", "/")}
+            for d in parsed_data.get("diagnostics", [])
+            if d.get("filepath") and d["filepath"].replace("\\", "/") in changed_set
+        ]
+
+        # Call graph edges
+        filtered_edges = [
+            e for e in parsed_data.get("edges", [])
+            if (filtered_symbols.get(e["source"], {}).get("filepath") or "").replace("\\", "/") in changed_set
+            or (filtered_symbols.get(e["target"], {}).get("filepath") or "").replace("\\", "/") in changed_set
+        ]
+        edges_to_ingest = []
+        for edge in filtered_edges:
+            edges_to_ingest.append({
+                "source": edge["source"],
+                "target": edge["target"],
+                "relation": edge["relation"],
+                "weight": 1.0,
+            })
+
+        return {
+            "changed_set": changed_set,
+            "filtered_symbols": filtered_symbols,
+            "existing_symbols": existing_symbols,
+            "superseded_ts_symbols": superseded_ts_symbols,
+            "symbols_to_ingest": symbols_to_ingest,
+            "occurrences_to_ingest": filtered_occurrences,
+            "diagnostics_to_ingest": filtered_diagnostics,
+            "edges_to_ingest": edges_to_ingest,
+        }
+
+    @classmethod
+    def _cleanup_superseded_records(
+        cls,
+        repository,
+        changed_files: List[str],
+        force: bool = False,
+        staged_data: Optional[Dict[str, Any]] = None,
+        filtered_symbols: Optional[Dict[str, Any]] = None,
+        existing_symbols: Optional[Dict[str, Any]] = None,
+        superseded_ts_symbols: Optional[Any] = None,
+    ):
+        """Handles forced or incremental deletion of old symbols, occurrences, edges, and diagnostics."""
+        if staged_data:
+            if filtered_symbols is None:
+                filtered_symbols = staged_data.get("filtered_symbols")
+            if existing_symbols is None:
+                existing_symbols = staged_data.get("existing_symbols")
+            if superseded_ts_symbols is None:
+                superseded_ts_symbols = staged_data.get("superseded_ts_symbols")
+
+        changed_set = {fp.replace("\\", "/") for fp in changed_files}
+
+        if force:
+            repository.edges.delete_edges_for_files(changed_files)
+            repository.symbols.delete_occurrences_for_files(changed_files)
+            repository.symbols.delete_diagnostics_for_files(changed_files)
+            repository.symbols.delete_symbols_for_files(changed_files)
+        elif changed_files:
+            repository.edges.delete_edges_for_files(changed_files)
+            repository.symbols.delete_occurrences_for_files(changed_files)
+            repository.symbols.delete_diagnostics_for_files(changed_files)
+            if filtered_symbols is not None and existing_symbols is not None:
+                upgraded_clean = {
+                    (v["filepath"], demangle_scip_symbol(k))
+                    for k, v in filtered_symbols.items() if v.get("filepath")
+                }
+                removed_symbols = [
+                    sym_id for sym_id, sym in existing_symbols.items()
+                    if (sym.get("filepath") and sym.get("filepath") in changed_set)
+                    and sym_id not in filtered_symbols
+                    and (sym.get("filepath"), sym.get("clean_symbol") or sym_id) not in upgraded_clean
+                ]
+                if removed_symbols:
+                    with repository.db_conn.session() as conn:
+                        conn.execute(
+                            "DELETE FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))",
+                            (removed_symbols,)
+                        )
+
         # Delete any temporary duplicate Tree-sitter rows superseded by canonical SCIP IDs
         if superseded_ts_symbols:
             with repository.db_conn.session() as conn:
@@ -303,9 +377,15 @@ class IndexIngester:
                     (list(superseded_ts_symbols),)
                 )
 
-        skipped = total_symbols - len(symbols_to_ingest)
-        if skipped > 0:
-            print(f"  Skipped {skipped} unchanged symbols.")
+    @classmethod
+    def _write_index_batches(
+        cls,
+        repository,
+        staged_data: Dict[str, Any],
+        force: bool = False,
+    ):
+        """Performs bulk writes for symbols, occurrences, diagnostics, and edges."""
+        symbols_to_ingest = staged_data["symbols_to_ingest"]
         print(f"[SCIP Ingest] Writing {len(symbols_to_ingest)} symbols to database...")
         sym_chunk = 10_000
         for i in range(0, len(symbols_to_ingest), sym_chunk):
@@ -313,12 +393,7 @@ class IndexIngester:
             repository.symbols.upsert_symbols_bulk(chunk)
             print_progress(min(i + sym_chunk, len(symbols_to_ingest)), len(symbols_to_ingest), prefix="[SCIP Ingest] Symbols DB")
 
-        # 3. Ingest occurrences (only changed files)
-        filtered_occurrences = [
-            {**occ, "filepath": occ["filepath"].replace("\\", "/")}
-            for occ in parsed_data["occurrences"]
-            if occ.get("filepath") and occ["filepath"].replace("\\", "/") in changed_set
-        ]
+        filtered_occurrences = staged_data["occurrences_to_ingest"]
         total_occ = len(filtered_occurrences)
         print(f"[SCIP Ingest] Ingesting {total_occ} occurrences...")
         occ_chunk = 10_000
@@ -327,51 +402,61 @@ class IndexIngester:
             repository.symbols.add_occurrences_bulk(chunk)
             print_progress(min(i + occ_chunk, total_occ), total_occ, prefix="[SCIP Ingest] Occurrences")
 
-        # 3b. Ingest diagnostics (only changed files)
-        filtered_diagnostics = [
-            {**d, "filepath": d["filepath"].replace("\\", "/")}
-            for d in parsed_data.get("diagnostics", [])
-            if d.get("filepath") and d["filepath"].replace("\\", "/") in changed_set
-        ]
+        filtered_diagnostics = staged_data["diagnostics_to_ingest"]
         if filtered_diagnostics:
             print(f"[SCIP Ingest] Ingesting {len(filtered_diagnostics)} diagnostics...")
             repository.symbols.add_diagnostics_bulk(filtered_diagnostics)
 
-        # 4. Ingest call graph edges (only changed files)
-        filtered_edges = [
-            e for e in parsed_data["edges"]
-            if (filtered_symbols.get(e["source"], {}).get("filepath") or "").replace("\\", "/") in changed_set
-            or (filtered_symbols.get(e["target"], {}).get("filepath") or "").replace("\\", "/") in changed_set
-        ]
-        total_edges = len(filtered_edges)
+        edges_to_ingest = staged_data["edges_to_ingest"]
+        total_edges = len(edges_to_ingest)
         print(f"[SCIP Ingest] Ingesting {total_edges} edges from changed files...")
-
-        edges_to_ingest = []
-        for idx, edge in enumerate(filtered_edges, 1):
-            caller_sym = edge["source"]
-            callee_sym = edge["target"]
-
-            # Weights are assigned during the audit phase, not during ingestion.
-            edges_to_ingest.append({
-                "source": caller_sym,
-                "target": callee_sym,
-                "relation": edge["relation"],
-                "weight": 1.0
-            })
+        for idx, edge in enumerate(edges_to_ingest, 1):
             if idx % 100 == 0 or idx == total_edges:
                 print_progress(idx, total_edges, prefix="[SCIP Ingest] Edges")
-
         repository.edges.add_edges_bulk(edges_to_ingest)
 
-        # 5. Clean up any orphaned edges and occurrences left over from prior index runs
         if force:
             orphaned_edges = repository.edges.delete_orphaned_edges()
             orphaned_occurrences = repository.symbols.delete_orphaned_occurrences()
             if orphaned_edges or orphaned_occurrences:
                 print(f"[SCIP Ingest] Cleaned up {orphaned_edges} orphaned edges, {orphaned_occurrences} orphaned occurrences")
 
-        # 6. Recalculate connection weights for symbols
         print("[SCIP Ingest] Recalculating symbol connection weights...")
         repository.symbols.recalculate_connection_weights()
+
+    @classmethod
+    def ingest_index(
+        cls,
+        repository,
+        parsed_data: Dict[str, Any],
+        project_root: Optional[Path] = None,
+        force: bool = False,
+        config: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Ingests the parsed symbols, occurrences, and edges into the database.
+        Optionally uses an embedder to compute vector representations for symbol docstrings.
+        Uses incremental ingestion: only processes files whose content has changed.
+        """
+        # 1. Resolve changed, unchanged, and deleted files
+        file_list, changed_files, unchanged_files, deleted_files = cls._resolve_changed_and_deleted(
+            repository, parsed_data, project_root, force
+        )
+
+        # 2. Ingest files table and clean up deleted files
+        cls._ingest_files_table(repository, file_list, deleted_files, project_root)
+
+        if not changed_files and not deleted_files:
+            print("[SCIP Ingest] No files changed. Skipping symbol/occurrence/edge ingestion.")
+            return
+
+        # 3. Reconcile symbols and stage records
+        staged_data = cls._reconcile_and_stage_symbols(repository, parsed_data, changed_files)
+
+        # 4. Clean up superseded and removed records
+        cls._cleanup_superseded_records(repository, changed_files, force, staged_data)
+
+        # 5. Write index batches
+        cls._write_index_batches(repository, staged_data, force)
 
         print("[SCIP Ingest] Ingestion complete.")

@@ -41,6 +41,11 @@ class Auditor:
             PendingAuditChecker(repository),
         ]
 
+        from auditor.registry import ViolationCheckerRegistry
+        ViolationCheckerRegistry.clear()
+        for checker in self.checkers:
+            ViolationCheckerRegistry.register(checker)
+
     def load_config(self) -> Dict[str, Any]:
         """Loads the workspace architectural configuration."""
         return load_config(self.project_root)

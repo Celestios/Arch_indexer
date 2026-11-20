@@ -8,10 +8,11 @@ Unit tests for the upgraded graph_builder modules:
 
 import os
 import pytest
-from graph_builder.db_reader import DatabaseReader
-from graph_builder.graph_model import GraphModel, NodeType, EdgeType, GraphNode, GraphEdge
-from graph_builder.circuit_layout import CircuitLayoutEngine, compress_circuit_data
-from graph_builder.html_generator import HtmlGraphGenerator
+from graph_builder.ingestion.db_reader import DatabaseReader
+from graph_builder.domain.model import GraphModel, NodeType, EdgeType, GraphNode, GraphEdge
+from graph_builder.layout.circuit_layout import CircuitLayoutEngine
+from graph_builder.serialization.compressor import compress_circuit_data
+from graph_builder.renderer.html_generator import HtmlGraphGenerator
 
 
 def test_signature_port_parsing():
@@ -412,7 +413,7 @@ def test_method_name_strips_class_prefix():
 
 def test_graph_command_registration():
     import argparse
-    from commands.registry import register_all
+    from commands.init import register_all
 
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")

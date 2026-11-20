@@ -56,6 +56,7 @@ class FilesRepository(BaseRepository):
 
     def upsert_file(self, filepath: str, sha256: str, language: str):
         """Registers or updates a file's hashing and index metadata. Sets pending_audit if changed."""
+        filepath = filepath.replace("\\", "/")
         with self.db_conn.session() as conn:
             conn.execute(UPSERT_FILE_SQL, (filepath, sha256, language))
 
@@ -87,7 +88,7 @@ class FilesRepository(BaseRepository):
             return
         data = [
             (
-                f["filepath"],
+                f["filepath"].replace("\\", "/"),
                 f["sha256"],
                 f["language"]
             )

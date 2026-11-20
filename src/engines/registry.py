@@ -154,7 +154,6 @@ class LanguageRegistry:
         cls.register(
             "c",
             extensions=(".c", ".h"),
-            manifest_names=("Makefile",),
         )
         cls.register(
             "csharp",
