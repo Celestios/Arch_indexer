@@ -29,14 +29,14 @@ def cmd_set_status(args):
             print(f"Error: File '{args.filepath}' is not registered in the database.", file=sys.stderr)
             sys.exit(1)
 
-        repository.files.update_file_manual_status(filepath, status, args.justification)
+        repository.workspace.update_file_manual_status(filepath, status, args.justification)
 
-        repository.compliance.delete_manual_violations(filepath)
+        repository.quality.delete_manual_violations(filepath)
         if status == "VIOLATION_DETECTED":
             from utils.violation_id import ViolationId
             violation_id = ViolationId.generate("manual_logical_audit", filepath, args.justification)
 
-            repository.compliance.add_violation(
+            repository.quality.add_violation(
                 violation_id=violation_id,
                 rule_id="logical_audit",
                 symbol=None,

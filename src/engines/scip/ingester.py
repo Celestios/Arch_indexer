@@ -46,7 +46,7 @@ class IndexIngester:
             lang = ext_to_lang(ext)
             languages_in_index.add(lang)
 
-        db_files = repository.files.get_all_files_metadata()
+        db_files = repository.workspace.get_all_files_metadata()
 
         if not languages_in_index:
             if project_root:
@@ -135,8 +135,7 @@ class IndexIngester:
         if deleted_files:
             for fp in deleted_files:
                 print(f"[SCIP Ingest] Cleaning up deleted file from database: {fp}")
-            from db.cascade import CascadeCleanupService
-            CascadeCleanupService(repository).delete_files_bulk(deleted_files)
+            repository.delete_files_bulk(deleted_files)
 
         files_to_ingest = []
         for fp in file_list:
@@ -149,7 +148,7 @@ class IndexIngester:
             lang = ext_to_lang(ext)
             files_to_ingest.append({"filepath": fp, "sha256": sha256_val, "language": lang})
 
-        repository.files.upsert_files_bulk(files_to_ingest)
+        repository.workspace.upsert_files_bulk(files_to_ingest)
 
     @classmethod
     def _reconcile_and_stage_symbols(
@@ -174,7 +173,7 @@ class IndexIngester:
         occs_by_fp = collections.defaultdict(list)
 
         if changed_files:
-            existing_symbols = repository.symbols.get_symbols_by_filepaths(list(changed_set))
+            existing_symbols = repository.graph.get_symbols_by_filepaths(list(changed_set))
             for sid, sdata in existing_symbols.items():
                 fp = sdata.get("filepath")
                 csym = sdata.get("clean_symbol") or sid
@@ -317,14 +316,14 @@ class IndexIngester:
         changed_set = {fp.replace("\\", "/") for fp in changed_files}
 
         if force:
-            repository.edges.delete_edges_for_files(changed_files)
-            repository.symbols.delete_occurrences_for_files(changed_files)
-            repository.symbols.delete_diagnostics_for_files(changed_files)
-            repository.symbols.delete_symbols_for_files(changed_files)
+            repository.graph.delete_edges_for_files(changed_files)
+            repository.graph.delete_occurrences_for_files(changed_files)
+            repository.quality.delete_diagnostics_for_files(changed_files)
+            repository.graph.delete_symbols_for_files(changed_files)
         elif changed_files:
-            repository.edges.delete_edges_for_files(changed_files)
-            repository.symbols.delete_occurrences_for_files(changed_files)
-            repository.symbols.delete_diagnostics_for_files(changed_files)
+            repository.graph.delete_edges_for_files(changed_files)
+            repository.graph.delete_occurrences_for_files(changed_files)
+            repository.quality.delete_diagnostics_for_files(changed_files)
             if filtered_symbols is not None and existing_symbols is not None:
                 upgraded_clean = {
                     (v["filepath"], demangle_scip_symbol(k))
@@ -350,41 +349,43 @@ class IndexIngester:
         symbols_to_ingest = staged_data["symbols_to_ingest"]
         print(f"[SCIP Ingest] Writing {len(symbols_to_ingest)} symbols to database...")
         sym_chunk = 10_000
-        for i in range(0, len(symbols_to_ingest), sym_chunk):
-            chunk = symbols_to_ingest[i:i + sym_chunk]
-            repository.symbols.upsert_symbols_bulk(chunk)
-            print_progress(min(i + sym_chunk, len(symbols_to_ingest)), len(symbols_to_ingest), prefix="[SCIP Ingest] Symbols DB")
 
-        filtered_occurrences = staged_data["occurrences_to_ingest"]
-        total_occ = len(filtered_occurrences)
-        print(f"[SCIP Ingest] Ingesting {total_occ} occurrences...")
-        occ_chunk = 10_000
-        for i in range(0, total_occ, occ_chunk):
-            chunk = filtered_occurrences[i:i + occ_chunk]
-            repository.symbols.add_occurrences_bulk(chunk)
-            print_progress(min(i + occ_chunk, total_occ), total_occ, prefix="[SCIP Ingest] Occurrences")
+        with repository.db_conn.transaction():
+            for i in range(0, len(symbols_to_ingest), sym_chunk):
+                chunk = symbols_to_ingest[i:i + sym_chunk]
+                repository.graph.upsert_symbols_bulk(chunk)
+                print_progress(min(i + sym_chunk, len(symbols_to_ingest)), len(symbols_to_ingest), prefix="[SCIP Ingest] Symbols DB")
 
-        filtered_diagnostics = staged_data["diagnostics_to_ingest"]
-        if filtered_diagnostics:
-            print(f"[SCIP Ingest] Ingesting {len(filtered_diagnostics)} diagnostics...")
-            repository.symbols.add_diagnostics_bulk(filtered_diagnostics)
+            filtered_occurrences = staged_data["occurrences_to_ingest"]
+            total_occ = len(filtered_occurrences)
+            print(f"[SCIP Ingest] Ingesting {total_occ} occurrences...")
+            occ_chunk = 10_000
+            for i in range(0, total_occ, occ_chunk):
+                chunk = filtered_occurrences[i:i + occ_chunk]
+                repository.graph.record_occurrences_bulk(chunk)
+                print_progress(min(i + occ_chunk, total_occ), total_occ, prefix="[SCIP Ingest] Occurrences")
 
-        edges_to_ingest = staged_data["edges_to_ingest"]
-        total_edges = len(edges_to_ingest)
-        print(f"[SCIP Ingest] Ingesting {total_edges} edges from changed files...")
-        for idx, edge in enumerate(edges_to_ingest, 1):
-            if idx % 100 == 0 or idx == total_edges:
-                print_progress(idx, total_edges, prefix="[SCIP Ingest] Edges")
-        repository.edges.add_edges_bulk(edges_to_ingest)
+            filtered_diagnostics = staged_data["diagnostics_to_ingest"]
+            if filtered_diagnostics:
+                print(f"[SCIP Ingest] Ingesting {len(filtered_diagnostics)} diagnostics...")
+                repository.quality.record_diagnostics_bulk(filtered_diagnostics)
 
-        if force:
-            orphaned_edges = repository.edges.delete_orphaned_edges()
-            orphaned_occurrences = repository.symbols.delete_orphaned_occurrences()
-            if orphaned_edges or orphaned_occurrences:
-                print(f"[SCIP Ingest] Cleaned up {orphaned_edges} orphaned edges, {orphaned_occurrences} orphaned occurrences")
+            edges_to_ingest = staged_data["edges_to_ingest"]
+            total_edges = len(edges_to_ingest)
+            print(f"[SCIP Ingest] Ingesting {total_edges} edges from changed files...")
+            for idx, edge in enumerate(edges_to_ingest, 1):
+                if idx % 100 == 0 or idx == total_edges:
+                    print_progress(idx, total_edges, prefix="[SCIP Ingest] Edges")
+            repository.graph.add_edges_bulk(edges_to_ingest)
 
-        print("[SCIP Ingest] Recalculating symbol connection weights...")
-        repository.symbols.recalculate_connection_weights()
+            if force:
+                orphaned_edges = repository.graph.delete_orphaned_edges()
+                orphaned_occurrences = repository.graph.delete_orphaned_occurrences()
+                if orphaned_edges or orphaned_occurrences:
+                    print(f"[SCIP Ingest] Cleaned up {orphaned_edges} orphaned edges, {orphaned_occurrences} orphaned occurrences")
+
+            print("[SCIP Ingest] Recalculating symbol connection weights...")
+            repository.graph.recalculate_connection_weights()
 
     @classmethod
     def ingest_index(

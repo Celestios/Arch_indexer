@@ -6,10 +6,10 @@ def handle_audit(repository, project_root) -> str:
     """Run the project-wide compliance audit. Returns markdown."""
     auditor = Auditor(repository, project_root)
     violations = auditor.run_audit()
-    all_violations = repository.compliance.get_violations()
+    all_violations = repository.quality.get_violations()
 
     if not all_violations:
-        pending_count = repository.files.get_files_pending_audit_count()
+        pending_count = repository.workspace.get_files_pending_audit_count()
         pending_msg = (
             f"\n\n*{pending_count} file(s) pending deep audit.*" if pending_count > 0 else ""
         )

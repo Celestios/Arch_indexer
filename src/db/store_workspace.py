@@ -102,30 +102,21 @@ class WorkspaceStore(BaseRepository):
         self._executemany("UPDATE files SET status = ? WHERE filepath = ?", data)
 
     def update_file_manual_status(self, filepath: str, status: str, justification: Optional[str] = None):
-        """Sets a human-reviewed override status for a file."""
+        """Sets a human-reviewed override status for a file and clears pending audit flag."""
         norm_fp = _normalize_path(filepath)
         self._execute(
-            "UPDATE files SET manual_status = ?, justification = ? WHERE filepath = ?",
+            "UPDATE files SET manual_status = ?, pending_audit = FALSE, justification = ? WHERE filepath = ?",
             (status, justification, norm_fp)
         )
 
     def set_manual_fields(self, filepath: str, manual_fields: dict, justification: Optional[str] = None):
-        """Updates or merges manual metadata fields for a specific file."""
+        """Sets or replaces manual metadata fields for a specific file."""
         norm_fp = _normalize_path(filepath)
-        existing = self.get_file(norm_fp)
-        if not existing:
-            return
-        fields = existing.get("manual_fields", {}) or {}
-        fields.update(manual_fields)
-        fields_json = json.dumps(fields)
+        fields_json = json.dumps(manual_fields or {})
         self._execute(
-            "UPDATE files SET manual_fields = ?, justification = COALESCE(?, justification) WHERE filepath = ?",
+            "UPDATE files SET manual_fields = ?, justification = ? WHERE filepath = ?",
             (fields_json, justification, norm_fp)
         )
-
-    def update_file_manual_fields(self, filepath: str, manual_fields: dict, justification: Optional[str] = None):
-        """Alias for set_manual_fields."""
-        self.set_manual_fields(filepath, manual_fields, justification)
 
     def clear_all_pending_audits(self, justification: str):
         """Marks all files as audited with a justification."""
@@ -151,24 +142,11 @@ class WorkspaceStore(BaseRepository):
         """Deletes multiple records from files table."""
         self._delete_by_filepaths("files", filepaths)
 
-    def search_files_keyword(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Search files by keyword substring in filepath."""
+    def search_files(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Search files by case-insensitive keyword substring in filepath."""
         q = f"%{query}%"
         rows = self._fetch_all(
-            "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE filepath LIKE ? LIMIT ?",
-            (q, limit)
-        )
-        return [self._format_file_dict(r) for r in rows if r]
-
-    def get_file_exact(self, filepath: str) -> Optional[Dict[str, Any]]:
-        """Exact path lookup."""
-        return self.get_file(filepath)
-
-    def search_files_like(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search files LIKE query."""
-        q = f"%{query}%"
-        rows = self._fetch_all(
-            "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE filepath LIKE ? LIMIT ?",
+            "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE LOWER(filepath) LIKE LOWER(?) LIMIT ?",
             (q, limit)
         )
         return [self._format_file_dict(r) for r in rows if r]
@@ -219,32 +197,52 @@ class WorkspaceStore(BaseRepository):
     def get_co_changes(
         self,
         filepath: Optional[str] = None,
-        min_count: int = 1,
         min_frequency: float = 0.0,
-        limit: int = 100,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Retrieves coupled files matching the filters."""
-        query = "SELECT filepath_a, filepath_b, co_change_count, frequency FROM file_co_changes WHERE co_change_count >= ? AND frequency >= ?"
-        params: List[Any] = [min_count, min_frequency]
-
         if filepath:
             norm_fp = _normalize_path(filepath)
-            query += " AND (filepath_a = ? OR filepath_b = ?)"
-            params.extend([norm_fp, norm_fp])
-
-        query += " ORDER BY co_change_count DESC, frequency DESC LIMIT ?"
-        params.append(limit)
-
-        rows = self._fetch_all(query, params)
-        res = []
-        for r in rows:
-            res.append({
-                "filepath_a": _normalize_path(r["filepath_a"]),
-                "filepath_b": _normalize_path(r["filepath_b"]),
-                "co_change_count": r["co_change_count"],
-                "frequency": r["frequency"],
-            })
-        return res
+            query = """
+                SELECT filepath_b, co_change_count, frequency
+                FROM file_co_changes
+                WHERE filepath_a = ? AND frequency >= ?
+                ORDER BY frequency DESC, co_change_count DESC
+            """
+            params: List[Any] = [norm_fp, min_frequency]
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(limit)
+            rows = self._fetch_all(query, params)
+            return [
+                {
+                    "filepath": _normalize_path(r["filepath_b"]),
+                    "co_change_count": r["co_change_count"],
+                    "frequency": r["frequency"],
+                }
+                for r in rows
+            ]
+        else:
+            query = """
+                SELECT filepath_a, filepath_b, co_change_count, frequency
+                FROM file_co_changes
+                WHERE frequency >= ?
+                ORDER BY frequency DESC, co_change_count DESC
+            """
+            params = [min_frequency]
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(limit)
+            rows = self._fetch_all(query, params)
+            return [
+                {
+                    "filepath_a": _normalize_path(r["filepath_a"]),
+                    "filepath_b": _normalize_path(r["filepath_b"]),
+                    "co_change_count": r["co_change_count"],
+                    "frequency": r["frequency"],
+                }
+                for r in rows
+            ]
 
     def clear_co_changes(self):
         """Clears all records in file_co_changes."""

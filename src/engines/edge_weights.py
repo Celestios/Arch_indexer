@@ -82,7 +82,7 @@ def update_edge_weights(
         updated_edges.append((weight, src, tgt, rel))
 
     if updated_edges and repository:
-        repository.edges.update_edge_weights_bulk(updated_edges)
+        repository.graph.update_edge_weights_bulk(updated_edges)
     return updated_edges
 
 

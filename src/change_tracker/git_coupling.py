@@ -72,9 +72,9 @@ class GitCouplingMiner:
                 freq = round(cnt / total_a, 4)
                 records.append((f_a, f_b, cnt, freq))
 
-        repository.coupling.clear()
+        repository.workspace.clear_co_changes()
         if records:
-            repository.coupling.upsert_bulk(records)
+            repository.workspace.record_co_changes(records)
 
         return len(records)
 
@@ -88,4 +88,4 @@ class GitCouplingMiner:
         """Retrieves files historically co-changed with filepath above min_frequency."""
         if not filepath:
             return []
-        return repository.coupling.get_co_changes(filepath=filepath, min_frequency=min_frequency, limit=limit)
+        return repository.workspace.get_co_changes(filepath=filepath, min_frequency=min_frequency, limit=limit)

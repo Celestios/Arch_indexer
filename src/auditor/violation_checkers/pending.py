@@ -33,7 +33,7 @@ class PendingAuditChecker(BaseViolationChecker):
         if snap is not None and snap.all_files:
             file_metadata = snap.all_files
         elif self.repository is not None:
-            file_metadata = self.repository.files.get_all_files_metadata()
+            file_metadata = self.repository.workspace.get_all_files_metadata()
         else:
             file_metadata = {}
 

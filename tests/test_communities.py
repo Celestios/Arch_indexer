@@ -4,8 +4,8 @@ from engines.communities import detect_communities
 
 def _make_repository(symbols_list, edges_list):
     repo = MagicMock()
-    repo.symbols.get_all_symbols.return_value = symbols_list
-    repo.edges.get_all_edges.return_value = edges_list
+    repo.graph.get_all_symbols.return_value = symbols_list
+    repo.graph.get_all_edges.return_value = edges_list
     return repo
 
 

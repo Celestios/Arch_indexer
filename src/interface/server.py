@@ -415,7 +415,7 @@ async def set_fields(
         if not resolved:
             return f"Error: File '{filepath}' is not registered in the database."
 
-        file_info = repository.files.get_file(resolved)
+        file_info = repository.workspace.get_file(resolved)
         current_fields = {}
         if file_info and file_info.get("manual_fields"):
             mf = file_info["manual_fields"]
@@ -433,7 +433,7 @@ async def set_fields(
             else:
                 current_fields[k] = v
 
-        repository.files.update_file_manual_fields(resolved, current_fields, justification)
+        repository.workspace.set_manual_fields(resolved, current_fields, justification)
         from auditor.analyzer import Auditor
         auditor = Auditor(repository, resolved_root)
         auditor.run_audit()
@@ -453,7 +453,7 @@ async def clear_pending(justification: str, project_root: str, ctx: Context = No
     """
     try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        repository.files.clear_all_pending_audits(justification)
+        repository.workspace.clear_all_pending_audits(justification)
         from auditor.analyzer import Auditor
         auditor = Auditor(repository, resolved_root)
         auditor.run_audit()

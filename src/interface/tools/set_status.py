@@ -23,14 +23,14 @@ def handle_set_status(
     if not resolved:
         return f"Error: File '{filepath}' is not registered in the database."
 
-    repository.files.update_file_manual_status(resolved, status_upper, justification)
-    repository.compliance.delete_manual_violations(resolved)
+    repository.workspace.update_file_manual_status(resolved, status_upper, justification)
+    repository.quality.delete_manual_violations(resolved)
 
     if status_upper == "VIOLATION_DETECTED":
         violation_text = f"manual_logical_audit_{resolved}_{justification}"
         violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
 
-        repository.compliance.add_violation(
+        repository.quality.add_violation(
             violation_id=violation_id,
             rule_id="logical_audit",
             symbol=None,

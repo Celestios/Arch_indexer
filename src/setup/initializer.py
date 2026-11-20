@@ -342,18 +342,18 @@ def sync_rules_to_db(repository: Repository, config: dict):
                 source = rule.get("source", "*")
                 msg = rule.get("message", f"Package restriction: {source} cannot depend on blocklist")
                 rule_id = f"{prefix}_pkg_{source}".lower().replace("/", "_").replace(".", "_")
-                repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+                repository.quality.upsert_rule(rule_id, msg, severity)
             elif rule_type == "naming_convention":
                 classification = rule.get("classification", "*")
                 msg = rule.get("message", f"Naming convention for {classification}")
                 rule_id = f"{prefix}_naming_{classification}".lower().replace("/", "_").replace(".", "_")
-                repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+                repository.quality.upsert_rule(rule_id, msg, severity)
             else:
                 source = rule.get("source", "*")
                 target = rule.get("target", "*")
                 msg = rule.get("message", f"Dependency violation: {source} -> {target}")
                 rule_id = f"{prefix}_{source}_{target}".lower().replace("/", "_").replace(".", "_")
-                repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+                repository.quality.upsert_rule(rule_id, msg, severity)
 
         # Field-level rules
         auto_fields = prefix_conf.get("automatic_fields", {})
@@ -370,18 +370,18 @@ def sync_rules_to_db(repository: Repository, config: dict):
                     source = rule.get("source", "*")
                     msg = rule.get("message", f"Package restriction: {source} cannot depend on blocklist")
                     rule_id = f"{prefix}_{field_name}_pkg_{source}".lower().replace("/", "_").replace(".", "_")
-                    repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+                    repository.quality.upsert_rule(rule_id, msg, severity)
                 elif rule_type == "naming_convention":
                     classification = rule.get("classification", "*")
                     msg = rule.get("message", f"Naming convention for {classification}")
                     rule_id = f"{prefix}_{field_name}_naming_{classification}".lower().replace("/", "_").replace(".", "_")
-                    repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+                    repository.quality.upsert_rule(rule_id, msg, severity)
                 else:
                     source = rule.get("source", "*")
                     target = rule.get("target", "*")
                     msg = rule.get("message", f"Dependency violation: {source} -> {target}")
                     rule_id = f"{prefix}_{field_name}_{source}_{target}".lower().replace("/", "_").replace(".", "_")
-                    repository.compliance.upsert_compliance_rule(rule_id, msg, severity)
+                    repository.quality.upsert_rule(rule_id, msg, severity)
 
 
 def initialize_workspace(project_root: Path) -> Path:

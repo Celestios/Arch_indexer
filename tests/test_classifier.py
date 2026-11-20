@@ -65,14 +65,14 @@ class TestEvaluateConditions:
 
     def test_calls_prefix_match(self):
         mock_repo = MagicMock()
-        mock_repo.symbols.get_symbol.return_value = {"filepath": "src/db/query.py"}
+        mock_repo.graph.get_symbol.return_value = {"filepath": "src/db/query.py"}
         clf = _make_classifier(mock_repo)
         info = {"symbol": "ns foo::fetch_data", "filepath": "a.py"}
         assert clf.evaluate_conditions(info, {"calls_prefix": "src/"}, ["target_sym"]) is True
 
     def test_calls_prefix_no_match(self):
         mock_repo = MagicMock()
-        mock_repo.symbols.get_symbol.return_value = {"filepath": "lib/other.py"}
+        mock_repo.graph.get_symbol.return_value = {"filepath": "lib/other.py"}
         clf = _make_classifier(mock_repo)
         info = {"symbol": "ns foo::fetch_data", "filepath": "a.py"}
         assert clf.evaluate_conditions(info, {"calls_prefix": "src/"}, ["target_sym"]) is False
@@ -84,7 +84,7 @@ class TestEvaluateConditions:
 
     def test_calls_prefix_symbol_not_found(self):
         mock_repo = MagicMock()
-        mock_repo.symbols.get_symbol.return_value = None
+        mock_repo.graph.get_symbol.return_value = None
         clf = _make_classifier(mock_repo)
         info = {"symbol": "ns foo::fetch_data", "filepath": "a.py"}
         assert clf.evaluate_conditions(info, {"calls_prefix": "src/"}, ["missing"]) is False

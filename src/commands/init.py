@@ -11,14 +11,11 @@ from engines.ffi_linker import FfiLinker
 from engines.registry import LanguageRegistry
 from utils.session import get_project_root
 
-def register_init_subcommand(subparsers):
+def register(subparsers):
     p = subparsers.add_parser("init", help="Initialize workspace and index symbols")
     p.add_argument("project_root", nargs="?", default=".", help="Project root directory")
     p.add_argument("--force", action="store_true", help="Force clean rebuild: delete DB and re-index from scratch")
     p.set_defaults(func=cmd_init)
-
-
-register = register_init_subcommand
 
 
 def _select_languages(languages):

@@ -15,7 +15,7 @@ def cmd_impact(args):
     """Performs blast radius analysis for a symbol by computing its transitive callers and callees."""
     with workspace_session(args) as (project_root, arch_dir, repository):
         try:
-            closure = repository.edges.get_transitive_closure(args.symbol, max_depth=args.max_depth)
+            closure = repository.analytics.get_transitive_closure(args.symbol, max_depth=args.max_depth)
         except Exception as e:
             print(f"Error computing blast radius: {e}", file=sys.stderr)
             sys.exit(1)

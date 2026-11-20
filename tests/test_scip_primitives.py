@@ -81,7 +81,7 @@ def test_scip_primitives_ingestion(tmp_path):
     repo = Repository(db_conn)
 
     # 1. Upsert symbol with parent_symbol
-    repo.symbols.upsert_symbol(
+    repo.graph.upsert_symbol(
         symbol="pkg/Bar#baz().",
         filepath="pkg/bar.py",
         kind="Method",
@@ -91,11 +91,11 @@ def test_scip_primitives_ingestion(tmp_path):
         parent_symbol="pkg/Bar#"
     )
 
-    sym = repo.symbols.get_symbol("pkg/Bar#baz().")
+    sym = repo.graph.get_symbol("pkg/Bar#baz().")
     assert sym is not None
     assert sym["parent_symbol"] == "pkg/Bar#"
 
-    sym_exact = repo.symbols.get_symbol_exact("pkg/Bar#baz().")
+    sym_exact = repo.graph.get_symbol_exact("pkg/Bar#baz().")
     assert sym_exact is not None
     assert sym_exact["parent_symbol"] == "pkg/Bar#"
 
@@ -112,29 +112,29 @@ def test_scip_primitives_ingestion(tmp_path):
             "tags": "Unnecessary"
         }
     ]
-    repo.symbols.add_diagnostics_bulk(diags)
+    repo.quality.record_diagnostics_bulk(diags)
 
-    file_diags = repo.symbols.get_diagnostics_for_file("pkg/bar.py")
+    file_diags = repo.quality.get_diagnostics_for_file("pkg/bar.py")
     assert len(file_diags) == 1
     assert file_diags[0]["code"] == "W001"
     assert file_diags[0]["severity"] == "Warning"
 
-    sym_diags = repo.symbols.get_diagnostics_for_symbol("pkg/Bar#baz().")
+    sym_diags = repo.quality.get_diagnostics_for_symbol("pkg/Bar#baz().")
     assert len(sym_diags) == 1
     assert sym_diags[0]["message"] == "Unused variable"
 
     # 3. Add Implements & TypeDefinition edges
-    repo.edges.add_edge("pkg/Bar#", "pkg/IFoo#", "Implements", 1.0)
-    repo.edges.add_edge("pkg/Bar#", "pkg/TypeFoo#", "TypeDefinition", 1.0)
+    repo.graph.add_edge("pkg/Bar#", "pkg/IFoo#", "Implements", 1.0)
+    repo.graph.add_edge("pkg/Bar#", "pkg/TypeFoo#", "TypeDefinition", 1.0)
 
-    closure = repo.edges.get_transitive_closure("pkg/IFoo#", max_depth=1)
+    closure = repo.analytics.get_transitive_closure("pkg/IFoo#", max_depth=1)
     assert len(closure["upstream"]) == 1
     assert closure["upstream"][0]["symbol"] == "pkg/Bar#"
     assert closure["upstream"][0]["relation"] == "Implements"
 
     # 4. Cleanup diagnostics on delete
-    repo.symbols.delete_diagnostics_for_file("pkg/bar.py")
-    assert len(repo.symbols.get_diagnostics_for_file("pkg/bar.py")) == 0
+    repo.quality.delete_diagnostics_for_file("pkg/bar.py")
+    assert len(repo.quality.get_diagnostics_for_file("pkg/bar.py")) == 0
 
     db_conn.close()
 
@@ -145,7 +145,7 @@ def test_clean_symbol_storage_and_querying(tmp_path):
     repo = Repository(db_conn)
 
     # 1. Upsert symbol without explicit clean_symbol -> auto-computes clean_symbol
-    repo.symbols.upsert_symbol(
+    repo.graph.upsert_symbol(
         symbol="scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login().",
         filepath="src/auth/service.py",
         kind="Method",
@@ -155,28 +155,28 @@ def test_clean_symbol_storage_and_querying(tmp_path):
     )
 
     # Verify stored clean_symbol
-    sym_by_raw = repo.symbols.get_symbol("scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login().")
+    sym_by_raw = repo.graph.get_symbol("scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login().")
     assert sym_by_raw is not None
     assert sym_by_raw["clean_symbol"] == "src.auth.service.py.AuthService.login()"
 
     # 2. Querying by clean_symbol directly
-    sym_by_clean = repo.symbols.get_symbol("src.auth.service.py.AuthService.login()")
+    sym_by_clean = repo.graph.get_symbol("src.auth.service.py.AuthService.login()")
     assert sym_by_clean is not None
     assert sym_by_clean["symbol"] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
 
     # 3. get_symbol_exact matches clean_symbol
-    exact_by_clean = repo.symbols.get_symbol_exact("src.auth.service.py.AuthService.login()")
+    exact_by_clean = repo.graph.get_symbol_exact("src.auth.service.py.AuthService.login()")
     assert exact_by_clean is not None
     assert exact_by_clean["symbol"] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
     assert exact_by_clean["clean_symbol"] == "src.auth.service.py.AuthService.login()"
 
     # 4. Search by keyword on clean_symbol
-    results_kw = repo.symbols.search_symbols_keyword("AuthService.login")
+    results_kw = repo.graph.search_symbols("AuthService.login")
     assert len(results_kw) == 1
     assert results_kw[0]["symbol"] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
 
     # 5. Bulk upsert preserves and computes clean_symbol
-    repo.symbols.upsert_symbols_bulk([
+    repo.graph.upsert_symbols_bulk([
         {
             "symbol": "rust-analyzer cargo my_crate 0.2.0 domain/user/User#",
             "filepath": "src/user.rs",
@@ -186,7 +186,7 @@ def test_clean_symbol_storage_and_querying(tmp_path):
             "body_hash": "hash2"
         }
     ])
-    user_sym = repo.symbols.get_symbol("domain.user.User")
+    user_sym = repo.graph.get_symbol("domain.user.User")
     assert user_sym is not None
     assert user_sym["clean_symbol"] == "domain.user.User"
 
@@ -199,7 +199,7 @@ def test_scip_ingester_fuzzy_line_match(tmp_path):
     repo = Repository(db_conn)
 
     # 1. Pre-populate Tree-sitter declaration at line 10 (e.g. @override on line 10)
-    repo.symbols.upsert_symbol(
+    repo.graph.upsert_symbol(
         symbol="lib.src.service.Service.handleRequest",
         clean_symbol="lib.src.service.Service.handleRequest",
         filepath="src/service.dart",
@@ -209,7 +209,7 @@ def test_scip_ingester_fuzzy_line_match(tmp_path):
         code_block="{\n  print('handling');\n}",
         body_hash="ts_hash_123"
     )
-    repo.symbols.add_occurrences_bulk([
+    repo.graph.record_occurrences_bulk([
         {
             "symbol": "lib.src.service.Service.handleRequest",
             "filepath": "src/service.dart",
@@ -253,14 +253,14 @@ def test_scip_ingester_fuzzy_line_match(tmp_path):
     IndexIngester.ingest_index(repo, parsed_data, project_root=None, force=False)
 
     # 3. Verify SCIP symbol merged Tree-sitter AST attributes
-    merged = repo.symbols.get_symbol(scip_sym_id)
+    merged = repo.graph.get_symbol(scip_sym_id)
     assert merged is not None
     assert merged["signature"] == "@override void handleRequest()"
     assert merged["code_block"] == "{\n  print('handling');\n}"
     assert merged["body_hash"] == "ts_hash_123"
 
     # 4. Verify duplicate Tree-sitter symbol row was superseded and deleted
-    old_ts = repo.symbols.get_symbol("lib.src.service.Service.handleRequest")
+    old_ts = repo.graph.get_symbol("lib.src.service.Service.handleRequest")
     assert old_ts is None
 
     db_conn.close()
@@ -280,11 +280,11 @@ def test_scip_ingester_preserves_test_and_non_scip_files(tmp_path):
     tests_dir.mkdir(parents=True, exist_ok=True)
     (tests_dir / "test_core.rs").write_text("pub fn test_basic_flow() {}", encoding="utf-8")
 
-    repo.files.upsert_files_bulk([
+    repo.workspace.upsert_files_bulk([
         {"filepath": "src/core.rs", "language": "rust", "sha256": "h1"},
         {"filepath": "tests/test_core.rs", "language": "rust", "sha256": "h2"}
     ])
-    repo.symbols.upsert_symbol(
+    repo.graph.upsert_symbol(
         symbol="tests.test_core.test_basic_flow",
         clean_symbol="tests.test_core.test_basic_flow",
         filepath="tests/test_core.rs",
@@ -326,7 +326,7 @@ def test_scip_ingester_preserves_test_and_non_scip_files(tmp_path):
     IndexIngester.ingest_index(repo, parsed_data, project_root=tmp_path, force=False)
 
     # 3. Verify tests/ symbol is still preserved in DB
-    test_sym = repo.symbols.get_symbol("tests.test_core.test_basic_flow")
+    test_sym = repo.graph.get_symbol("tests.test_core.test_basic_flow")
     assert test_sym is not None
     assert test_sym["filepath"] == "tests/test_core.rs"
 

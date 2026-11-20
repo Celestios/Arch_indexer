@@ -48,19 +48,19 @@ def test_get_symbols_in_file(tmp_path):
         """)
 
     # Query existing file
-    syms = repository.symbols.get_symbols_in_file("lib/ui/widget.dart")
+    syms = repository.graph.get_symbols_in_file("lib/ui/widget.dart")
     assert len(syms) == 1
     assert syms[0]["symbol"] == "my_func"
     assert syms[0]["signature"] == "my_func()"
     assert syms[0]["docstring"] == "Docstring 1"
 
     # Query with alternative separator
-    syms_win = repository.symbols.get_symbols_in_file("lib\\ui\\widget.dart")
+    syms_win = repository.graph.get_symbols_in_file("lib\\ui\\widget.dart")
     assert len(syms_win) == 1
     assert syms_win[0]["symbol"] == "my_func"
 
     # Query non-existent file
-    syms_none = repository.symbols.get_symbols_in_file("lib/ui/none.dart")
+    syms_none = repository.graph.get_symbols_in_file("lib/ui/none.dart")
     assert len(syms_none) == 0
 
     db_conn.close()
@@ -78,7 +78,7 @@ def test_get_transitive_closure(tmp_path):
                 ('X', 'B', 'Calls')
         """)
 
-    closure = repository.edges.get_transitive_closure("B", max_depth=3)
+    closure = repository.analytics.get_transitive_closure("B", max_depth=3)
     upstream = closure["upstream"]
     downstream = closure["downstream"]
 
@@ -105,15 +105,15 @@ def test_layer_aggregations(tmp_path):
                 ('sym4', 'src/main.py', 'Function', null, null, null)
         """)
 
-    totals = repository.metrics.get_repo_totals()
+    totals = repository.analytics.get_repo_totals()
     assert totals["symbols"] == 4
     
-    kinds = repository.metrics.get_symbol_counts_by_kind()
+    kinds = repository.analytics.get_symbol_counts_by_kind()
     assert kinds["Method"] == 2
     assert kinds["Class"] == 1
     assert kinds["Function"] == 1
 
-    prefixes = repository.metrics.get_symbols_by_file_prefix()
+    prefixes = repository.analytics.get_symbols_by_file_prefix()
     assert prefixes["src/db/"] == 2
     assert prefixes["src/engines/"] == 1
     assert prefixes["src/"] == 1

@@ -161,7 +161,7 @@ def test_counterfactual_fix_suggestion(tmp_path):
     assert "UserRepository" in v_msg
 
     # Verify classification was persisted to symbols table
-    sym = repo.symbols.get_symbol("ui/Widget#render().")
+    sym = repo.graph.get_symbol("ui/Widget#render().")
     assert sym is not None
     assert "Presentation" in sym["classification"]
 

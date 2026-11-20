@@ -19,49 +19,51 @@ def _lookup_single(target: str, repository) -> str:
     exact_symbol = resolve_symbol_in_repo(repository, target_normalized)
     matching_symbols = []
     if not exact_symbol:
-        raw_matches = repository.symbols.search_symbols_like(target_normalized, 10)
+        raw_matches = repository.graph.search_symbols(target_normalized, 10)
         if not raw_matches:
-            raw_matches = repository.symbols.search_symbols_keyword(target_normalized, 10)
+            raw_matches = repository.graph.search_symbols(target_normalized, 10)
         matching_symbols = [s for s in raw_matches if not str(_get_field(s, "symbol", 0, "")).startswith("local ")]
         if len(matching_symbols) == 1:
-            exact_symbol = repository.symbols.get_symbol_exact(_get_field(matching_symbols[0], "symbol", 0))
+            exact_symbol = repository.graph.get_symbol_exact(_get_field(matching_symbols[0], "symbol", 0))
             matching_symbols = []
 
-    exact_file = repository.files.get_file_exact(target_normalized)
+    exact_file = repository.workspace.get_file(target_normalized)
     if not exact_file:
-        exact_file = repository.files.get_file_exact(target_normalized.replace("\\", "/"))
+        exact_file = repository.workspace.get_file(target_normalized.replace("\\", "/"))
     matching_files = []
     if not exact_file:
-        matching_files = repository.files.search_files_like(target_slashes, 10)
+        matching_files = repository.workspace.search_files(target_slashes, 10)
         if not matching_files:
-            matching_files = repository.files.search_files_keyword(target_normalized, 10)
+            matching_files = repository.workspace.search_files(target_normalized, 10)
         if matching_files and len(matching_files) == 1:
-            exact_file = repository.files.get_file_exact(_get_field(matching_files[0], "filepath", 0))
+            exact_file = repository.workspace.get_file(_get_field(matching_files[0], "filepath", 0))
             matching_files = []
 
     md = []
 
     if exact_symbol:
         sym_name = _get_field(exact_symbol, "symbol", 0, "")
-        occs_raw = repository.symbols.get_occurrences_for_symbol(sym_name)
+        occs_raw = repository.graph.get_occurrences_for_symbol(sym_name)
         occs = [(o["filepath"], o["start_line"], o["end_line"], o["role"]) for o in occs_raw]
-        edges = repository.symbols.get_edges_for_symbol(sym_name)
+        edges = repository.graph.get_edges_for_symbol(sym_name)
 
         # Batch query filepaths of connected symbols in edges
         other_syms = set()
         for e in edges:
-            if not str(e[0]).startswith("local ") and not str(e[1]).startswith("local "):
-                if e[0] != sym_name:
-                    other_syms.add(e[0])
-                if e[1] != sym_name:
-                    other_syms.add(e[1])
+            src = e["source"] if isinstance(e, dict) else e[0]
+            tgt = e["target"] if isinstance(e, dict) else e[1]
+            if not str(src).startswith("local ") and not str(tgt).startswith("local "):
+                if src != sym_name:
+                    other_syms.add(src)
+                if tgt != sym_name:
+                    other_syms.add(tgt)
         sym_fp_map = {}
         if other_syms:
-            meta_batch = repository.symbols.get_symbols_metadata_batch(list(other_syms))
+            meta_batch = repository.graph.get_symbols_metadata_batch(list(other_syms))
             sym_fp_map = {s: meta["filepath"] for s, meta in meta_batch.items() if meta.get("filepath")}
 
         sym_md = format_lookup_symbol(exact_symbol, occs, edges, symbol_filepath_map=sym_fp_map)
-        diags = repository.symbols.get_diagnostics_for_symbol(sym_name)
+        diags = repository.quality.get_diagnostics_for_symbol(sym_name)
         if diags:
             diag_lines = ["\n### Compiler & Analyzer Diagnostics", "| Line:Col | Severity | Code | Message |", "| :--- | :--- | :--- | :--- |"]
             for d in diags:
@@ -70,10 +72,10 @@ def _lookup_single(target: str, repository) -> str:
             sym_md += "\n" + "\n".join(diag_lines) + "\n"
 
         # Check for tests transitively covering this symbol
-        closure = repository.edges.get_transitive_closure(sym_name, max_depth=3)
+        closure = repository.analytics.get_transitive_closure(sym_name, max_depth=3)
         up_syms = [item["symbol"] for item in closure.get("upstream", [])]
         if up_syms:
-            meta_batch = repository.symbols.get_symbols_metadata_batch(up_syms)
+            meta_batch = repository.graph.get_symbols_metadata_batch(up_syms)
             tests_found = []
             for s in up_syms:
                 meta = meta_batch.get(s, {})
@@ -95,9 +97,9 @@ def _lookup_single(target: str, repository) -> str:
 
     if exact_file:
         file_path = _get_field(exact_file, "filepath", 0, "")
-        file_syms = repository.symbols.get_symbols_by_filepath_exact(file_path)
+        file_syms = repository.graph.get_symbols_in_file(file_path)
         file_md = format_lookup_file(exact_file, file_syms)
-        file_diags = repository.symbols.get_diagnostics_for_file(file_path)
+        file_diags = repository.quality.get_diagnostics_for_file(file_path)
         if file_diags:
             diag_lines = ["\n### Compiler & Analyzer Diagnostics", "| Symbol | Line:Col | Severity | Code | Message |", "| :--- | :--- | :--- | :--- | :--- |"]
             for d in file_diags:

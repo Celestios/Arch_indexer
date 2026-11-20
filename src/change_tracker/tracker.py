@@ -36,7 +36,7 @@ class ChangeTracker:
         Compares the current hash of .arch/config.json with the one stored in system_metadata.
         """
         current_hash = ChangeTracker.get_config_hash(project_root)
-        stored_hash = repository.metadata.get("config_hash")
+        stored_hash = repository.workspace.get_metadata("config_hash")
         return stored_hash != current_hash
 
     @staticmethod
@@ -45,4 +45,4 @@ class ChangeTracker:
         Updates the stored hash of .arch/config.json in system_metadata to match the current file.
         """
         current_hash = ChangeTracker.get_config_hash(project_root)
-        repository.metadata.set("config_hash", current_hash)
+        repository.workspace.set_metadata("config_hash", current_hash)

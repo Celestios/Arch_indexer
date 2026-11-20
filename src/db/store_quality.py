@@ -29,10 +29,6 @@ class QualityStore(BaseRepository):
             (rule_id, description, severity)
         )
 
-    def upsert_compliance_rule(self, rule_id: str, description: str, severity: str):
-        """Alias for upsert_rule."""
-        self.upsert_rule(rule_id, description, severity)
-
     def get_rules(self) -> List[Dict[str, Any]]:
         """Retrieves all registered compliance rules."""
         return self._fetch_all("SELECT rule_id, description, severity FROM compliance_rules")
@@ -41,22 +37,21 @@ class QualityStore(BaseRepository):
 
     def add_violation(
         self,
+        violation_id: str,
         rule_id: str,
+        symbol: Optional[str],
         filepath: str,
         line: int,
         message: str,
-        symbol: Optional[str] = None,
-        origin: str = "automatic",
-        violation_id: Optional[str] = None
+        origin: str = "automatic"
     ) -> str:
         """Inserts a single violation."""
-        v_id = violation_id or f"viol_{uuid.uuid4().hex[:12]}"
         norm_fp = _normalize_path(filepath)
         self._execute(
             UPSERT_VIOLATION_SQL,
-            (v_id, rule_id, symbol, norm_fp, line, message, origin)
+            (violation_id, rule_id, symbol, norm_fp, line, message, origin)
         )
-        return v_id
+        return violation_id
 
     def record_violations_bulk(self, violations: List[Dict[str, Any]]):
         """Bulk inserts or updates compliance violations."""
@@ -76,30 +71,43 @@ class QualityStore(BaseRepository):
         ]
         self._executemany(UPSERT_VIOLATION_SQL, data)
 
-    def upsert_violations_bulk(self, violations: List[Dict[str, Any]]):
-        """Alias for record_violations_bulk."""
-        self.record_violations_bulk(violations)
-
     def get_violations(
         self,
         filepath: Optional[str] = None,
         rule_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Retrieves recorded violations with optional filters."""
-        query = "SELECT violation_id, rule_id, symbol, filepath, line, message, checked_at, origin FROM compliance_violations WHERE 1=1"
+        """Retrieves recorded violations with optional filters, joined with rules for severity."""
+        query = """
+            SELECT v.violation_id, v.rule_id, r.description, v.symbol, v.filepath, v.line, v.message, r.severity, v.checked_at, v.origin
+            FROM compliance_violations v
+            LEFT JOIN compliance_rules r ON v.rule_id = r.rule_id
+            WHERE 1=1
+        """
         params: List[Any] = []
         if filepath:
             norm_fp = _normalize_path(filepath)
-            query += " AND filepath = ?"
+            query += " AND v.filepath = ?"
             params.append(norm_fp)
         if rule_id:
-            query += " AND rule_id = ?"
+            query += " AND v.rule_id = ?"
             params.append(rule_id)
-        query += " ORDER BY filepath, line"
+        query += " ORDER BY r.severity DESC, v.filepath ASC, v.line ASC"
         rows = self._fetch_all(query, params)
+        res = []
         for r in rows:
-            r["filepath"] = _normalize_path(r["filepath"])
-        return rows
+            res.append({
+                "violation_id": r["violation_id"],
+                "rule_id": r["rule_id"],
+                "rule_description": r.get("description") or "Manual Logical Audit",
+                "symbol": r.get("symbol"),
+                "filepath": _normalize_path(r["filepath"]),
+                "line": r["line"],
+                "message": r["message"],
+                "severity": r.get("severity") or "WARNING",
+                "checked_at": r.get("checked_at"),
+                "origin": r.get("origin") or "automatic",
+            })
+        return res
 
     def clear_violations(
         self,

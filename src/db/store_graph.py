@@ -41,35 +41,27 @@ class GraphStore(BaseRepository):
         return self._format_symbol_dict(row)
 
     def get_symbol_exact(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Exact lookup by primary symbol ID."""
+        """Exact lookup by primary symbol ID or clean_symbol."""
         row = self._fetch_one(
             """SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight,
                       parent_symbol, classification, change_count, code_block, clean_symbol,
                       start_line, start_col, end_line, end_col
-               FROM symbols WHERE symbol = ?""",
-            (symbol,)
+               FROM symbols WHERE symbol = ? OR clean_symbol = ?""",
+            (symbol, symbol)
         )
         return self._format_symbol_dict(row)
 
     def search_symbols(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search symbols by clean_symbol or symbol substring."""
+        """Search symbols by clean_symbol or symbol substring (case-insensitive)."""
         pattern = f"%{query}%"
         rows = self._fetch_all(
             """SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight,
                       parent_symbol, classification, change_count, code_block, clean_symbol,
                       start_line, start_col, end_line, end_col
-               FROM symbols WHERE clean_symbol LIKE ? OR symbol LIKE ? LIMIT ?""",
+               FROM symbols WHERE LOWER(clean_symbol) LIKE LOWER(?) OR LOWER(symbol) LIKE LOWER(?) LIMIT ?""",
             (pattern, pattern, limit)
         )
         return [self._format_symbol_dict(r) for r in rows if r]
-
-    def search_symbols_keyword(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Search symbols keyword alias."""
-        return self.search_symbols(query, limit)
-
-    def search_symbols_like(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search symbols like query alias."""
-        return self.search_symbols(query, limit)
 
     def upsert_symbol(
         self,
@@ -169,10 +161,6 @@ class GraphStore(BaseRepository):
         )
         return [self._format_symbol_dict(r) for r in rows if r]
 
-    def get_symbols_by_filepath_exact(self, filepath: str) -> List[Dict[str, Any]]:
-        """Alias for get_symbols_in_file."""
-        return self.get_symbols_in_file(filepath)
-
     def get_symbols_metadata_batch(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         """Batch fetch symbol metadata."""
         if not symbols:
@@ -194,10 +182,6 @@ class GraphStore(BaseRepository):
                FROM symbols"""
         )
         return [self._format_symbol_dict(r) for r in rows if r]
-
-    def get_all_symbols_with_metadata(self) -> List[Dict[str, Any]]:
-        """Alias for get_all_symbols."""
-        return self.get_all_symbols()
 
     def get_all_symbols_summary(self) -> List[Dict[str, Any]]:
         """Retrieves lightweight symbol summary for linking passes."""
@@ -228,6 +212,7 @@ class GraphStore(BaseRepository):
 
     def recalculate_connection_weights(self):
         """Recomputes connection_weight for each symbol based on incoming and outgoing edges."""
+        self._execute("UPDATE symbols SET connection_weight = 0")
         self._execute("""
             UPDATE symbols
             SET connection_weight = COALESCE(e_in.cnt, 0) + COALESCE(e_out.cnt, 0)
@@ -440,14 +425,6 @@ class GraphStore(BaseRepository):
             (symbol, _normalize_path(filepath), start_line, start_col, end_line, end_col, role)
         )
 
-    def add_occurrences_bulk(self, occurrences_list: List[Dict[str, Any]], progress_callback=None):
-        """Alias for record_occurrences_bulk."""
-        self.record_occurrences_bulk(occurrences_list, progress_callback)
-
-    def upsert_occurrences_bulk(self, occurrences_list: List[Dict[str, Any]], progress_callback=None):
-        """Alias for record_occurrences_bulk."""
-        self.record_occurrences_bulk(occurrences_list, progress_callback)
-
     def get_occurrences_for_symbol(self, symbol: str) -> List[Dict[str, Any]]:
         """Returns all occurrences for a symbol."""
         rows = self._fetch_all(
@@ -468,10 +445,6 @@ class GraphStore(BaseRepository):
         for r in rows:
             r["filepath"] = _normalize_path(r["filepath"])
         return rows
-
-    def get_occurrences_by_filepath(self, filepath: str) -> List[Dict[str, Any]]:
-        """Alias for get_occurrences_for_file."""
-        return self.get_occurrences_for_file(filepath)
 
     def get_definitions_map(self) -> Dict[str, Dict[str, Any]]:
         """Fetches symbol definitions from occurrences where role & 1 != 0."""
@@ -574,3 +547,5 @@ class GraphStore(BaseRepository):
     def delete_file(self, filepath: str):
         """Atomic cascade delete for a single file."""
         self.delete_files([filepath])
+
+    delete_files_bulk = delete_files

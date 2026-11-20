@@ -183,12 +183,16 @@ class DbConnection:
                 updates = [(demangle_scip_symbol(s[0]), s[0]) for s in null_syms]
                 conn.executemany("UPDATE symbols SET clean_symbol = ? WHERE symbol = ?", updates)
 
-            # One-time POSIX normalization update
-            conn.execute(r"UPDATE files SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
-            conn.execute(r"UPDATE symbols SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
-            conn.execute(r"UPDATE occurrences SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
-            conn.execute(r"UPDATE diagnostics SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
-            conn.execute(r"UPDATE compliance_violations SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
-            conn.execute(r"UPDATE file_co_changes SET filepath_a = replace(filepath_a, '\', '/'), filepath_b = replace(filepath_b, '\', '/') WHERE filepath_a LIKE '%\%' OR filepath_b LIKE '%\%'")
+            # One-time POSIX normalization update (gated behind schema_version)
+            schema_ver_row = conn.execute("SELECT value FROM system_metadata WHERE key = 'schema_version'").fetchone()
+            current_ver = int(schema_ver_row[0]) if schema_ver_row and schema_ver_row[0].isdigit() else 1
+            if current_ver < 2:
+                conn.execute(r"UPDATE files SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
+                conn.execute(r"UPDATE symbols SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
+                conn.execute(r"UPDATE occurrences SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
+                conn.execute(r"UPDATE diagnostics SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
+                conn.execute(r"UPDATE compliance_violations SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
+                conn.execute(r"UPDATE file_co_changes SET filepath_a = replace(filepath_a, '\', '/'), filepath_b = replace(filepath_b, '\', '/') WHERE filepath_a LIKE '%\%' OR filepath_b LIKE '%\%'")
+                conn.execute("INSERT INTO system_metadata (key, value) VALUES ('schema_version', '2') ON CONFLICT (key) DO UPDATE SET value = '2'")
         except Exception as e:
             print(f"Warning during schema migration: {e}", file=sys.stderr)

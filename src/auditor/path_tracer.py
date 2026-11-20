@@ -47,13 +47,13 @@ class PathTracer:
                         if def_line is not None:
                             line_str = f":L{def_line}"
             else:
-                symbol_info = self.repository.symbols.get_symbol(sym) if self.repository else None
+                symbol_info = self.repository.graph.get_symbol(sym) if self.repository else None
                 filepath = symbol_info.get("filepath") if symbol_info else None
                 line_str = ""
                 if filepath:
                     if i < len(path) - 1:
                         next_sym = path[i+1]
-                        occs = self.repository.symbols.get_occurrences_for_symbol(next_sym) if self.repository else []
+                        occs = self.repository.graph.get_occurrences_for_symbol(next_sym) if self.repository else []
                         call_line = None
                         for occ in occs:
                             if occ.get("filepath") == filepath:

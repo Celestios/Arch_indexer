@@ -20,13 +20,13 @@ def is_noisy_symbol(sym: str) -> bool:
 
 def is_class_symbol(repository, db_symbol: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """Check if the given symbol represents a Class in the repository."""
-    sym_record = repository.symbols.get_symbol(db_symbol)
+    sym_record = repository.graph.get_symbol(db_symbol)
     if sym_record and sym_record.get("kind") in ("Class", "Struct", "Interface", "Trait"):
         return True, sym_record
     if db_symbol.endswith("#"):
         return True, sym_record
     prefix = db_symbol if db_symbol.endswith("#") else db_symbol + "#"
-    with repository.symbols.db_conn.session() as conn:
+    with repository.graph.db_conn.session() as conn:
         res = conn.execute(
             """
             SELECT count(*) FROM symbols
@@ -58,7 +58,7 @@ def handle_impact(symbol: str, max_depth: int, repository) -> str:
         res_md = _handle_symbol_impact(repository, db_symbol, clean_focal, max_depth)
 
     # Historical Git Co-Change Coupling
-    sym_record = repository.symbols.get_symbol(db_symbol)
+    sym_record = repository.graph.get_symbol(db_symbol)
     focal_fp = sym_record.get("filepath") if sym_record else None
     if focal_fp:
         from change_tracker.git_coupling import GitCouplingMiner
@@ -80,7 +80,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     prefix = db_symbol if db_symbol.endswith("#") else db_symbol + "#"
 
     # 1. Fetch member methods
-    with repository.symbols.db_conn.session() as conn:
+    with repository.graph.db_conn.session() as conn:
         method_rows = conn.execute(
             """
             SELECT symbol, kind, signature, docstring FROM symbols
@@ -120,7 +120,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     constructor_sym = f"{prefix}__init__()."
     target_symbols = [db_symbol, constructor_sym]
 
-    with repository.edges.db_conn.session() as conn:
+    with repository.graph.db_conn.session() as conn:
         placeholders = ",".join("?" for _ in target_symbols)
         direct_edges = conn.execute(
             f"""
@@ -160,7 +160,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     # Category 2: Interface Surface (Exposed Callers)
     md.append("### ── Interface Surface (Exposed Callers)")
     method_caller_map = {}
-    with repository.edges.db_conn.session() as conn:
+    with repository.graph.db_conn.session() as conn:
         for m_sym in methods_list:
             clean_m = demangle_scip_symbol(m_sym)
             short_m = clean_m.split(".")[-1]
@@ -188,7 +188,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
 
     # Check for tests and entry points across all callers
     all_caller_syms = set(seen_sources)
-    with repository.edges.db_conn.session() as conn:
+    with repository.graph.db_conn.session() as conn:
         for m_sym in methods_list:
             rows = conn.execute("SELECT source FROM edges WHERE target = ?", (m_sym,)).fetchall()
             for r in rows:
@@ -196,7 +196,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
                     all_caller_syms.add(r[0])
 
     if all_caller_syms:
-        meta_callers = repository.symbols.get_symbols_metadata_batch(list(all_caller_syms))
+        meta_callers = repository.graph.get_symbols_metadata_batch(list(all_caller_syms))
         class_tests = []
         class_roots = []
         for c_sym in all_caller_syms:
@@ -207,7 +207,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
             if is_test_caller(c_sym, fp, r):
                 class_tests.append((demangle_scip_symbol(c_sym), fp))
             else:
-                inc_count = len(repository.edges.get_incoming_edges(c_sym))
+                inc_count = len(repository.graph.get_incoming_edges(c_sym))
                 ep = detect_entry_point(c_sym, fp, inc_count)
                 if ep:
                     class_roots.append((demangle_scip_symbol(c_sym), fp, ep))
@@ -229,7 +229,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     # Category 3: Downstream Dependencies (Internal & Subsystem Coupling)
     md.append("### ── Downstream Dependencies (Per Method)")
     deps_found = False
-    with repository.edges.db_conn.session() as conn:
+    with repository.graph.db_conn.session() as conn:
         for m_sym in methods_list:
             clean_m = demangle_scip_symbol(m_sym)
             short_m = clean_m.split(".")[-1]
@@ -268,7 +268,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
 
 
 def _handle_symbol_impact(repository, db_symbol: str, clean_focal: str, max_depth: int) -> str:
-    closure = repository.edges.get_transitive_closure(db_symbol, max_depth=max_depth)
+    closure = repository.analytics.get_transitive_closure(db_symbol, max_depth=max_depth)
 
     raw_upstream = closure.get("upstream", [])
     raw_downstream = closure.get("downstream", [])
@@ -277,7 +277,7 @@ def _handle_symbol_impact(repository, db_symbol: str, clean_focal: str, max_dept
     downstream = [item for item in raw_downstream if not is_noisy_symbol(item.get("symbol", ""))]
 
     caller_syms = [item["symbol"] for item in upstream]
-    meta_batch = repository.symbols.get_symbols_metadata_batch(caller_syms) if caller_syms else {}
+    meta_batch = repository.graph.get_symbols_metadata_batch(caller_syms) if caller_syms else {}
 
     test_callers = []
     root_entry_points = []
@@ -293,7 +293,7 @@ def _handle_symbol_impact(repository, db_symbol: str, clean_focal: str, max_dept
             test_callers.append((item, fp))
         else:
             production_callers.append((item, fp))
-            incoming_edges = repository.edges.get_incoming_edges(sym)
+            incoming_edges = repository.graph.get_incoming_edges(sym)
             incoming_count = len(incoming_edges)
             entry_type = detect_entry_point(sym, fp, incoming_count)
             if entry_type:
@@ -301,7 +301,7 @@ def _handle_symbol_impact(repository, db_symbol: str, clean_focal: str, max_dept
 
     md = [f"## Blast Radius for: `{clean_focal}`\n"]
 
-    sym_rec = repository.symbols.get_symbol(db_symbol)
+    sym_rec = repository.graph.get_symbol(db_symbol)
     change_count = sym_rec.get("change_count", 1) if sym_rec else 1
     if change_count >= 3:
         md.append(f"> **Change Risk**: ⚡ High-Churn Hotspot (modified {change_count} times in repository history)\n")

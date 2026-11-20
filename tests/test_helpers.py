@@ -51,7 +51,7 @@ class TestExtToLang:
 class TestFindDefinitionLine:
     def test_finds_definition(self):
         repo = MagicMock()
-        repo.symbols.get_occurrences_for_symbol.return_value = [
+        repo.graph.get_occurrences_for_symbol.return_value = [
             {"filepath": "foo.py", "start_line": 10, "role": 1},
             {"filepath": "foo.py", "start_line": 20, "role": 2},
         ]
@@ -59,12 +59,12 @@ class TestFindDefinitionLine:
 
     def test_fallback_to_first(self):
         repo = MagicMock()
-        repo.symbols.get_occurrences_for_symbol.return_value = [
+        repo.graph.get_occurrences_for_symbol.return_value = [
             {"filepath": "foo.py", "start_line": 5, "role": 2},
         ]
         assert find_definition_line(repo, "sym", "foo.py") == 5
 
     def test_no_occurrences(self):
         repo = MagicMock()
-        repo.symbols.get_occurrences_for_symbol.return_value = []
+        repo.graph.get_occurrences_for_symbol.return_value = []
         assert find_definition_line(repo, "sym", "foo.py") == 1

@@ -141,7 +141,7 @@ class ProjectWatcher:
         repository = Repository(db_conn)
 
         try:
-            db_files = repository.files.get_all_files_metadata()
+            db_files = repository.workspace.get_all_files_metadata()
             dirty_files: Set[str] = set()
             for p in batch:
                 try:

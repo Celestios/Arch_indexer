@@ -14,7 +14,7 @@ class FieldValidator:
 
     def reset_invalid_manual_fields(self, config: Dict[str, Any]):
         """Resets manual fields that are no longer valid or need resetting on file change."""
-        file_metadata = self.repository.files.get_all_files_metadata()
+        file_metadata = self.repository.workspace.get_all_files_metadata()
         db_updated = False
 
         for filepath, meta in file_metadata.items():
@@ -50,7 +50,7 @@ class FieldValidator:
                     updated_fields[field_name] = default_val
                     fields_changed = True
                     justification_msg = f"Manual field '{field_name}' value '{curr_val}' not allowed by config, reset to default."
-                    self.repository.files.mark_file_for_audit(filepath, justification_msg)
+                    self.repository.workspace.mark_file_for_audit(filepath, justification_msg)
                     db_updated = True
                 elif is_modified and reset_on_change:
                     if curr_val != default_val:
@@ -62,7 +62,7 @@ class FieldValidator:
                 if is_modified and fields_to_reset:
                     reset_msg = ", ".join(fields_to_reset)
                     new_justification = f"File modified, pending re-audit (fields reset: {reset_msg})"
-                    self.repository.files.update_file_manual_fields(filepath, updated_fields, new_justification)
+                    self.repository.workspace.set_manual_fields(filepath, updated_fields, new_justification)
                 else:
-                    self.repository.files.update_file_manual_fields(filepath, updated_fields, justification)
+                    self.repository.workspace.set_manual_fields(filepath, updated_fields, justification)
                 db_updated = True

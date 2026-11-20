@@ -92,7 +92,7 @@ def handle_update(
     auditor = Auditor(repository, project_root)
     violations = auditor.run_audit()
 
-    totals = repository.metrics.get_repo_totals()
+    totals = repository.analytics.get_repo_totals()
 
     md = ["## Workspace Update Complete\n"]
     if force:

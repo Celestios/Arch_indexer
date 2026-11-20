@@ -19,9 +19,9 @@ def handle_context(filepaths, repository, project_root=None) -> str:
             except Exception:
                 pass
 
-        symbols = repository.symbols.get_symbols_in_file(fp)
+        symbols = repository.graph.get_symbols_in_file(fp)
         if not symbols:
-            all_files = repository.files.get_all_files_metadata()
+            all_files = repository.workspace.get_all_files_metadata()
             matched = None
             norm_fp = fp.replace("\\", "/").lower()
             for real_fp in all_files.keys():
@@ -31,7 +31,7 @@ def handle_context(filepaths, repository, project_root=None) -> str:
                     break
             if matched:
                 fp = matched
-                symbols = repository.symbols.get_symbols_in_file(fp)
+                symbols = repository.graph.get_symbols_in_file(fp)
 
         if not symbols:
             out_md.append(
@@ -40,17 +40,21 @@ def handle_context(filepaths, repository, project_root=None) -> str:
             )
             continue
 
-        occs = repository.symbols.get_occurrences_by_filepath(fp)
+        occs = repository.graph.get_occurrences_for_file(fp)
 
         symbol_to_lines = {}
-        for sym_name, start_line, end_line, role in occs:
+        for occ in occs:
+            sym_name = occ["symbol"] if isinstance(occ, dict) else occ[0]
+            start_line = occ["start_line"] if isinstance(occ, dict) else occ[1]
+            end_line = occ["end_line"] if isinstance(occ, dict) else occ[2]
+            role = occ["role"] if isinstance(occ, dict) else occ[3]
             if sym_name not in symbol_to_lines or role == 1:
                 effective_end = end_line if end_line > start_line else start_line
                 symbol_to_lines[sym_name] = (start_line, effective_end)
                 symbol_to_lines[demangle_scip_symbol(sym_name)] = (start_line, effective_end)
 
         res_md = format_context_results(fp, symbols, symbol_to_lines)
-        file_diags = repository.symbols.get_diagnostics_for_file(fp)
+        file_diags = repository.quality.get_diagnostics_for_file(fp)
         if file_diags:
             diag_lines = ["\n### Compiler & Analyzer Diagnostics", "| Symbol | Line:Col | Severity | Code | Message |", "| :--- | :--- | :--- | :--- | :--- |"]
             for d in file_diags:

@@ -105,14 +105,14 @@ def test_deleted_file_cleanup(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
     # 1. Insert files into files table (mocked)
-    repository.files.upsert_file('lib/ui/widget.dart', 'hash111', 'dart')
-    repository.files.upsert_file('lib/ui/button.dart', 'hash222', 'dart')
-    repository.files.upsert_file('src/main.rs', 'hash333', 'rust')
+    repository.workspace.upsert_file('lib/ui/widget.dart', 'hash111', 'dart')
+    repository.workspace.upsert_file('lib/ui/button.dart', 'hash222', 'dart')
+    repository.workspace.upsert_file('src/main.rs', 'hash333', 'rust')
 
     # Verify they exist
-    assert repository.files.get_file('lib/ui/widget.dart') is not None
-    assert repository.files.get_file('lib/ui/button.dart') is not None
-    assert repository.files.get_file('src/main.rs') is not None
+    assert repository.workspace.get_file('lib/ui/widget.dart') is not None
+    assert repository.workspace.get_file('lib/ui/button.dart') is not None
+    assert repository.workspace.get_file('src/main.rs') is not None
 
     # 2. Mock a SCIP index where lib/ui/button.dart has been deleted.
     parsed_data = {
@@ -153,9 +153,9 @@ def test_deleted_file_cleanup(tmp_path):
     ScipWrapper.ingest_index(repository, parsed_data, project_root=root)
 
     # Verify widget.dart and main.rs exist, but button.dart was cleaned up
-    assert repository.files.get_file('lib/ui/widget.dart') is not None
-    assert repository.files.get_file('src/main.rs') is not None
-    assert repository.files.get_file('lib/ui/button.dart') is None
+    assert repository.workspace.get_file('lib/ui/widget.dart') is not None
+    assert repository.workspace.get_file('src/main.rs') is not None
+    assert repository.workspace.get_file('lib/ui/button.dart') is None
 
     db_conn.close()
 
@@ -165,7 +165,7 @@ def test_transitive_invalidation(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
     # Insert symbols across two files: util.dart defines helper, main.dart calls helper
-    repository.symbols.upsert_symbol(
+    repository.graph.upsert_symbol(
         symbol="pkg::util::helper()",
         filepath="lib/util.dart",
         kind="Function",
@@ -173,7 +173,7 @@ def test_transitive_invalidation(tmp_path):
         docstring="",
         body_hash="hash1"
     )
-    repository.symbols.upsert_symbol(
+    repository.graph.upsert_symbol(
         symbol="pkg::main::run()",
         filepath="lib/main.dart",
         kind="Function",
@@ -182,7 +182,7 @@ def test_transitive_invalidation(tmp_path):
         body_hash="hash2"
     )
     # Edge: main calls util
-    repository.edges.add_edge(source="pkg::main::run()", target="pkg::util::helper()", relation="Calls")
+    repository.graph.add_edge(source="pkg::main::run()", target="pkg::util::helper()", relation="Calls")
 
     invalidator = TransitiveInvalidation(repository, max_depth=1)
 

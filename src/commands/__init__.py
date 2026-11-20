@@ -31,10 +31,7 @@ def register_all(subparsers) -> None:
     """Register every CLI subcommand listed in COMMANDS."""
     for module_name in COMMANDS:
         mod = importlib.import_module(f"commands.{module_name}")
-        if hasattr(mod, "register"):
-            mod.register(subparsers)
-        elif hasattr(mod, f"register_{module_name}_subcommand"):
-            getattr(mod, f"register_{module_name}_subcommand")(subparsers)
+        mod.register(subparsers)
 
 
 __all__ = [

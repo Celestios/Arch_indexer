@@ -83,16 +83,16 @@ class TestAuditPipeline:
         auditor.config_loader.load_config.return_value = config
         auditor.config_loader.get_applicable_config.return_value = config["src/"]
         
-        repo.symbols.get_all_symbols_with_metadata.return_value = symbols
-        repo.edges.get_outgoing_edges.return_value = []
-        repo.files.get_all_files_metadata.return_value = {}
-        repo.edges.get_all_edges_with_relation.return_value = edges
-        repo.files.get_all_files_metadata.return_value = {
+        repo.graph.get_all_symbols_with_metadata.return_value = symbols
+        repo.graph.get_outgoing_edges.return_value = []
+        repo.workspace.get_all_files_metadata.return_value = {}
+        repo.graph.get_all_edges_with_relation.return_value = edges
+        repo.workspace.get_all_files_metadata.return_value = {
             "src/main.py": {"filepath": "src/main.py", "manual_fields": {}, "pending_audit": False,
                            "justification": "", "sha256": "abc", "status": "COMPLIANT",
                            "manual_status": "COMPLIANT", "language": "python"}
         }
-        repo.compliance.get_violations.return_value = []
+        repo.quality.get_violations.return_value = []
         
         violations = auditor.run_audit()
         # Should complete without error

@@ -68,7 +68,7 @@ def _eval_calls_prefix(symbol_info: dict, prefix: str, outgoing_targets: Optiona
     if not repository:
         return False
     for target in outgoing_targets:
-        target_node = repository.symbols.get_symbol(target)
+        target_node = repository.graph.get_symbol(target)
         if target_node and target_node.get("filepath"):
             if target_node["filepath"].replace("\\", "/").startswith(prefix):
                 return True

@@ -95,7 +95,6 @@ class TreesitterEngine:
         # 1. Update file hash in files table
         sha256_hash = hashlib.sha256(code_bytes).hexdigest()
         lang = TreesitterLoader.detect_language(fp) or "unknown"
-        repository.files.upsert_file(norm_fp, sha256_hash, lang)
 
         # 2. Get existing symbols in DB for this file to reconcile SCIP IDs
         query_paths = [norm_fp]
@@ -105,7 +104,7 @@ class TreesitterEngine:
                 query_paths.append(abs_fp)
         except Exception:
             pass
-        existing = repository.symbols.get_symbols_by_filepaths(query_paths)
+        existing = repository.graph.get_symbols_by_filepaths(query_paths)
         clean_to_existing: Dict[str, str] = {}
         for sym_id, data in existing.items():
             c_sym = data.get("clean_symbol") or sym_id
@@ -148,6 +147,10 @@ class TreesitterEngine:
                 "body_hash": decl.body_hash,
                 "parent_symbol": decl.parent_symbol,
                 "code_block": decl.code_block,
+                "start_line": decl.start_line,
+                "start_col": decl.start_col,
+                "end_line": decl.end_line,
+                "end_col": decl.end_col,
             })
 
             # Occurrence for definition (Role = 1)
@@ -161,12 +164,12 @@ class TreesitterEngine:
                 "role": 1,  # SCIP SymbolRole.Definition
             })
 
-        # Upsert symbols
-        repository.symbols.upsert_symbols_bulk(symbols_to_upsert)
-
-        # Replace definition occurrences for this file
-        repository.graph.delete_occurrences_by_role(norm_fp, 1)
-        repository.symbols.add_occurrences_bulk(occurrences_to_insert)
+        # Atomic transaction for multi-table writes
+        with repository.db_conn.transaction():
+            repository.workspace.upsert_file(norm_fp, sha256_hash, lang)
+            repository.graph.upsert_symbols_bulk(symbols_to_upsert)
+            repository.graph.delete_occurrences_by_role(norm_fp, 1)
+            repository.graph.record_occurrences_bulk(occurrences_to_insert)
 
         return declarations
 

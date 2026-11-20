@@ -57,12 +57,12 @@ class ContextCompiler:
 
             neighbor_edges = []
             if direction in ("upstream", "both"):
-                incoming = self.repository.edges.get_incoming_edges(curr)
+                incoming = self.repository.graph.get_incoming_edges(curr)
                 for edge in incoming:
                     neighbor_edges.append((edge["source"], edge.get("weight", 1.0)))
 
             if direction in ("downstream", "both"):
-                outgoing = self.repository.edges.get_outgoing_edges(curr)
+                outgoing = self.repository.graph.get_outgoing_edges(curr)
                 for edge in outgoing:
                     neighbor_edges.append((edge["target"], edge.get("weight", 1.0)))
 
@@ -82,12 +82,12 @@ class ContextCompiler:
         types_found = []
         seen_syms = set()
 
-        outgoing = self.repository.edges.get_outgoing_edges(focal_symbol)
+        outgoing = self.repository.graph.get_outgoing_edges(focal_symbol)
         type_targets = [e["target"] for e in outgoing if e.get("relation") in ("TypeDefinition", "Implements", "Inherits")]
         for tgt in type_targets:
             if tgt not in seen_syms:
                 seen_syms.add(tgt)
-                rec = self.repository.symbols.get_symbol(tgt)
+                rec = self.repository.graph.get_symbol(tgt)
                 if rec and rec.get("kind") in ("Class", "Struct", "Interface", "Trait", "TypeAlias", "Enum"):
                     types_found.append(rec)
 
@@ -102,16 +102,13 @@ class ContextCompiler:
             for cand in candidates:
                 if cand in builtins:
                     continue
-                matches = self.repository.symbols.search_symbols_keyword(cand, limit=3)
+                matches = self.repository.graph.search_symbols(cand, limit=3)
                 for m in matches:
-                    if isinstance(m, dict):
-                        sym_id = m.get("symbol")
-                        fp = m.get("filepath")
-                        kind = m.get("kind")
-                        s_sig = m.get("signature")
-                        doc = m.get("docstring")
-                    else:
-                        sym_id, fp, kind, s_sig, doc = m[0], m[1], m[2], m[3], m[4]
+                    sym_id = m.get("symbol")
+                    fp = m.get("filepath")
+                    kind = m.get("kind")
+                    s_sig = m.get("signature")
+                    doc = m.get("docstring")
                     if sym_id not in seen_syms and kind in ("Class", "Struct", "Interface", "Trait", "TypeAlias", "Enum"):
                         clean = demangle_scip_symbol(sym_id)
                         short = clean.split(".")[-1]
@@ -271,7 +268,7 @@ class ContextCompiler:
         if diagnostics_map is not None:
             diags = diagnostics_map.get(node_info["symbol"], [])
         else:
-            diags = self.repository.symbols.get_diagnostics_for_symbol(node_info["symbol"])
+            diags = self.repository.quality.get_diagnostics_for_symbol(node_info["symbol"])
         if diags:
             writer.write("- **Compiler Diagnostics**:\n")
             for d in diags:
@@ -323,8 +320,21 @@ class ContextCompiler:
         traversed_symbols = self.traverse_subgraph(actual_focal, radius, direction)
         # Filter out local symbols
         traversed_symbols = [s for s in traversed_symbols if not str(s).startswith("local ")]
-        metadata_map = self.repository.symbols.get_symbols_metadata_batch(traversed_symbols)
-        diagnostics_map = self.repository.symbols.get_diagnostics_batch(traversed_symbols)
+        metadata_map = self.repository.graph.get_symbols_metadata_batch(traversed_symbols)
+        defs_map = self.repository.graph.get_definitions_map()
+        for sym, meta in metadata_map.items():
+            if "definition" not in meta:
+                if meta.get("start_line") is not None and meta.get("end_line") is not None:
+                    meta["definition"] = {
+                        "start_line": meta["start_line"],
+                        "start_col": meta.get("start_col", 0),
+                        "end_line": meta["end_line"],
+                        "end_col": meta.get("end_col", 0),
+                    }
+                elif sym in defs_map:
+                    meta["definition"] = defs_map[sym]
+
+        diagnostics_map = self.repository.quality.get_diagnostics_batch(traversed_symbols)
 
         md_content = self.generate_markdown(
             actual_focal,

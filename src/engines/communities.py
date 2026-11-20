@@ -6,8 +6,8 @@ def detect_communities(repository: Repository):
     Groups repository symbols into cohesive communities using Label Propagation (LPA).
     """
     # Fetch symbols and edges using repository methods
-    symbols_list = repository.symbols.get_all_symbols()
-    edges_list = repository.edges.get_all_edges()
+    symbols_list = repository.graph.get_all_symbols()
+    edges_list = repository.graph.get_all_edges()
 
     symbols = {item["symbol"]: item["filepath"] for item in symbols_list}
     edges = [(item["source"], item["target"], item["weight"]) for item in edges_list]

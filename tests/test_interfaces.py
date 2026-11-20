@@ -57,57 +57,48 @@ class TestViolationCheckerProtocol:
 
 
 class TestRepositoryInterfaces:
-    """Verify repository interface methods exist on concrete classes."""
+    """Verify repository domain store methods exist on concrete classes."""
 
-    def test_symbols_repository_has_required_methods(self):
-        from db.repository_symbols import SymbolsRepository
+    def test_graph_store_has_required_methods(self):
+        from db.store_graph import GraphStore
         required = ['get_symbol', 'upsert_symbol', 'get_symbols_by_filepaths',
-                     'get_occurrences_for_symbol', 'upsert_symbols_bulk',
-                     'get_symbols_in_file',
-                     'delete_symbols_for_file', 'delete_occurrences_for_file',
-                     'recalculate_connection_weights', 'get_all_symbols',
-                     'get_all_symbols_with_metadata']
+                    'get_occurrences_for_symbol', 'upsert_symbols_bulk',
+                    'get_symbols_in_file', 'recalculate_connection_weights',
+                    'get_all_symbols', 'add_edge', 'get_incoming_edges',
+                    'get_outgoing_edges', 'delete_file', 'delete_files']
         for method in required:
-            assert hasattr(SymbolsRepository, method), f"Missing: {method}"
+            assert hasattr(GraphStore, method), f"Missing: {method}"
 
-    def test_files_repository_has_required_methods(self):
-        from db.repository_files import FilesRepository
-        required = ['upsert_file', 'delete_file', 'get_file',
-                     'upsert_files_bulk', 'update_file_manual_status',
-                     'update_file_status', 'get_all_files_metadata',
-                     'get_files_pending_audit_count']
+    def test_workspace_store_has_required_methods(self):
+        from db.store_workspace import WorkspaceStore
+        required = ['upsert_file', 'get_file', 'upsert_files_bulk',
+                    'update_file_manual_status', 'update_file_status',
+                    'get_all_files_metadata', 'get_files_pending_audit_count',
+                    'get_metadata', 'set_metadata', 'get_co_changes', 'record_co_changes']
         for method in required:
-            assert hasattr(FilesRepository, method), f"Missing: {method}"
+            assert hasattr(WorkspaceStore, method), f"Missing: {method}"
 
-    def test_edges_repository_has_required_methods(self):
-        from db.repository_edges import EdgesRepository
-        required = ['add_edge', 'get_outgoing_edges', 'get_incoming_edges',
-                     'add_edges_bulk', 'delete_edges_for_file',
-                     'get_transitive_closure', 'get_all_edges']
+    def test_quality_store_has_required_methods(self):
+        from db.store_quality import QualityStore
+        required = ['upsert_rule', 'add_violation', 'get_violations',
+                    'delete_manual_violations', 'delete_automatic_violations',
+                    'record_violations_bulk', 'get_diagnostics_for_file',
+                    'record_diagnostics_bulk']
         for method in required:
-            assert hasattr(EdgesRepository, method), f"Missing: {method}"
+            assert hasattr(QualityStore, method), f"Missing: {method}"
 
-    def test_compliance_repository_has_required_methods(self):
-        from db.repository_compliance import ComplianceRepository
-        required = ['upsert_compliance_rule', 'add_violation',
-                     'get_violations', 'delete_manual_violations',
-                     'delete_automatic_violations', 'upsert_violations_bulk']
-        for method in required:
-            assert hasattr(ComplianceRepository, method), f"Missing: {method}"
-
-    def test_metrics_repository_has_required_methods(self):
-        from db.repository_metrics import MetricsRepository
+    def test_analytics_store_has_required_methods(self):
+        from db.store_analytics import AnalyticsStore
         required = ['get_symbol_counts_by_kind', 'get_repo_totals',
-                     'get_symbols_by_file_prefix']
+                    'get_symbols_by_file_prefix', 'get_transitive_closure']
         for method in required:
-            assert hasattr(MetricsRepository, method), f"Missing: {method}"
+            assert hasattr(AnalyticsStore, method), f"Missing: {method}"
 
-    def test_repository_composes_sub_repositories(self):
+    def test_repository_composes_domain_stores(self):
         from unittest.mock import MagicMock
         from db.repository import Repository
         repo = Repository(db_conn=MagicMock())
-        assert hasattr(repo, 'files')
-        assert hasattr(repo, 'symbols')
-        assert hasattr(repo, 'edges')
-        assert hasattr(repo, 'compliance')
-        assert hasattr(repo, 'metrics')
+        assert hasattr(repo, 'workspace')
+        assert hasattr(repo, 'graph')
+        assert hasattr(repo, 'quality')
+        assert hasattr(repo, 'analytics')

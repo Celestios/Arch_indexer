@@ -60,28 +60,28 @@ def test_connection_weights_recalculation(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
     
     # Insert symbols
-    repository.symbols.upsert_symbol("sym_a", "lib/a.dart", "Function", "void a()", "docs a", "hash_a", 0)
-    repository.symbols.upsert_symbol("sym_b", "lib/b.dart", "Function", "void b()", "docs b", "hash_b", 0)
-    repository.symbols.upsert_symbol("sym_c", "lib/c.dart", "Function", "void c()", "docs c", "hash_c", 0)
+    repository.graph.upsert_symbol("sym_a", "lib/a.dart", "Function", "void a()", "docs a", "hash_a", 0)
+    repository.graph.upsert_symbol("sym_b", "lib/b.dart", "Function", "void b()", "docs b", "hash_b", 0)
+    repository.graph.upsert_symbol("sym_c", "lib/c.dart", "Function", "void c()", "docs c", "hash_c", 0)
 
     # Insert edges
-    repository.edges.add_edge("sym_a", "sym_b", "Calls", 1.0)
-    repository.edges.add_edge("sym_b", "sym_c", "Calls", 1.5)
+    repository.graph.add_edge("sym_a", "sym_b", "Calls", 1.0)
+    repository.graph.add_edge("sym_b", "sym_c", "Calls", 1.5)
 
     # Recalculate
-    repository.symbols.recalculate_connection_weights()
+    repository.graph.recalculate_connection_weights()
 
     # Verify connection weights
     # sym_a has 1 outgoing edge
-    sym_a = repository.symbols.get_symbol("sym_a")
+    sym_a = repository.graph.get_symbol("sym_a")
     assert sym_a["connection_weight"] == 1
 
     # sym_b has 1 incoming + 1 outgoing = 2 edges
-    sym_b = repository.symbols.get_symbol("sym_b")
+    sym_b = repository.graph.get_symbol("sym_b")
     assert sym_b["connection_weight"] == 2
 
     # sym_c has 1 incoming edge
-    sym_c = repository.symbols.get_symbol("sym_c")
+    sym_c = repository.graph.get_symbol("sym_c")
     assert sym_c["connection_weight"] == 1
 
     db_conn.close()
@@ -91,13 +91,13 @@ def test_shrink_guard(tmp_path):
     
     # 1. Populate initial files and symbols
     files = [{"filepath": "lib/a.dart", "sha256": "h1", "language": "dart"}]
-    repository.files.upsert_files_bulk(files)
+    repository.workspace.upsert_files_bulk(files)
     
     symbols = [
         {"symbol": "sym1", "filepath": "lib/a.dart", "kind": "Function", "signature": "", "docstring": "", "body_hash": "", "connection_weight": 0},
         {"symbol": "sym2", "filepath": "lib/a.dart", "kind": "Function", "signature": "", "docstring": "", "body_hash": "", "connection_weight": 0}
     ]
-    repository.symbols.upsert_symbols_bulk(symbols)
+    repository.graph.upsert_symbols_bulk(symbols)
 
     # Physically create the file lib/a.dart on disk so it exists (guard checks for physical existence)
     a_file = root / "lib" / "a.dart"
@@ -131,7 +131,7 @@ def test_shrink_guard(tmp_path):
         {"symbol": f"sym_{i}", "filepath": "lib/a.dart", "kind": "Function", "signature": "", "docstring": "", "body_hash": "", "connection_weight": 0}
         for i in range(100)
     ]
-    repository.symbols.upsert_symbols_bulk(symbols_100)
+    repository.graph.upsert_symbols_bulk(symbols_100)
     
     # Change the file content so its hash changes and it gets re-ingested
     a_file.write_text("void a() { int x; }")

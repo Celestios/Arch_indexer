@@ -160,18 +160,18 @@ class DependencyViolationChecker(BaseViolationChecker):
         barriers = field_conf.get("barriers", [])
         if not barriers:
             return None
-        barrier_field = field_conf.get("barrier_field", "architectural_role") or "architectural_role"
+        barrier_field = field_conf.get("barrier_field") or field_name
 
         if snapshot is not None:
             incoming = snapshot.get_incoming(target_sym)
         else:
-            incoming = self.repository.edges.get_incoming_edges(target_sym)
+            incoming = self.repository.graph.get_incoming_edges(target_sym) if self.repository else []
         parent_sym = target_data.get("symbol_info", {}).get("parent_symbol")
         if parent_sym:
             if snapshot is not None:
                 incoming = incoming + snapshot.get_incoming(parent_sym)
             else:
-                incoming = incoming + self.repository.edges.get_incoming_edges(parent_sym)
+                incoming = incoming + (self.repository.graph.get_incoming_edges(parent_sym) if self.repository else [])
 
         candidates = []
         from utils.helpers import demangle_scip_symbol

@@ -359,12 +359,21 @@ def format_lookup_symbol(
         return tag_str if tag_str else "Reference"
 
     # Filter out local edges and group edges by (related_symbol, direction)
-    clean_edges = [e for e in (edges or []) if not str(e[0]).startswith("local ") and not str(e[1]).startswith("local ")]
+    def _edge_src(e):
+        return str(e["source"] if isinstance(e, dict) else e[0])
+
+    def _edge_tgt(e):
+        return str(e["target"] if isinstance(e, dict) else e[1])
+
+    def _edge_rel(e):
+        return str(e["relation"] if isinstance(e, dict) else e[2])
+
+    clean_edges = [e for e in (edges or []) if not _edge_src(e).startswith("local ") and not _edge_tgt(e).startswith("local ")]
     sym_edges: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for e in clean_edges:
-        src_raw = str(e[0])
-        tgt_raw = str(e[1])
-        rel = str(e[2])
+        src_raw = _edge_src(e)
+        tgt_raw = _edge_tgt(e)
+        rel = _edge_rel(e)
 
         # Determine direction relative to queried symbol
         if tgt_raw == raw_symbol or demangle_scip_symbol(tgt_raw) == clean_symbol:
@@ -516,14 +525,22 @@ def format_lookup_file(
     md.append("")
 
     # Filter out local symbols
-    non_local_symbols = [s for s in file_symbols if not str(s[0]).startswith("local ")]
+    def _sym_name(s):
+        return s["symbol"] if isinstance(s, dict) else s[0]
+
+    def _sym_kind(s):
+        return s.get("kind", "") if isinstance(s, dict) else s[1]
+
+    non_local_symbols = [s for s in file_symbols if not str(_sym_name(s)).startswith("local ")]
     if non_local_symbols:
         md.append("### Symbols Declared in File")
         md.append("| Symbol | Kind |")
         md.append("| :--- | :--- |")
         for s in non_local_symbols:
-            clean_s = demangle_scip_symbol(s[0])
-            kind = infer_scip_kind(s[0]) if s[1] == "UnspecifiedKind" else s[1]
+            raw_s = _sym_name(s)
+            clean_s = s.get("clean_symbol") if isinstance(s, dict) and s.get("clean_symbol") else demangle_scip_symbol(raw_s)
+            k = _sym_kind(s)
+            kind = infer_scip_kind(raw_s) if k == "UnspecifiedKind" or not k else k
             md.append(f"| `{clean_s}` | {kind} |")
         md.append("")
 

@@ -46,10 +46,10 @@ def ext_to_lang(ext: str) -> str:
 
 def resolve_filepath(repository, raw_path: str) -> Optional[str]:
     """Resolve a filepath against the database, trying exact match then suffix fallback."""
-    file_info = repository.files.get_file(raw_path)
+    file_info = repository.workspace.get_file(raw_path)
     if file_info:
         return raw_path
-    all_files = repository.files.get_all_files_metadata()
+    all_files = repository.workspace.get_all_files_metadata()
     for fp in all_files.keys():
         if fp.replace("\\", "/").endswith(raw_path.replace("\\", "/")):
             return fp
@@ -66,7 +66,7 @@ def matches_filter(filepath: str, filepath_filter: Optional[str]) -> bool:
 
 def find_definition_line(repository, symbol: str, filepath: str) -> int:
     """Find the definition line number for a symbol in a given file. Returns 1 as fallback."""
-    occs = repository.symbols.get_occurrences_for_symbol(symbol)
+    occs = repository.graph.get_occurrences_for_symbol(symbol)
     norm_fp = filepath.replace("\\", "/")
     for occ in occs:
         if occ["filepath"].replace("\\", "/") == norm_fp and occ.get("role") == 1:
@@ -109,7 +109,7 @@ def find_call_site_or_definition_line(
         return 1
 
     norm_fp = filepath.replace("\\", "/")
-    occs = repository.symbols.get_occurrences_for_symbol(target_sym)
+    occs = repository.graph.get_occurrences_for_symbol(target_sym)
     for occ in occs:
         if occ["filepath"].replace("\\", "/") == norm_fp and (occ.get("role", 0) & 1) == 0:
             return occ["start_line"]
@@ -263,40 +263,34 @@ def resolve_symbol_in_repo(repository, target: str) -> Optional[tuple]:
         return None
 
     # 1. Exact match
-    exact = repository.symbols.get_symbol_exact(target_clean)
+    exact = repository.graph.get_symbol_exact(target_clean)
     if exact:
         return exact
 
-    # 2. Match by substring/keyword in DuckDB
+    # 2. Match by substring/keyword via GraphStore
     t = target_clean[:-2] if target_clean.endswith("()") else target_clean
-    patterns = [f"%{t}%"]
+    patterns = [t]
     if "." in t:
         parts = [p for p in t.split(".") if p]
-        patterns.append("%" + "%".join(parts) + "%")
+        patterns.append(parts[-1])
 
-    with repository.db_conn.session() as conn:
-        for p in patterns:
-            rows = conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring, body_hash, clean_symbol FROM symbols WHERE symbol LIKE ? OR clean_symbol LIKE ? LIMIT 50",
-                (p, p)
-            ).fetchall()
-            if rows:
-                candidates = [
-                    r for r in rows
-                    if not r[0].startswith("local ")
-                    and not (r[0].endswith(")") and not r[0].endswith("()"))
-                ]
-                if candidates:
-                    def score(c):
-                        dem = c[6] if len(c) > 6 and c[6] else demangle_scip_symbol(c[0])
-                        dem_no_parens = dem[:-2] if dem.endswith("()") else dem
-                        is_test = is_auxiliary_path(c[1])
-                        exact = (dem == t or dem_no_parens == t or dem.endswith("." + t) or dem_no_parens.endswith("." + t))
-                        # Priority: exact demangled match > production code > shorter symbol name
-                        return (0 if exact else 1, 1 if is_test else 0, len(c[0]))
+    for p in patterns:
+        raw_cands = repository.graph.search_symbols(p, limit=50)
+        candidates = [
+            s for s in raw_cands
+            if not s["symbol"].startswith("local ")
+            and not (s["symbol"].endswith(")") and not s["symbol"].endswith("()"))
+        ]
+        if candidates:
+            def score(s):
+                dem = s.get("clean_symbol") or demangle_scip_symbol(s["symbol"])
+                dem_no_parens = dem[:-2] if dem.endswith("()") else dem
+                is_test = is_auxiliary_path(s.get("filepath"))
+                exact = (dem == t or dem_no_parens == t or dem.endswith("." + t) or dem_no_parens.endswith("." + t))
+                return (0 if exact else 1, 1 if is_test else 0, len(s["symbol"]))
 
-                    candidates.sort(key=score)
-                    return repository.symbols._row_to_symbol_dict(candidates[0])
+            candidates.sort(key=score)
+            return candidates[0]
 
     return None
 

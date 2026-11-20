@@ -139,7 +139,7 @@ def handle_map(
     global_allow_ext = any(t["include_external"] for t in parsed_targets)
 
     # 2. Fetch repository totals & raw entities
-    totals = repository.metrics.get_repo_totals()
+    totals = repository.analytics.get_repo_totals()
 
     with repository.db_conn.session() as conn:
         sym_rows = conn.execute(

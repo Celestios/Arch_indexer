@@ -51,7 +51,7 @@ class TransitiveInvalidation:
 
             for fp in changed_files:
                 fp_norm = fp.replace("\\", "/")
-                old_syms = self.repository.symbols.get_symbols_in_file(fp_norm)
+                old_syms = self.repository.graph.get_symbols_in_file(fp_norm)
                 old_map = {s["symbol"]: s.get("signature") for s in old_syms}
                 new_map = new_by_file.get(fp_norm, {})
 
@@ -71,7 +71,7 @@ class TransitiveInvalidation:
             if not queue:
                 break
             # Single join query to get callers of symbols in queue
-            dependents = self.repository.edges.get_dependent_files(queue)
+            dependents = self.repository.graph.get_dependent_files(queue)
             next_queue = []
             for dep in dependents:
                 if dep not in visited:
@@ -90,4 +90,4 @@ class TransitiveInvalidation:
         Legacy/helper method: find files that import symbols defined in the given filepath.
         Uses single join query for efficiency.
         """
-        return self.repository.edges.get_dependent_files([filepath])
+        return self.repository.graph.get_dependent_files([filepath])

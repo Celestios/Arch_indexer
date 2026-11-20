@@ -1,70 +1,42 @@
 from unittest.mock import MagicMock
 from db.repository import Repository
-from db.repository_files import FilesRepository
-from db.repository_symbols import SymbolsRepository
-from db.repository_edges import EdgesRepository
-from db.repository_compliance import ComplianceRepository
-from db.repository_metrics import MetricsRepository
+from db.store_workspace import WorkspaceStore
+from db.store_graph import GraphStore
+from db.store_quality import QualityStore
+from db.store_analytics import AnalyticsStore
 
 
 class TestRepository:
-    def test_default_sub_repositories(self):
-        mock_conn = MagicMock()
-        repo = Repository(mock_conn)
-        assert isinstance(repo.files, FilesRepository)
-        assert isinstance(repo.symbols, SymbolsRepository)
-        assert isinstance(repo.edges, EdgesRepository)
-        assert isinstance(repo.compliance, ComplianceRepository)
-        assert isinstance(repo.metrics, MetricsRepository)
-
-    def test_custom_sub_repositories(self):
-        mock_conn = MagicMock()
-        mock_files = MagicMock(spec=FilesRepository)
-        mock_symbols = MagicMock(spec=SymbolsRepository)
-        mock_edges = MagicMock(spec=EdgesRepository)
-        mock_compliance = MagicMock(spec=ComplianceRepository)
-        mock_metrics = MagicMock(spec=MetricsRepository)
-        repo = Repository(
-            mock_conn,
-            files=mock_files,
-            symbols=mock_symbols,
-            edges=mock_edges,
-            compliance=mock_compliance,
-            metrics=mock_metrics,
-        )
-        assert repo.files is mock_files
-        assert repo.symbols is mock_symbols
-        assert repo.edges is mock_edges
-        assert repo.compliance is mock_compliance
-        assert repo.metrics is mock_metrics
-
-    def test_stores_db_conn(self):
-        mock_conn = MagicMock()
-        repo = Repository(mock_conn)
-        assert repo.db_conn is mock_conn
-
-    def test_partial_custom_repositories(self):
-        mock_conn = MagicMock()
-        mock_files = MagicMock(spec=FilesRepository)
-        repo = Repository(mock_conn, files=mock_files)
-        assert repo.files is mock_files
-        assert isinstance(repo.symbols, SymbolsRepository)
-        assert isinstance(repo.edges, EdgesRepository)
-        assert isinstance(repo.compliance, ComplianceRepository)
-        assert isinstance(repo.metrics, MetricsRepository)
-
-    def test_domain_stores_initialized(self):
-        from db.store_workspace import WorkspaceStore
-        from db.store_graph import GraphStore
-        from db.store_quality import QualityStore
-        from db.store_analytics import AnalyticsStore
-
+    def test_default_domain_stores(self):
         mock_conn = MagicMock()
         repo = Repository(mock_conn)
         assert isinstance(repo.workspace, WorkspaceStore)
         assert isinstance(repo.graph, GraphStore)
         assert isinstance(repo.quality, QualityStore)
         assert isinstance(repo.analytics, AnalyticsStore)
+
+    def test_custom_domain_stores(self):
+        mock_conn = MagicMock()
+        mock_ws = MagicMock(spec=WorkspaceStore)
+        mock_graph = MagicMock(spec=GraphStore)
+        mock_quality = MagicMock(spec=QualityStore)
+        mock_analytics = MagicMock(spec=AnalyticsStore)
+        repo = Repository(
+            mock_conn,
+            workspace=mock_ws,
+            graph=mock_graph,
+            quality=mock_quality,
+            analytics=mock_analytics,
+        )
+        assert repo.workspace is mock_ws
+        assert repo.graph is mock_graph
+        assert repo.quality is mock_quality
+        assert repo.analytics is mock_analytics
+
+    def test_stores_db_conn(self):
+        mock_conn = MagicMock()
+        repo = Repository(mock_conn)
+        assert repo.db_conn is mock_conn
 
     def test_domain_stores_integration(self, tmp_path):
         from db.connection import DbConnection

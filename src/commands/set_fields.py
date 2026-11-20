@@ -28,7 +28,7 @@ def cmd_set_fields(args):
             print(f"Error: File '{args.filepath}' is not registered in the database.", file=sys.stderr)
             sys.exit(1)
 
-        file_info = repository.files.get_file(filepath)
+        file_info = repository.workspace.get_file(filepath)
         current_fields = {}
         if file_info.get("manual_fields"):
             mf = file_info["manual_fields"]
@@ -46,7 +46,7 @@ def cmd_set_fields(args):
             else:
                 current_fields[k] = v
 
-        repository.files.update_file_manual_fields(filepath, current_fields, args.justification)
+        repository.workspace.set_manual_fields(filepath, current_fields, args.justification)
 
         auditor = Auditor(repository, project_root)
         auditor.run_audit()

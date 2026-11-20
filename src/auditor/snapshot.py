@@ -34,11 +34,11 @@ class AuditSnapshot:
     ) -> "AuditSnapshot":
         """Loads (or reuses caller-supplied) bulk data for one audit pass."""
         if symbols is None:
-            symbols = repository.symbols.get_all_symbols_with_metadata()
+            symbols = repository.graph.get_all_symbols()
         if edges is None:
-            edges = repository.edges.get_all_edges_with_relation()
+            edges = repository.graph.get_all_edges_with_relation()
         if files is None:
-            files = repository.files.get_all_files_metadata()
+            files = repository.workspace.get_all_files_metadata()
 
         symbol_map: Dict[str, Dict[str, Any]] = {}
         for sym in symbols:
@@ -60,7 +60,7 @@ class AuditSnapshot:
                     "call_line": edge.get("call_line"),
                 })
 
-        definitions_by_symbol = repository.symbols.get_definitions_map()
+        definitions_by_symbol = repository.graph.get_definitions_map()
 
         return cls(
             all_files=files,
