@@ -72,24 +72,9 @@ class GitCouplingMiner:
                 freq = round(cnt / total_a, 4)
                 records.append((f_a, f_b, cnt, freq))
 
-        if hasattr(repository, "coupling") and repository.coupling:
-            repository.coupling.clear()
-            if records:
-                repository.coupling.upsert_bulk(records)
-        else:
-            with repository.db_conn.session() as conn:
-                conn.execute("DELETE FROM file_co_changes")
-                if records:
-                    conn.executemany(
-                        """
-                        INSERT INTO file_co_changes (filepath_a, filepath_b, co_change_count, frequency)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT (filepath_a, filepath_b) DO UPDATE SET
-                            co_change_count = excluded.co_change_count,
-                            frequency = excluded.frequency
-                        """,
-                        records
-                    )
+        repository.coupling.clear()
+        if records:
+            repository.coupling.upsert_bulk(records)
 
         return len(records)
 
@@ -103,26 +88,4 @@ class GitCouplingMiner:
         """Retrieves files historically co-changed with filepath above min_frequency."""
         if not filepath:
             return []
-        if hasattr(repository, "coupling") and repository.coupling:
-            return repository.coupling.get_co_changes(filepath=filepath, min_frequency=min_frequency, limit=limit)
-        norm_fp = filepath.replace("\\", "/")
-        with repository.db_conn.session() as conn:
-            rows = conn.execute(
-                """
-                SELECT filepath_b, co_change_count, frequency
-                FROM file_co_changes
-                WHERE replace(filepath_a, '\\', '/') = ?
-                  AND frequency >= ?
-                ORDER BY frequency DESC, co_change_count DESC
-                LIMIT ?
-                """,
-                (norm_fp, min_frequency, limit)
-            ).fetchall()
-            return [
-                {
-                    "filepath": r[0],
-                    "co_change_count": r[1],
-                    "frequency": r[2]
-                }
-                for r in rows
-            ]
+        return repository.coupling.get_co_changes(filepath=filepath, min_frequency=min_frequency, limit=limit)

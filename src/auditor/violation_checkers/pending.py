@@ -20,19 +20,11 @@ class PendingAuditChecker(BaseViolationChecker):
         propagation_sources: Optional[Dict] = None,
         snapshot: Optional[Any] = None
     ) -> List[Dict[str, Any]]:
-        repo = self.repository
-        if not isinstance(symbol_classifications, dict) and hasattr(symbol_classifications, "files"):
-            repo = symbol_classifications
-            symbol_classifications, all_edges, config, filepath_filter, propagation_sources = (
-                all_edges, config, filepath_filter, propagation_sources, snapshot
-            )
-            snapshot = None
-
         violations = []
         if snapshot is not None and snapshot.all_files:
             file_metadata = snapshot.all_files
-        elif repo is not None:
-            file_metadata = repo.files.get_all_files_metadata()
+        elif self.repository is not None:
+            file_metadata = self.repository.files.get_all_files_metadata()
         else:
             file_metadata = {}
 

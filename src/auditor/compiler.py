@@ -104,7 +104,14 @@ class ContextCompiler:
                     continue
                 matches = self.repository.symbols.search_symbols_keyword(cand, limit=3)
                 for m in matches:
-                    sym_id, fp, kind, s_sig, doc = m[0], m[1], m[2], m[3], m[4]
+                    if isinstance(m, dict):
+                        sym_id = m.get("symbol")
+                        fp = m.get("filepath")
+                        kind = m.get("kind")
+                        s_sig = m.get("signature")
+                        doc = m.get("docstring")
+                    else:
+                        sym_id, fp, kind, s_sig, doc = m[0], m[1], m[2], m[3], m[4]
                     if sym_id not in seen_syms and kind in ("Class", "Struct", "Interface", "Trait", "TypeAlias", "Enum"):
                         clean = demangle_scip_symbol(sym_id)
                         short = clean.split(".")[-1]
@@ -311,7 +318,7 @@ class ContextCompiler:
         Returns the markdown string.
         """
         resolved = resolve_symbol_in_repo(self.repository, focal_symbol)
-        actual_focal = resolved[0] if resolved else focal_symbol
+        actual_focal = (resolved["symbol"] if isinstance(resolved, dict) else resolved[0]) if resolved else focal_symbol
 
         traversed_symbols = self.traverse_subgraph(actual_focal, radius, direction)
         # Filter out local symbols

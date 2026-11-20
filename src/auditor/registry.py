@@ -30,9 +30,9 @@ def _register_defaults():
         from auditor.violation_checkers.dependency import DependencyViolationChecker
         from auditor.violation_checkers.naming import NamingViolationChecker
         from auditor.violation_checkers.pending import PendingAuditChecker
-        ViolationCheckerRegistry.register(object.__new__(DependencyViolationChecker))
-        ViolationCheckerRegistry.register(object.__new__(NamingViolationChecker))
-        ViolationCheckerRegistry.register(object.__new__(PendingAuditChecker))
+        ViolationCheckerRegistry.register(DependencyViolationChecker(repository=None, tracer=None, config_loader=None))
+        ViolationCheckerRegistry.register(NamingViolationChecker(repository=None, tracer=None))
+        ViolationCheckerRegistry.register(PendingAuditChecker(repository=None))
     except Exception:
         pass
 

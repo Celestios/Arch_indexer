@@ -413,7 +413,7 @@ def test_method_name_strips_class_prefix():
 
 def test_graph_command_registration():
     import argparse
-    from commands.init import register_all
+    from commands import register_all
 
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")

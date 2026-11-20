@@ -9,11 +9,7 @@ def handle_audit(repository, project_root) -> str:
     all_violations = repository.compliance.get_violations()
 
     if not all_violations:
-        pending_count = (
-            repository.files.get_files_pending_audit_count()
-            if hasattr(repository.files, "get_files_pending_audit_count")
-            else 0
-        )
+        pending_count = repository.files.get_files_pending_audit_count()
         pending_msg = (
             f"\n\n*{pending_count} file(s) pending deep audit.*" if pending_count > 0 else ""
         )

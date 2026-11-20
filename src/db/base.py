@@ -2,22 +2,6 @@ from typing import List, Any, Optional, Tuple
 from db.connection import DbConnection
 
 
-class RowDict(dict):
-    """Dictionary that supports both key and integer-index access for backwards compatibility."""
-
-    def __init__(self, data: dict, order: list):
-        super().__init__(data)
-        self._order = order
-
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            if 0 <= key < len(self._order):
-                field_name = self._order[key]
-                return self.get(field_name)
-            raise IndexError(f"Tuple index {key} out of range (length {len(self._order)})")
-        return super().__getitem__(key)
-
-
 class BaseRepository:
     """Shared base class for all repository implementations. Eliminates DRY violations."""
 

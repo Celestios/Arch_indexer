@@ -48,7 +48,7 @@ def handle_impact(symbol: str, max_depth: int, repository) -> str:
     exposed interface callers, and internal/subsystem downstream dependencies per method.
     """
     resolved = resolve_symbol_in_repo(repository, symbol)
-    db_symbol = resolved[0] if resolved else symbol
+    db_symbol = (resolved["symbol"] if isinstance(resolved, dict) else resolved[0]) if resolved else symbol
     clean_focal = demangle_scip_symbol(db_symbol)
 
     is_cls, _ = is_class_symbol(repository, db_symbol)

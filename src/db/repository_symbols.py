@@ -1,6 +1,6 @@
 from typing import Dict, List, Any, Optional
 from db.connection import DbConnection
-from db.base import BaseRepository, RowDict, UPSERT_SYMBOL_SQL
+from db.base import BaseRepository, UPSERT_SYMBOL_SQL
 
 
 class SymbolsRepository(BaseRepository):
@@ -35,73 +35,29 @@ class SymbolsRepository(BaseRepository):
 
     @staticmethod
     def _row_to_symbol_dict(row) -> Optional[Dict[str, Any]]:
-        """Maps a database row tuple to a normalized symbol dict/RowDict."""
+        """Maps a database row tuple to a normalized symbol dict."""
         if not row:
             return None
-        if isinstance(row, RowDict):
-            return row
         if isinstance(row, dict):
-            return row
-        if len(row) == 5:
-            order = ["symbol", "filepath", "kind", "signature", "docstring"]
-            data = {
-                "symbol": row[0],
-                "filepath": row[1],
-                "kind": row[2],
-                "signature": row[3],
-                "docstring": row[4],
-            }
-            return RowDict(data, order)
-        elif len(row) == 11:
-            order = [
-                "symbol", "filepath", "kind", "signature", "docstring",
-                "body_hash", "connection_weight", "parent_symbol",
-                "classification", "change_count", "clean_symbol"
-            ]
-            clean_sym = row[10] if row[10] else None
-            if not clean_sym and row[0]:
-                from utils.helpers import demangle_scip_symbol
-                clean_sym = demangle_scip_symbol(row[0])
-            data = {
-                "symbol": row[0],
-                "filepath": row[1],
-                "kind": row[2],
-                "signature": row[3],
-                "docstring": row[4],
-                "body_hash": row[5],
-                "connection_weight": row[6] if row[6] is not None else 0,
-                "parent_symbol": row[7],
-                "classification": row[8] or "{}",
-                "change_count": row[9] if row[9] is not None else 1,
-                "code_block": None,
-                "clean_symbol": clean_sym
-            }
-            return RowDict(data, order)
-        else:
-            order = [
-                "symbol", "filepath", "kind", "signature", "docstring",
-                "body_hash", "connection_weight", "parent_symbol",
-                "classification", "change_count", "code_block", "clean_symbol"
-            ]
-            clean_sym = row[11] if len(row) > 11 and row[11] else (row[10] if len(row) == 11 and row[10] else None)
-            if not clean_sym and row[0]:
-                from utils.helpers import demangle_scip_symbol
-                clean_sym = demangle_scip_symbol(row[0])
-            data = {
-                "symbol": row[0],
-                "filepath": row[1],
-                "kind": row[2],
-                "signature": row[3],
-                "docstring": row[4],
-                "body_hash": row[5] if len(row) > 5 else None,
-                "connection_weight": row[6] if len(row) > 6 and row[6] is not None else 0,
-                "parent_symbol": row[7] if len(row) > 7 else None,
-                "classification": row[8] if len(row) > 8 and row[8] else "{}",
-                "change_count": row[9] if len(row) > 9 and row[9] is not None else 1,
-                "code_block": row[10] if len(row) > 10 else None,
-                "clean_symbol": clean_sym,
-            }
-            return RowDict(data, order)
+            return dict(row)
+
+        from utils.helpers import demangle_scip_symbol
+        sym = row[0] if len(row) > 0 else ""
+        clean_sym = row[11] if len(row) > 11 and row[11] else demangle_scip_symbol(sym)
+        return {
+            "symbol": sym,
+            "filepath": row[1] if len(row) > 1 else None,
+            "kind": row[2] if len(row) > 2 else "UnspecifiedKind",
+            "signature": row[3] if len(row) > 3 else None,
+            "docstring": row[4] if len(row) > 4 else None,
+            "body_hash": row[5] if len(row) > 5 else None,
+            "connection_weight": row[6] if len(row) > 6 and row[6] is not None else 0,
+            "parent_symbol": row[7] if len(row) > 7 else None,
+            "classification": row[8] if len(row) > 8 and row[8] else "{}",
+            "change_count": row[9] if len(row) > 9 and row[9] is not None else 1,
+            "code_block": row[10] if len(row) > 10 else None,
+            "clean_symbol": clean_sym,
+        }
 
     def upsert_symbol(
         self,
@@ -290,7 +246,7 @@ class SymbolsRepository(BaseRepository):
         q = f"%{query.lower()}%"
         with self.db_conn.session() as conn:
             rows = conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE LOWER(symbol) LIKE ? OR LOWER(COALESCE(clean_symbol, '')) LIKE ? LIMIT ?",
+                "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count, code_block, clean_symbol FROM symbols WHERE LOWER(symbol) LIKE ? OR LOWER(COALESCE(clean_symbol, '')) LIKE ? LIMIT ?",
                 (q, q, limit)
             ).fetchall()
             return [self._row_to_symbol_dict(r) for r in rows]
@@ -300,7 +256,7 @@ class SymbolsRepository(BaseRepository):
         q = f"%{query}%"
         with self.db_conn.session() as conn:
             rows = conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE symbol LIKE ? OR clean_symbol LIKE ? LIMIT ?",
+                "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count, code_block, clean_symbol FROM symbols WHERE symbol LIKE ? OR clean_symbol LIKE ? LIMIT ?",
                 (q, q, limit)
             ).fetchall()
             return [self._row_to_symbol_dict(r) for r in rows]
@@ -309,7 +265,7 @@ class SymbolsRepository(BaseRepository):
         """Get exact symbol match (by symbol or clean_symbol)."""
         with self.db_conn.session() as conn:
             row = conn.execute(
-                "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count, clean_symbol FROM symbols WHERE symbol = ? OR clean_symbol = ?",
+                "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count, code_block, clean_symbol FROM symbols WHERE symbol = ? OR clean_symbol = ?",
                 (symbol, symbol)
             ).fetchone()
             return self._row_to_symbol_dict(row)

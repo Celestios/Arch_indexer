@@ -26,7 +26,7 @@ class MetadataPropagator:
                         "direction": field_conf.get("propagation_direction", "upstream"),
                         "weights": field_conf.get("weights") or {},
                         "barriers": set(field_conf.get("barriers") or []),
-                        "barrier_field": field_conf.get("barrier_field"),
+                        "barrier_field": field_conf.get("barrier_field", "architectural_role") or "architectural_role",
                         "values": field_conf.get("values") or [],
                         "default": field_conf.get("default")
                     }
@@ -51,7 +51,7 @@ class MetadataPropagator:
             direction = p_cfg["direction"]
             weights = p_cfg["weights"]
             barriers = p_cfg["barriers"]
-            barrier_field = p_cfg["barrier_field"]
+            barrier_field = p_cfg.get("barrier_field") or "architectural_role"
             values = p_cfg["values"]
             default_val = p_cfg["default"]
 

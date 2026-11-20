@@ -1,7 +1,7 @@
 import json
 from typing import Dict, List, Any, Optional
 from db.connection import DbConnection
-from db.base import BaseRepository, RowDict, UPSERT_FILE_SQL
+from db.base import BaseRepository, UPSERT_FILE_SQL
 
 FILE_FIELDS = [
     "filepath", "sha256", "language", "last_indexed",
@@ -17,8 +17,6 @@ class FilesRepository(BaseRepository):
         """Maps a database row tuple to a normalized file dict with parsed manual_fields."""
         if not row:
             return None
-        if isinstance(row, RowDict):
-            return row
         if isinstance(row, dict):
             manual_fields = row.get("manual_fields")
             if isinstance(manual_fields, str):
@@ -30,7 +28,7 @@ class FilesRepository(BaseRepository):
                 manual_fields = {}
             row_copy = dict(row)
             row_copy["manual_fields"] = manual_fields
-            return RowDict(row_copy, FILE_FIELDS)
+            return row_copy
 
         manual_fields = row[7] if len(row) > 7 else {}
         if isinstance(manual_fields, str):
@@ -41,7 +39,7 @@ class FilesRepository(BaseRepository):
         elif not isinstance(manual_fields, dict):
             manual_fields = {}
 
-        data = {
+        return {
             "filepath": row[0],
             "sha256": row[1] if len(row) > 1 else "",
             "language": row[2] if len(row) > 2 else "",
@@ -52,7 +50,6 @@ class FilesRepository(BaseRepository):
             "manual_fields": manual_fields,
             "justification": row[8] if len(row) > 8 else None,
         }
-        return RowDict(data, FILE_FIELDS)
 
     def upsert_file(self, filepath: str, sha256: str, language: str):
         """Registers or updates a file's hashing and index metadata. Sets pending_audit if changed."""
@@ -174,7 +171,8 @@ class FilesRepository(BaseRepository):
             return result[0] if result else 0
 
     def clean_files_symbols_and_relations(self, filepaths: List[str]):
-        """Deletes file records for given filepaths (single-table leaf). Cross-table cascade is handled by Repository.delete_files_bulk."""
+        """Deprecated alias: delegates single-table cleanup to delete_files_records.
+        For full cross-table cascade deletion, use Repository.delete_files_bulk or CascadeCleanupService."""
         if not filepaths:
             return
         self.delete_files_records(filepaths)

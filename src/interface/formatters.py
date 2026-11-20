@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, List, Optional, Tuple
 from utils.helpers import demangle_scip_symbol, sanitize_docstring, infer_scip_kind, format_classification_badge
 
@@ -268,28 +269,47 @@ def format_lookup_symbol(
     symbol_filepath_map: Optional[Dict[str, str]] = None,
 ) -> str:
     """Format lookup results for a code symbol as markdown with unified references and call graph."""
-    clean_symbol = exact_symbol[10] if len(exact_symbol) > 10 and exact_symbol[10] else demangle_scip_symbol(exact_symbol[0])
-    raw_symbol = str(exact_symbol[0])
+    if isinstance(exact_symbol, dict):
+        clean_symbol = exact_symbol.get("clean_symbol") or demangle_scip_symbol(exact_symbol.get("symbol"))
+        raw_symbol = str(exact_symbol.get("symbol", ""))
+        filepath = exact_symbol.get("filepath")
+        kind = exact_symbol.get("kind", "")
+        signature = exact_symbol.get("signature")
+        classification = exact_symbol.get("classification")
+        parent_symbol = exact_symbol.get("parent_symbol")
+        change_count = exact_symbol.get("change_count")
+        docstring = exact_symbol.get("docstring")
+    else:
+        clean_symbol = exact_symbol[10] if len(exact_symbol) > 10 and exact_symbol[10] else demangle_scip_symbol(exact_symbol[0])
+        raw_symbol = str(exact_symbol[0])
+        filepath = exact_symbol[1] if len(exact_symbol) > 1 else None
+        kind = exact_symbol[2] if len(exact_symbol) > 2 else ""
+        signature = exact_symbol[3] if len(exact_symbol) > 3 else None
+        classification = exact_symbol[8] if len(exact_symbol) > 8 else None
+        parent_symbol = exact_symbol[7] if len(exact_symbol) > 7 else None
+        change_count = exact_symbol[9] if len(exact_symbol) > 9 else None
+        docstring = exact_symbol[4] if len(exact_symbol) > 4 else None
+
     badge = ""
-    if len(exact_symbol) > 8 and exact_symbol[8]:
-        badge = format_classification_badge(exact_symbol[8])
+    if classification:
+        badge = format_classification_badge(classification)
     badge_header = f" `{badge}`" if badge else ""
 
     md = []
     md.append(f"## Code Symbol: `{clean_symbol}`{badge_header}\n")
-    md.append(f"- **Filepath**: `{exact_symbol[1] or 'External / Third-party'}`")
-    md.append(f"- **Kind**: `{exact_symbol[2]}`")
-    md.append(f"- **Signature**: `{exact_symbol[3] or 'None'}`")
+    md.append(f"- **Filepath**: `{filepath or 'External / Third-party'}`")
+    md.append(f"- **Kind**: `{kind}`")
+    md.append(f"- **Signature**: `{signature or 'None'}`")
     if badge:
         md.append(f"- **Classification**: `{badge}`")
-    if len(exact_symbol) > 7 and exact_symbol[7]:
-        parent_clean = demangle_scip_symbol(exact_symbol[7])
+    if parent_symbol:
+        parent_clean = demangle_scip_symbol(parent_symbol)
         md.append(f"- **Enclosing Symbol**: `{parent_clean}`")
-    if len(exact_symbol) > 9 and exact_symbol[9] is not None:
-        cnt = exact_symbol[9]
+    if change_count is not None:
+        cnt = change_count
         churn_str = f"⚡ High Churn ({cnt} modifications)" if cnt >= 3 else f"Stable ({cnt} edits)"
         md.append(f"- **Stability**: {churn_str}")
-    doc = sanitize_docstring(exact_symbol[4]).strip() if exact_symbol[4] else "No docstring available."
+    doc = sanitize_docstring(docstring).strip() if docstring else "No docstring available."
     md.append(f"- **Docstring**:\n  {doc.replace(chr(10), chr(10) + '  ')}\n")
 
     # Group occurrences by normalized filepath
@@ -469,17 +489,30 @@ def format_lookup_symbol(
 
 
 def format_lookup_file(
-    exact_file: tuple,
-    file_symbols: List[tuple],
+    exact_file: Any,
+    file_symbols: List[Any],
 ) -> str:
     """Format lookup results for a file module as markdown."""
     md = []
-    status = exact_file[4].replace("VIOLATION_DETECTED", "VIOLATION") if exact_file[4] else ""
-    md.append(f"## File Module: `{exact_file[0]}`\n")
+    if isinstance(exact_file, dict):
+        fp = exact_file.get("filepath", "")
+        raw_status = exact_file.get("status") or ""
+        status = raw_status.replace("VIOLATION_DETECTED", "VIOLATION")
+        justification = exact_file.get("justification") or "None"
+        mf = exact_file.get("manual_fields")
+        manual_str = json.dumps(mf) if isinstance(mf, dict) and mf else (str(mf) if mf and str(mf) != "{}" else "")
+    else:
+        fp = exact_file[0]
+        raw_status = exact_file[4] if len(exact_file) > 4 and exact_file[4] else ""
+        status = raw_status.replace("VIOLATION_DETECTED", "VIOLATION")
+        justification = exact_file[8] if len(exact_file) > 8 and exact_file[8] else "None"
+        manual_str = str(exact_file[7]) if len(exact_file) > 7 and exact_file[7] and str(exact_file[7]) != "{}" else ""
+
+    md.append(f"## File Module: `{fp}`\n")
     md.append(f"- **Status**: `{status}`")
-    md.append(f"- **Justification**: *{exact_file[8] or 'None'}*")
-    if exact_file[7] and exact_file[7] != "{}":
-        md.append(f"- **Manual Fields**: `{exact_file[7]}`")
+    md.append(f"- **Justification**: *{justification}*")
+    if manual_str:
+        md.append(f"- **Manual Fields**: `{manual_str}`")
     md.append("")
 
     # Filter out local symbols

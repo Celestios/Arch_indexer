@@ -36,14 +36,7 @@ class ChangeTracker:
         Compares the current hash of .arch/config.json with the one stored in system_metadata.
         """
         current_hash = ChangeTracker.get_config_hash(project_root)
-        if hasattr(repository, "metadata") and repository.metadata:
-            stored_hash = repository.metadata.get("config_hash")
-        else:
-            with repository.db_conn.session() as conn:
-                res = conn.execute(
-                    "SELECT value FROM system_metadata WHERE key = 'config_hash'"
-                ).fetchone()
-                stored_hash = res[0] if res else None
+        stored_hash = repository.metadata.get("config_hash")
         return stored_hash != current_hash
 
     @staticmethod
@@ -52,15 +45,4 @@ class ChangeTracker:
         Updates the stored hash of .arch/config.json in system_metadata to match the current file.
         """
         current_hash = ChangeTracker.get_config_hash(project_root)
-        if hasattr(repository, "metadata") and repository.metadata:
-            repository.metadata.set("config_hash", current_hash)
-        else:
-            with repository.db_conn.session() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO system_metadata (key, value)
-                    VALUES ('config_hash', ?)
-                    ON CONFLICT (key) DO UPDATE SET value = excluded.value
-                    """,
-                    (current_hash,)
-                )
+        repository.metadata.set("config_hash", current_hash)

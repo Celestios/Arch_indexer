@@ -97,7 +97,7 @@ def test_scip_primitives_ingestion(tmp_path):
 
     sym_exact = repo.symbols.get_symbol_exact("pkg/Bar#baz().")
     assert sym_exact is not None
-    assert sym_exact[7] == "pkg/Bar#"
+    assert sym_exact["parent_symbol"] == "pkg/Bar#"
 
     # 2. Add diagnostics
     diags = [
@@ -167,13 +167,13 @@ def test_clean_symbol_storage_and_querying(tmp_path):
     # 3. get_symbol_exact matches clean_symbol
     exact_by_clean = repo.symbols.get_symbol_exact("src.auth.service.py.AuthService.login()")
     assert exact_by_clean is not None
-    assert exact_by_clean[0] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
-    assert exact_by_clean[10] == "src.auth.service.py.AuthService.login()"
+    assert exact_by_clean["symbol"] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
+    assert exact_by_clean["clean_symbol"] == "src.auth.service.py.AuthService.login()"
 
     # 4. Search by keyword on clean_symbol
     results_kw = repo.symbols.search_symbols_keyword("AuthService.login")
     assert len(results_kw) == 1
-    assert results_kw[0][0] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
+    assert results_kw[0]["symbol"] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
 
     # 5. Bulk upsert preserves and computes clean_symbol
     repo.symbols.upsert_symbols_bulk([

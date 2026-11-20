@@ -263,7 +263,7 @@ def resolve_symbol_in_repo(repository, target: str) -> Optional[tuple]:
                         return (0 if exact else 1, 1 if is_test else 0, len(c[0]))
 
                     candidates.sort(key=score)
-                    return candidates[0]
+                    return repository.symbols._row_to_symbol_dict(candidates[0])
 
     return None
 

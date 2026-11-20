@@ -1,6 +1,14 @@
-from typing import List, Union
+from typing import List, Union, Any
 from interface.formatters import format_lookup_file, format_lookup_symbol
 from utils.helpers import demangle_scip_symbol, resolve_symbol_in_repo, is_test_caller
+
+
+def _get_field(obj: Any, key: str, idx: int, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    if isinstance(obj, (list, tuple)) and len(obj) > idx:
+        return obj[idx]
+    return default
 
 
 def _lookup_single(target: str, repository) -> str:
@@ -14,9 +22,9 @@ def _lookup_single(target: str, repository) -> str:
         raw_matches = repository.symbols.search_symbols_like(target_normalized, 10)
         if not raw_matches:
             raw_matches = repository.symbols.search_symbols_keyword(target_normalized, 10)
-        matching_symbols = [s for s in raw_matches if not str(s[0]).startswith("local ")]
+        matching_symbols = [s for s in raw_matches if not str(_get_field(s, "symbol", 0, "")).startswith("local ")]
         if len(matching_symbols) == 1:
-            exact_symbol = repository.symbols.get_symbol_exact(matching_symbols[0][0])
+            exact_symbol = repository.symbols.get_symbol_exact(_get_field(matching_symbols[0], "symbol", 0))
             matching_symbols = []
 
     exact_file = repository.files.get_file_exact(target_normalized)
@@ -28,23 +36,24 @@ def _lookup_single(target: str, repository) -> str:
         if not matching_files:
             matching_files = repository.files.search_files_keyword(target_normalized, 10)
         if matching_files and len(matching_files) == 1:
-            exact_file = repository.files.get_file_exact(matching_files[0][0])
+            exact_file = repository.files.get_file_exact(_get_field(matching_files[0], "filepath", 0))
             matching_files = []
 
     md = []
 
     if exact_symbol:
-        occs_raw = repository.symbols.get_occurrences_for_symbol(exact_symbol[0])
+        sym_name = _get_field(exact_symbol, "symbol", 0, "")
+        occs_raw = repository.symbols.get_occurrences_for_symbol(sym_name)
         occs = [(o["filepath"], o["start_line"], o["end_line"], o["role"]) for o in occs_raw]
-        edges = repository.symbols.get_edges_for_symbol(exact_symbol[0])
+        edges = repository.symbols.get_edges_for_symbol(sym_name)
 
         # Batch query filepaths of connected symbols in edges
         other_syms = set()
         for e in edges:
             if not str(e[0]).startswith("local ") and not str(e[1]).startswith("local "):
-                if e[0] != exact_symbol[0]:
+                if e[0] != sym_name:
                     other_syms.add(e[0])
-                if e[1] != exact_symbol[0]:
+                if e[1] != sym_name:
                     other_syms.add(e[1])
         sym_fp_map = {}
         if other_syms:
@@ -52,7 +61,7 @@ def _lookup_single(target: str, repository) -> str:
             sym_fp_map = {s: meta["filepath"] for s, meta in meta_batch.items() if meta.get("filepath")}
 
         sym_md = format_lookup_symbol(exact_symbol, occs, edges, symbol_filepath_map=sym_fp_map)
-        diags = repository.symbols.get_diagnostics_for_symbol(exact_symbol[0])
+        diags = repository.symbols.get_diagnostics_for_symbol(sym_name)
         if diags:
             diag_lines = ["\n### Compiler & Analyzer Diagnostics", "| Line:Col | Severity | Code | Message |", "| :--- | :--- | :--- | :--- |"]
             for d in diags:
@@ -61,7 +70,7 @@ def _lookup_single(target: str, repository) -> str:
             sym_md += "\n" + "\n".join(diag_lines) + "\n"
 
         # Check for tests transitively covering this symbol
-        closure = repository.edges.get_transitive_closure(exact_symbol[0], max_depth=3)
+        closure = repository.edges.get_transitive_closure(sym_name, max_depth=3)
         up_syms = [item["symbol"] for item in closure.get("upstream", [])]
         if up_syms:
             meta_batch = repository.symbols.get_symbols_metadata_batch(up_syms)
@@ -85,9 +94,10 @@ def _lookup_single(target: str, repository) -> str:
         md.append(sym_md)
 
     if exact_file:
-        file_syms = repository.symbols.get_symbols_by_filepath_exact(exact_file[0])
+        file_path = _get_field(exact_file, "filepath", 0, "")
+        file_syms = repository.symbols.get_symbols_by_filepath_exact(file_path)
         file_md = format_lookup_file(exact_file, file_syms)
-        file_diags = repository.symbols.get_diagnostics_for_file(exact_file[0])
+        file_diags = repository.symbols.get_diagnostics_for_file(file_path)
         if file_diags:
             diag_lines = ["\n### Compiler & Analyzer Diagnostics", "| Symbol | Line:Col | Severity | Code | Message |", "| :--- | :--- | :--- | :--- | :--- |"]
             for d in file_diags:
@@ -101,16 +111,20 @@ def _lookup_single(target: str, repository) -> str:
         if matching_files:
             md.append("### Matching File Modules Found")
             for f in matching_files:
-                lang = f[2] if len(f) > 3 else (f[1] if len(f) > 1 else "Unknown")
-                status = f[4] if len(f) > 4 else (f[2] if len(f) > 2 else "Unknown")
-                md.append(f"- **{f[0]}** (Language: `{lang}`, Status: `{status}`)")
+                f_path = _get_field(f, "filepath", 0, "")
+                lang = _get_field(f, "language", 2, "Unknown")
+                status = _get_field(f, "status", 4, "Unknown")
+                md.append(f"- **{f_path}** (Language: `{lang}`, Status: `{status}`)")
             md.append("")
 
         if matching_symbols:
             md.append("### Matching Code Symbols Found")
             for s in matching_symbols:
-                clean_name = demangle_scip_symbol(s[0])
-                md.append(f"- **{clean_name}** (`{s[2]}` in `{s[1] or 'External'}`)")
+                s_sym = _get_field(s, "symbol", 0, "")
+                clean_name = _get_field(s, "clean_symbol", 11) or demangle_scip_symbol(s_sym)
+                s_kind = _get_field(s, "kind", 2, "UnspecifiedKind")
+                s_fp = _get_field(s, "filepath", 1, "External")
+                md.append(f"- **{clean_name}** (`{s_kind}` in `{s_fp or 'External'}`)")
             md.append("")
 
         if not matching_files and not matching_symbols:

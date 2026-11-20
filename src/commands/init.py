@@ -11,37 +11,14 @@ from engines.ffi_linker import FfiLinker
 from engines.registry import LanguageRegistry
 from utils.session import get_project_root
 
-import importlib
-
-# Explicit list of CLI command modules (replaces pkgutil-based discovery in
-# the old commands.registry module). Order = order shown in --help.
-COMMANDS = [
-    "analyze",
-    "audit",
-    "clear_pending",
-    "graph",
-    "impact",
-    "init",
-    "mcp",
-    "report",
-    "set_fields",
-    "set_status",
-    "watch",
-]
-
-
-def register_all(subparsers) -> None:
-    """Register every CLI subcommand listed in COMMANDS."""
-    for module_name in COMMANDS:
-        mod = importlib.import_module(f"commands.{module_name}")
-        mod.register(subparsers)
-
-
-def register(subparsers):
+def register_init_subcommand(subparsers):
     p = subparsers.add_parser("init", help="Initialize workspace and index symbols")
     p.add_argument("project_root", nargs="?", default=".", help="Project root directory")
     p.add_argument("--force", action="store_true", help="Force clean rebuild: delete DB and re-index from scratch")
     p.set_defaults(func=cmd_init)
+
+
+register = register_init_subcommand
 
 
 def _select_languages(languages):

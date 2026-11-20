@@ -16,8 +16,8 @@ class BaseViolationChecker(ABC):
     def check(
         self,
         symbol_classifications: Dict,
-        all_edges: List[Dict],
-        config: Dict,
+        all_edges: Optional[List[Dict]] = None,
+        config: Optional[Dict] = None,
         filepath_filter: Optional[str] = None,
         propagation_sources: Optional[Dict] = None,
         snapshot: Optional["AuditSnapshot"] = None

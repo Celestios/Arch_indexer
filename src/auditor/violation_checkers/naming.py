@@ -23,14 +23,9 @@ class NamingViolationChecker(BaseViolationChecker):
         propagation_sources: Optional[Dict] = None,
         snapshot: Optional[Any] = None
     ) -> List[Dict[str, Any]]:
-        # Backwards compatibility if repository is passed as first positional arg
-        if not isinstance(symbol_classifications, dict) and hasattr(symbol_classifications, "files"):
-            symbol_classifications, all_edges, config, filepath_filter, propagation_sources = (
-                all_edges, config, filepath_filter, propagation_sources, snapshot
-            )
-            snapshot = None
-
         violations = []
+        if not config:
+            return violations
         naming_rules = []
         for prefix, prefix_conf in config.items():
             rules = prefix_conf.get("rules", [])

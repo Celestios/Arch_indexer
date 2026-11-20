@@ -28,15 +28,9 @@ class DependencyViolationChecker(BaseViolationChecker):
         propagation_sources: Optional[Dict] = None,
         snapshot: Optional["AuditSnapshot"] = None
     ) -> List[Dict[str, Any]]:
-        # Backwards compatibility if repository is passed as first positional arg
-        if not isinstance(symbol_classifications, dict) and hasattr(symbol_classifications, "files"):
-            symbol_classifications, all_edges, config, filepath_filter, propagation_sources = (
-                all_edges, config, filepath_filter, propagation_sources, snapshot
-            )
-            snapshot = None
-
         violations = []
-        for edge in all_edges:
+        edges_to_check = all_edges or []
+        for edge in edges_to_check:
             source_sym, target_sym = edge["source"], edge["target"]
             if source_sym not in symbol_classifications:
                 continue
@@ -141,7 +135,7 @@ class DependencyViolationChecker(BaseViolationChecker):
         barriers = field_conf.get("barriers", [])
         if not barriers:
             return None
-        barrier_field = field_conf.get("barrier_field")
+        barrier_field = field_conf.get("barrier_field", "architectural_role") or "architectural_role"
 
         if snapshot is not None:
             incoming = snapshot.get_incoming(target_sym)

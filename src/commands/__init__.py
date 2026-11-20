@@ -1,3 +1,5 @@
+import importlib
+
 from commands.init import cmd_init
 from commands.audit import cmd_audit
 from commands.report import cmd_report
@@ -9,7 +11,35 @@ from commands.set_fields import cmd_set_fields
 from commands.clear_pending import cmd_clear_pending
 from commands.mcp import cmd_mcp
 
+# Explicit list of CLI command modules. Order = order shown in --help.
+COMMANDS = [
+    "analyze",
+    "audit",
+    "clear_pending",
+    "graph",
+    "impact",
+    "init",
+    "mcp",
+    "report",
+    "set_fields",
+    "set_status",
+    "watch",
+]
+
+
+def register_all(subparsers) -> None:
+    """Register every CLI subcommand listed in COMMANDS."""
+    for module_name in COMMANDS:
+        mod = importlib.import_module(f"commands.{module_name}")
+        if hasattr(mod, "register"):
+            mod.register(subparsers)
+        elif hasattr(mod, f"register_{module_name}_subcommand"):
+            getattr(mod, f"register_{module_name}_subcommand")(subparsers)
+
+
 __all__ = [
+    "COMMANDS",
+    "register_all",
     "cmd_init",
     "cmd_audit",
     "cmd_report",
