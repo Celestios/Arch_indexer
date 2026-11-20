@@ -15,6 +15,7 @@ from engines.treesitter.rules import StructuralRuleChecker
 from engines.treesitter.metrics import MetricsCalculator
 from engines.treesitter.control_flow import ControlFlowAnalyzer
 from engines.treesitter.types_extractor import TypesExtractor
+from engines.registry import LanguageRegistry
 
 
 class TreesitterEngine:
@@ -127,33 +128,18 @@ class TreesitterEngine:
         occurrences_to_insert = []
         superseded_treesitter_symbols = []
 
-        from utils.helpers import demangle_scip_symbol
+        from engines.reconciler import reconcile_symbol_id
 
         for decl in declarations:
             # If a SCIP symbol exists for this declaration (via clean_symbol or occurrence coordinate), keep SCIP's symbol ID
-            target_symbol_id = clean_to_existing.get(decl.clean_symbol)
-            if not target_symbol_id:
-                # 1. Exact line match
-                target_symbol_id = line_to_existing.get(decl.start_line)
-            if not target_symbol_id:
-                # 2. Fuzzy line match window (+/- 2 lines) with leaf name match (e.g. for decorators/multiline signatures)
-                decl_leaf = decl.name.lower().replace("_", "")
-                min_delta = 999
-                best_match = None
-                for sym_id, s_line in occ_list:
-                    delta = abs(decl.start_line - s_line)
-                    if delta <= 2:
-                        scip_clean = demangle_scip_symbol(sym_id)
-                        scip_leaf = re.split(r"[/:\\.#]", scip_clean.rstrip("()").replace("().", ""))[-1].lower().replace("_", "")
-                        if scip_leaf == decl_leaf:
-                            if delta < min_delta:
-                                min_delta = delta
-                                best_match = sym_id
-                if best_match:
-                    target_symbol_id = best_match
-
-            if not target_symbol_id:
-                target_symbol_id = decl.clean_symbol
+            target_symbol_id = reconcile_symbol_id(
+                clean_symbol=decl.clean_symbol,
+                start_line=decl.start_line,
+                clean_to_existing=clean_to_existing,
+                line_to_existing=line_to_existing,
+                occ_list=occ_list,
+                decl_name=decl.name,
+            ) or decl.clean_symbol
 
             decl.symbol = target_symbol_id
 
@@ -233,7 +219,7 @@ class TreesitterEngine:
             import os
             IGNORE_DIRS = {'.git', 'target', 'build', '.dart_tool', 'node_modules', '.venv', '__pycache__', '.arch', 'dist', 'bin'}
             target_roots = [project_root / d for d in include_dirs] if include_dirs else [project_root]
-            valid_exts = set(TreesitterLoader.EXTENSION_MAP.keys())
+            valid_exts = LanguageRegistry.list_extensions()
 
             for root_path in target_roots:
                 if not root_path.exists():

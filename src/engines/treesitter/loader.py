@@ -6,6 +6,8 @@ from pathlib import Path
 import threading
 from typing import Dict, Optional, Tuple, Any
 
+from engines.registry import LanguageRegistry
+
 try:
     import tree_sitter
 except ImportError:
@@ -19,35 +21,10 @@ class TreesitterLoader:
     _lock = threading.Lock()
     _local = threading.local()
 
-    # Map file extensions to normalized language names
-    EXTENSION_MAP: Dict[str, str] = {
-        ".py": "python",
-        ".pyi": "python",
-        ".rs": "rust",
-        ".ts": "typescript",
-        ".tsx": "tsx",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".mjs": "javascript",
-        ".cjs": "javascript",
-        ".go": "go",
-        ".java": "java",
-        ".c": "c",
-        ".h": "c",
-        ".cpp": "cpp",
-        ".hpp": "cpp",
-        ".cc": "cpp",
-        ".cxx": "cpp",
-        ".cs": "csharp",
-        ".rb": "ruby",
-        ".dart": "dart",
-    }
-
     @classmethod
     def detect_language(cls, filepath: str | Path) -> Optional[str]:
-        """Detect language from file path or extension."""
-        ext = Path(filepath).suffix.lower()
-        return cls.EXTENSION_MAP.get(ext)
+        """Detect language from file path or extension via unified LanguageRegistry."""
+        return LanguageRegistry.detect_language(filepath)
 
     @classmethod
     def is_available(cls) -> bool:

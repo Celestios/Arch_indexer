@@ -1,7 +1,8 @@
+import pytest
 from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
-from engines.scip_wrapper import ScipWrapper
+from engines.scip.wrapper import ScipWrapper
 
 def setup_workspace(tmp_path):
     initialize_workspace(tmp_path)
@@ -9,6 +10,7 @@ def setup_workspace(tmp_path):
     repository = Repository(db_conn)
     return repository, db_conn, tmp_path
 
+@pytest.mark.skip(reason="Edge weight calculation removed from ScipWrapper in eeca669 (assigned during audit phase)")
 def test_edge_weight_calculation():
     config = {
         "lib/ui": {

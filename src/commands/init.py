@@ -8,6 +8,7 @@ from db.repository import Repository
 from engines.scip.wrapper import ScipWrapper
 from engines.treesitter import TreesitterEngine
 from engines.ffi_linker import FfiLinker
+from engines.registry import LanguageRegistry
 from utils.session import get_project_root
 
 import importlib
@@ -87,7 +88,7 @@ def _select_include_dirs(project_root, arch_dir, force: bool = False):
             return configured_dirs
 
     skip_dirs = {".git", ".arch", ".venv", "__pycache__", "node_modules", ".mypy_cache", ".pytest_cache", "build", "dist"}
-    code_exts = {".rs", ".dart", ".py", ".go", ".js", ".ts", ".java"}
+    code_exts = LanguageRegistry.list_extensions()
 
     code_dirs = set()
     for ext in code_exts:

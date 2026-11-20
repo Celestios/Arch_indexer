@@ -172,17 +172,18 @@ class IndexIngester:
         print(f"[SCIP Ingest] Ingesting {total_symbols} symbols from {len(changed_files)} changed files...")
 
         existing_symbols = {}
-        existing_by_clean = {}
-        existing_by_line = {}
-        existing_occs_by_fp = collections.defaultdict(list)
+        clean_to_existing_by_fp = collections.defaultdict(dict)
+        line_to_existing_by_fp = collections.defaultdict(dict)
+        occs_by_fp = collections.defaultdict(list)
         from utils.helpers import demangle_scip_symbol
+        from engines.reconciler import reconcile_symbol_id
         if changed_files:
             existing_symbols = repository.symbols.get_symbols_by_filepaths(list(changed_set))
             for sid, sdata in existing_symbols.items():
                 fp = sdata.get("filepath")
                 csym = sdata.get("clean_symbol") or sid
                 if fp and csym:
-                    existing_by_clean[(fp, csym)] = (sid, sdata)
+                    clean_to_existing_by_fp[fp][csym] = sid
 
             # Query existing definition occurrences before they are cleared to match by start_line
             placeholders = ",".join("?" for _ in changed_set)
@@ -193,8 +194,8 @@ class IndexIngester:
                 ).fetchall()
                 for sid, fp, s_line in occ_rows:
                     if sid in existing_symbols:
-                        existing_by_line[(fp, s_line)] = (sid, existing_symbols[sid])
-                        existing_occs_by_fp[fp].append((sid, s_line, existing_symbols[sid]))
+                        line_to_existing_by_fp[fp][s_line] = sid
+                        occs_by_fp[fp].append((sid, s_line))
 
         # Map SCIP symbol definition lines from parsed occurrences
         scip_def_lines = {}
@@ -236,31 +237,21 @@ class IndexIngester:
 
         for sym_id, sym in filtered_symbols.items():
             sym_fp = sym.get("filepath")
-            existing_entry = None
+            existing_id = None
             if sym_id in existing_symbols:
-                existing_entry = (sym_id, existing_symbols[sym_id])
+                existing_id = sym_id
             elif sym_fp:
                 clean = demangle_scip_symbol(sym["symbol"])
-                existing_entry = existing_by_clean.get((sym_fp, clean))
-                if not existing_entry:
-                    s_line = scip_def_lines.get((sym_fp, sym_id))
-                    if s_line is not None:
-                        # 1. Exact line match
-                        existing_entry = existing_by_line.get((sym_fp, s_line))
-                        # 2. Fuzzy line match window (+/- 2 lines) with leaf name match
-                        if not existing_entry:
-                            scip_leaf = re.split(r"[/:\\.#]", clean.rstrip("()").replace("().", ""))[-1].lower().replace("_", "")
-                            min_delta = 999
-                            for ex_id, ex_line, ex_data in existing_occs_by_fp.get(sym_fp, []):
-                                delta = abs(s_line - ex_line)
-                                if delta <= 2:
-                                    ex_clean = ex_data.get("clean_symbol") or ex_id
-                                    ex_leaf = re.split(r"[/:\\.#]", ex_clean.rstrip("()").replace("().", ""))[-1].lower().replace("_", "")
-                                    if ex_leaf == scip_leaf and delta < min_delta:
-                                        min_delta = delta
-                                        existing_entry = (ex_id, ex_data)
+                s_line = scip_def_lines.get((sym_fp, sym_id))
+                existing_id = reconcile_symbol_id(
+                    clean_symbol=clean,
+                    start_line=s_line,
+                    clean_to_existing=clean_to_existing_by_fp.get(sym_fp, {}),
+                    line_to_existing=line_to_existing_by_fp.get(sym_fp, {}),
+                    occ_list=occs_by_fp.get(sym_fp, []),
+                )
 
-            existing_id, existing = existing_entry if existing_entry else (None, None)
+            existing = existing_symbols.get(existing_id) if existing_id else None
             if existing_id and existing_id != sym_id:
                 superseded_ts_symbols.add(existing_id)
 
