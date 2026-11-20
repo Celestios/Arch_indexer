@@ -20,7 +20,6 @@ import tree_sitter
 from engines.treesitter.loader import TreesitterLoader
 from engines.treesitter.annotations import AnnotationExtractor
 from engines.treesitter.metrics import MetricsCalculator
-from engines.treesitter.types_extractor import TypesExtractor
 
 
 class SymbolDeclaration:

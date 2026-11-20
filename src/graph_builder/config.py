@@ -81,7 +81,8 @@ class CircuitConfig:
         cfg = cls()
         target_path = config_path
         if not target_path:
-            for cand in ("circuit_config.json", os.path.join(".arch", "circuit_config.json")):
+            packaged_cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "circuit_config.json")
+            for cand in ("circuit_config.json", os.path.join(".arch", "circuit_config.json"), packaged_cfg):
                 if os.path.exists(cand):
                     target_path = cand
                     break

@@ -1,7 +1,7 @@
 import sys
 import argparse
 
-from commands.registry import register_all
+from commands.init import register_all
 
 
 if sys.platform == "win32":

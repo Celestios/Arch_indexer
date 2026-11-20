@@ -11,7 +11,7 @@ from pathlib import Path
 from .types import NodeType, EdgeType, NODE_COLORS, NODE_SIZES, EDGE_COLORS
 from .entities import GraphNode, GraphEdge
 from ..serialization.compressor import compress_circuit_data
-from ..ingestion.code_extractor import CodeExtractor
+from utils.code_extractor import CodeExtractor
 
 
 class GraphModel:

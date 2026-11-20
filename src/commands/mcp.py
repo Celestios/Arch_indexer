@@ -160,11 +160,6 @@ def cmd_mcp(args):
     except Exception:
         pass
 
-    # Ensure src is in sys.path
-    src_dir = Path(__file__).resolve().parent.parent
-    if str(src_dir) not in sys.path:
-        sys.path.insert(0, str(src_dir))
-
     lock = read_lock(global_arch_dir)
     port = lock.get("port", 0) if lock else req_port
     url = f"http://127.0.0.1:{port}" if port > 0 else "stdio"

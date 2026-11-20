@@ -1,4 +1,3 @@
-import sys
 import json
 import re
 import collections
@@ -13,9 +12,6 @@ try:
 except ImportError:
     import scip_pb2
 
-src_dir = Path(__file__).resolve().parent.parent.parent
-if str(src_dir) not in sys.path:
-    sys.path.insert(0, str(src_dir))
 from change_tracker.tracker import ChangeTracker
 
 

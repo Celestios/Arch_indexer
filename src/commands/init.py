@@ -5,10 +5,35 @@ from pathlib import Path
 from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
-from engines.scip_wrapper import ScipWrapper
+from engines.scip.wrapper import ScipWrapper
 from engines.treesitter import TreesitterEngine
 from engines.ffi_linker import FfiLinker
 from utils.session import get_project_root
+
+import importlib
+
+# Explicit list of CLI command modules (replaces pkgutil-based discovery in
+# the old commands.registry module). Order = order shown in --help.
+COMMANDS = [
+    "analyze",
+    "audit",
+    "clear_pending",
+    "graph",
+    "impact",
+    "init",
+    "mcp",
+    "report",
+    "set_fields",
+    "set_status",
+    "watch",
+]
+
+
+def register_all(subparsers) -> None:
+    """Register every CLI subcommand listed in COMMANDS."""
+    for module_name in COMMANDS:
+        mod = importlib.import_module(f"commands.{module_name}")
+        mod.register(subparsers)
 
 
 def register(subparsers):

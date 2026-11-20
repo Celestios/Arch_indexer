@@ -7,7 +7,7 @@ from typing import Set
 from db.connection import DbConnection
 from db.repository import Repository
 from engines.registry import LanguageRegistry
-from engines.scip_wrapper import ScipWrapper
+from engines.scip.wrapper import ScipWrapper
 from engines.treesitter import TreesitterEngine
 from change_tracker.tracker import ChangeTracker
 from auditor.analyzer import Auditor

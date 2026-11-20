@@ -20,7 +20,7 @@ from change_tracker.watcher import (
 from db.connection import DbConnection
 from db.repository import Repository
 from engines.registry import LanguageRegistry
-from engines.scip_wrapper import ScipWrapper
+from engines.scip.wrapper import ScipWrapper
 from engines.treesitter import TreesitterEngine
 from utils.exclusions import load_include_dirs
 

@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Union
 
 from setup.initializer import initialize_workspace, sync_rules_to_db
-from engines.scip_wrapper import ScipWrapper
+from engines.scip.wrapper import ScipWrapper
 from engines.treesitter import TreesitterEngine
 from auditor.analyzer import Auditor
 from utils.helpers import demangle_scip_symbol
