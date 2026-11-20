@@ -8,6 +8,7 @@ Unit tests for the upgraded graph_builder modules:
 
 import os
 import pytest
+from graph_builder.ingestion.scip_parser import ScipParser
 from graph_builder.ingestion.db_reader import DatabaseReader
 from graph_builder.domain.model import GraphModel, NodeType, EdgeType, GraphNode, GraphEdge
 from graph_builder.layout.circuit_layout import CircuitLayoutEngine
@@ -25,7 +26,7 @@ def run_analysis(
 ) -> AnalysisResult:
 ```
 Analyzes code against rules."""
-    ports1 = DatabaseReader.parse_signature_ports(docstring=doc1)
+    ports1 = ScipParser.parse_signature_ports(docstring=doc1)
     assert len(ports1["inputs"]) == 2
     assert ports1["inputs"][0]["name"] == "rules"
     assert ports1["inputs"][0]["type"] == "List[Rule]"
@@ -35,7 +36,7 @@ Analyzes code against rules."""
 
     # 2. Simple signature without return type
     doc2 = "```python\ndef helper(x: int, y: str):\n```"
-    ports2 = DatabaseReader.parse_signature_ports(docstring=doc2)
+    ports2 = ScipParser.parse_signature_ports(docstring=doc2)
     assert len(ports2["inputs"]) == 2
     assert ports2["inputs"][0] == {"name": "x", "type": "int"}
     assert ports2["inputs"][1] == {"name": "y", "type": "str"}
@@ -43,7 +44,7 @@ Analyzes code against rules."""
 
     # 3. Direct signature string
     sig3 = "(data: bytes, timeout: float = 5.0) -> bool"
-    ports3 = DatabaseReader.parse_signature_ports(signature_str=sig3)
+    ports3 = ScipParser.parse_signature_ports(signature_str=sig3)
     assert len(ports3["inputs"]) == 2
     assert ports3["inputs"][0] == {"name": "data", "type": "bytes"}
     assert ports3["inputs"][1] == {"name": "timeout", "type": "float"}

@@ -36,7 +36,7 @@ class AuditSnapshot:
         if symbols is None:
             symbols = repository.graph.get_all_symbols()
         if edges is None:
-            edges = repository.graph.get_all_edges_with_relation()
+            edges = repository.graph.get_all_edges()
         if files is None:
             files = repository.workspace.get_all_files_metadata()
 

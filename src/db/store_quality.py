@@ -1,13 +1,9 @@
 import uuid
 import logging
 from typing import Dict, List, Any, Optional
-from db.base import BaseRepository, UPSERT_VIOLATION_SQL
+from db.base import BaseRepository, UPSERT_VIOLATION_SQL, normalize_path
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_path(filepath: Optional[str]) -> Optional[str]:
-    return filepath.replace("\\", "/") if filepath else None
 
 
 class QualityStore(BaseRepository):
@@ -46,7 +42,7 @@ class QualityStore(BaseRepository):
         origin: str = "automatic"
     ) -> str:
         """Inserts a single violation."""
-        norm_fp = _normalize_path(filepath)
+        norm_fp = normalize_path(filepath)
         self._execute(
             UPSERT_VIOLATION_SQL,
             (violation_id, rule_id, symbol, norm_fp, line, message, origin)
@@ -62,7 +58,7 @@ class QualityStore(BaseRepository):
                 v.get("violation_id") or f"viol_{uuid.uuid4().hex[:12]}",
                 v.get("rule_id"),
                 v.get("symbol"),
-                _normalize_path(v["filepath"]),
+                normalize_path(v["filepath"]),
                 v["line"],
                 v["message"],
                 v.get("origin", "automatic"),
@@ -85,7 +81,7 @@ class QualityStore(BaseRepository):
         """
         params: List[Any] = []
         if filepath:
-            norm_fp = _normalize_path(filepath)
+            norm_fp = normalize_path(filepath)
             query += " AND v.filepath = ?"
             params.append(norm_fp)
         if rule_id:
@@ -100,7 +96,7 @@ class QualityStore(BaseRepository):
                 "rule_id": r["rule_id"],
                 "rule_description": r.get("description") or "Manual Logical Audit",
                 "symbol": r.get("symbol"),
-                "filepath": _normalize_path(r["filepath"]),
+                "filepath": normalize_path(r["filepath"]),
                 "line": r["line"],
                 "message": r["message"],
                 "severity": r.get("severity") or "WARNING",
@@ -109,52 +105,31 @@ class QualityStore(BaseRepository):
             })
         return res
 
-    def clear_violations(
+    def delete_violations(
         self,
+        filepath: Optional[str] = None,
         filepath_prefix: Optional[str] = None,
         rule_ids: Optional[List[str]] = None,
         origin: Optional[str] = None
     ):
-        """Selectively clears violations."""
+        """Selectively deletes violations matching filepath, prefix, rule_ids, or origin."""
         query = "DELETE FROM compliance_violations WHERE 1=1"
         params: List[Any] = []
         if origin:
             query += " AND origin = ?"
             params.append(origin)
+        if filepath:
+            norm_fp = normalize_path(filepath)
+            query += " AND filepath = ?"
+            params.append(norm_fp)
         if filepath_prefix:
-            norm_prefix = _normalize_path(filepath_prefix)
+            norm_prefix = normalize_path(filepath_prefix)
             query += " AND filepath LIKE ?"
             params.append(f"{norm_prefix}%")
         if rule_ids:
             query += " AND rule_id IN (SELECT UNNEST(?::VARCHAR[]))"
             params.append(rule_ids)
         self._execute(query, params)
-
-    def delete_manual_violations(self, filepath: str):
-        """Deletes manual violations for a file."""
-        norm_fp = _normalize_path(filepath)
-        self._execute(
-            "DELETE FROM compliance_violations WHERE filepath = ? AND origin = 'manual'",
-            (norm_fp,)
-        )
-
-    def delete_automatic_violations(self, rule_ids: Optional[List[str]] = None):
-        """Deletes automatic violations, optionally filtered by rule IDs."""
-        if rule_ids:
-            self._execute(
-                "DELETE FROM compliance_violations WHERE origin = 'automatic' AND rule_id IN (SELECT UNNEST(?::VARCHAR[]))",
-                (rule_ids,)
-            )
-        else:
-            self._execute("DELETE FROM compliance_violations WHERE origin = 'automatic'")
-
-    def delete_automatic_violations_for_path(self, filepath_prefix: str):
-        """Deletes automatic violations for files matching prefix."""
-        norm_p = _normalize_path(filepath_prefix)
-        self._execute(
-            "DELETE FROM compliance_violations WHERE origin = 'automatic' AND filepath LIKE ?",
-            (f"{norm_p}%",)
-        )
 
     # ------------------ Diagnostics Domain ------------------
 
@@ -164,7 +139,7 @@ class QualityStore(BaseRepository):
             return
         data = [
             (
-                _normalize_path(diag["filepath"]),
+                normalize_path(diag["filepath"]),
                 diag.get("symbol"),
                 diag["line"],
                 diag.get("col", 0),
@@ -182,55 +157,47 @@ class QualityStore(BaseRepository):
         if progress_callback:
             progress_callback(len(data), len(data))
 
-    def add_diagnostics_bulk(self, diagnostics_list: List[Dict[str, Any]], progress_callback=None):
-        """Alias for record_diagnostics_bulk."""
-        self.record_diagnostics_bulk(diagnostics_list, progress_callback)
-
-    def upsert_diagnostics_bulk(self, diagnostics_list: List[Dict[str, Any]], progress_callback=None):
-        """Alias for record_diagnostics_bulk."""
-        self.record_diagnostics_bulk(diagnostics_list, progress_callback)
-
     def get_diagnostics_for_file(self, filepath: str) -> List[Dict[str, Any]]:
         """Returns diagnostics for a given file."""
-        norm_fp = _normalize_path(filepath)
+        norm_fp = normalize_path(filepath)
         rows = self._fetch_all(
             "SELECT filepath, symbol, line, col, severity, code, message, tags FROM diagnostics WHERE filepath = ?",
             (norm_fp,)
         )
         for r in rows:
-            r["filepath"] = _normalize_path(r["filepath"])
-        return rows
-
-    def get_diagnostics_for_symbol(self, symbol: str) -> List[Dict[str, Any]]:
-        """Returns diagnostics attached to a symbol."""
-        rows = self._fetch_all(
-            "SELECT filepath, symbol, line, col, severity, code, message, tags FROM diagnostics WHERE symbol = ?",
-            (symbol,)
-        )
-        for r in rows:
-            r["filepath"] = _normalize_path(r["filepath"])
+            r["filepath"] = normalize_path(r["filepath"])
         return rows
 
     def get_diagnostics_batch(self, symbols: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-        """Batch fetch diagnostics for multiple symbols."""
+        """Batch fetch diagnostics mapped by symbol."""
         if not symbols:
             return {}
         rows = self._fetch_all(
             "SELECT filepath, symbol, line, col, severity, code, message, tags FROM diagnostics WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))",
             (symbols,)
         )
-        result: Dict[str, List[Dict[str, Any]]] = {}
+        mapping: Dict[str, List[Dict[str, Any]]] = {}
         for r in rows:
-            r["filepath"] = _normalize_path(r["filepath"])
-            sym = r["symbol"]
-            result.setdefault(sym, []).append(r)
-        return result
+            r["filepath"] = normalize_path(r["filepath"])
+            sym = r.get("symbol")
+            if sym:
+                mapping.setdefault(sym, []).append(r)
+        return mapping
 
-    def delete_diagnostics_for_file(self, filepath: str):
-        """Deletes diagnostics for a given file."""
-        norm_fp = _normalize_path(filepath)
-        self._execute("DELETE FROM diagnostics WHERE filepath = ?", (norm_fp,))
+    def get_diagnostics_for_symbol(self, symbol: str) -> List[Dict[str, Any]]:
+        """Returns diagnostics specifically tagged with a symbol."""
+        rows = self._fetch_all(
+            "SELECT filepath, symbol, line, col, severity, code, message, tags FROM diagnostics WHERE symbol = ?",
+            (symbol,)
+        )
+        for r in rows:
+            r["filepath"] = normalize_path(r["filepath"])
+        return rows
 
     def delete_diagnostics_for_files(self, filepaths: List[str]):
         """Deletes diagnostics for multiple files."""
         self._delete_by_filepaths("diagnostics", filepaths)
+
+    def delete_diagnostics_for_file(self, filepath: str):
+        """Deletes diagnostics for a single file."""
+        self.delete_diagnostics_for_files([filepath])

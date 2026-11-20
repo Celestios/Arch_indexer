@@ -24,7 +24,7 @@ def handle_set_status(
         return f"Error: File '{filepath}' is not registered in the database."
 
     repository.workspace.update_file_manual_status(resolved, status_upper, justification)
-    repository.quality.delete_manual_violations(resolved)
+    repository.quality.delete_violations(filepath=resolved, origin="manual")
 
     if status_upper == "VIOLATION_DETECTED":
         violation_text = f"manual_logical_audit_{resolved}_{justification}"

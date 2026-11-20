@@ -110,17 +110,17 @@ class TreesitterEngine:
             c_sym = data.get("clean_symbol") or sym_id
             clean_to_existing[c_sym] = sym_id
 
-        # Also get existing definition occurrences for this file to reconcile by line
+        # Also get existing definition coordinates for this file to reconcile by line
         line_to_existing: Dict[int, str] = {}
         occ_list: List[tuple] = []
-        occ_rows = repository.graph.get_definition_occurrences_for_file(norm_fp)
-        for r in occ_rows:
-            line_to_existing[r["start_line"]] = r["symbol"]
-            occ_list.append((r["symbol"], r["start_line"]))
+        for sym_id, data in existing.items():
+            s_line = data.get("start_line")
+            if s_line is not None:
+                line_to_existing[s_line] = sym_id
+                occ_list.append((sym_id, s_line))
 
         # 3. Upsert symbols
         symbols_to_upsert = []
-        occurrences_to_insert = []
 
         from engines.reconciler import reconcile_symbol_id
 
@@ -146,30 +146,16 @@ class TreesitterEngine:
                 "docstring": decl.docstring,
                 "body_hash": decl.body_hash,
                 "parent_symbol": decl.parent_symbol,
-                "code_block": decl.code_block,
                 "start_line": decl.start_line,
                 "start_col": decl.start_col,
                 "end_line": decl.end_line,
                 "end_col": decl.end_col,
-            })
-
-            # Occurrence for definition (Role = 1)
-            occurrences_to_insert.append({
-                "symbol": target_symbol_id,
-                "filepath": norm_fp,
-                "start_line": decl.start_line,
-                "start_col": decl.start_col,
-                "end_line": decl.end_line,
-                "end_col": decl.end_col,
-                "role": 1,  # SCIP SymbolRole.Definition
             })
 
         # Atomic transaction for multi-table writes
-        with repository.db_conn.transaction():
+        with repository.transaction():
             repository.workspace.upsert_file(norm_fp, sha256_hash, lang)
             repository.graph.upsert_symbols_bulk(symbols_to_upsert)
-            repository.graph.delete_occurrences_by_role(norm_fp, 1)
-            repository.graph.record_occurrences_bulk(occurrences_to_insert)
 
         return declarations
 

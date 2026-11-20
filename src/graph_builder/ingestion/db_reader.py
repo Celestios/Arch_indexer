@@ -22,7 +22,7 @@ class DatabaseReader:
     def __init__(self, db_path: str = ".arch/arch.db", repository: Optional[Repository] = None, db_conn: Optional[DbConnection] = None):
         if repository is not None:
             self.repository = repository
-            self.db_conn = repository.db_conn
+            self.db_conn = repository._db_conn
             self.db_path = str(self.db_conn.db_path)
             self._own_conn = False
         elif db_conn is not None:
@@ -70,10 +70,6 @@ class DatabaseReader:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-
-    # Backwards-compatible static delegates
-    parse_signature_ports = staticmethod(ScipParser.parse_signature_ports)
-    parse_scip_symbol = staticmethod(ScipParser.parse_scip_symbol)
 
     def fetch_files(self) -> List[Dict[str, Any]]:
         """Fetches all tracked files using the workspace store."""
@@ -135,25 +131,16 @@ class DatabaseReader:
 
     def fetch_edges(self) -> List[Dict[str, Any]]:
         """Fetches edges with call line locations joined from occurrences/call_line."""
-        with self.db_conn.session() as conn:
-            query = """
-                SELECT e.source, e.target, e.relation, e.weight,
-                       COALESCE(e.call_line, o.start_line) AS line, o.start_col AS col
-                FROM edges e
-                LEFT JOIN symbols s ON e.source = s.symbol
-                LEFT JOIN occurrences o ON e.target = o.symbol AND s.filepath = o.filepath
-            """
-            rows = conn.execute(query).fetchall()
-
+        raw_edges = self.repository.graph.get_edges_with_locations()
         edges = []
-        for row in rows:
-            line = int(row[4]) if row[4] is not None else None
-            col = int(row[5]) if row[5] is not None else None
+        for row in raw_edges:
+            line = int(row["line"]) if row.get("line") is not None else None
+            col = int(row["col"]) if row.get("col") is not None else None
             edges.append({
-                "source": row[0],
-                "target": row[1],
-                "relation": row[2] or "Calls",
-                "weight": float(row[3]) if row[3] is not None else 1.0,
+                "source": row["source"],
+                "target": row["target"],
+                "relation": row.get("relation") or "Calls",
+                "weight": float(row.get("weight", 1.0)) if row.get("weight") is not None else 1.0,
                 "line": line,
                 "col": col,
             })
@@ -165,34 +152,18 @@ class DatabaseReader:
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Fetches occurrences matching optional filepath filter."""
-        with self.db_conn.session() as conn:
-            query = """
-                SELECT symbol, filepath, start_line, start_col, end_line, end_col, role
-                FROM occurrences
-            """
-            params = []
-            if filepath_filter:
-                query += " WHERE filepath LIKE ?"
-                norm_f = filepath_filter.replace("\\", "/")
-                params.append(f"%{norm_f}%")
-
-            query += " ORDER BY filepath, start_line, start_col"
-            if limit:
-                query += f" LIMIT {int(limit)}"
-
-            rows = conn.execute(query, params).fetchall()
-
+        raw_occs = self.repository.graph.get_occurrences_filtered(filepath_filter=filepath_filter, limit=limit)
         occurrences = []
-        for row in rows:
-            filepath = row[1] if row[1] else "unknown"
-            role = int(row[6])
+        for row in raw_occs:
+            filepath = row.get("filepath") or "unknown"
+            role = int(row["role"])
             occurrences.append({
-                "symbol": row[0],
+                "symbol": row["symbol"],
                 "filepath": filepath,
-                "start_line": int(row[2]),
-                "start_col": int(row[3]),
-                "end_line": int(row[4]),
-                "end_col": int(row[5]),
+                "start_line": int(row["start_line"]),
+                "start_col": int(row["start_col"]),
+                "end_line": int(row["end_line"]),
+                "end_col": int(row["end_col"]),
                 "role": role,
                 "is_definition": bool(role & 1),
                 "is_reference": bool(role & 8),

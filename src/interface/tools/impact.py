@@ -25,18 +25,9 @@ def is_class_symbol(repository, db_symbol: str) -> Tuple[bool, Optional[Dict[str
         return True, sym_record
     if db_symbol.endswith("#"):
         return True, sym_record
-    prefix = db_symbol if db_symbol.endswith("#") else db_symbol + "#"
-    with repository.graph.db_conn.session() as conn:
-        res = conn.execute(
-            """
-            SELECT count(*) FROM symbols
-            WHERE parent_symbol = ?
-               OR (symbol LIKE ? AND (kind IN ('Method', 'Constructor') OR symbol LIKE '%().'))
-            """,
-            (db_symbol, prefix + "%")
-        ).fetchone()
-        if res and res[0] > 0:
-            return True, sym_record
+    members = repository.graph.get_member_symbols(db_symbol)
+    if members:
+        return True, sym_record
     return False, sym_record
 
 
@@ -80,18 +71,8 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     prefix = db_symbol if db_symbol.endswith("#") else db_symbol + "#"
 
     # 1. Fetch member methods
-    with repository.graph.db_conn.session() as conn:
-        method_rows = conn.execute(
-            """
-            SELECT symbol, kind, signature, docstring FROM symbols
-            WHERE parent_symbol = ?
-               OR (symbol LIKE ? AND symbol LIKE '%().' AND symbol NOT LIKE '%.(%')
-            ORDER BY symbol
-            """,
-            (db_symbol, prefix + "%")
-        ).fetchall()
-
-    methods_list = [r[0] for r in method_rows]
+    method_rows = repository.graph.get_member_symbols(db_symbol)
+    methods_list = [r["symbol"] for r in method_rows if r.get("symbol")]
     public_methods = []
     for m in methods_list:
         clean_m = demangle_scip_symbol(m)
@@ -120,19 +101,14 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     constructor_sym = f"{prefix}__init__()."
     target_symbols = [db_symbol, constructor_sym]
 
-    with repository.graph.db_conn.session() as conn:
-        placeholders = ",".join("?" for _ in target_symbols)
-        direct_edges = conn.execute(
-            f"""
-            SELECT source, target, relation FROM edges
-            WHERE target IN ({placeholders})
-            """,
-            target_symbols
-        ).fetchall()
+    direct_edges = repository.graph.get_edges_by_targets(target_symbols)
 
     direct_usages = []
     seen_sources = set()
-    for src, tgt, rel in direct_edges:
+    for edge in direct_edges:
+        src = edge["source"]
+        tgt = edge["target"]
+        rel = edge.get("relation")
         if is_noisy_symbol(src) or src.startswith(prefix) or src in seen_sources:
             continue
         seen_sources.add(src)
@@ -160,22 +136,22 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     # Category 2: Interface Surface (Exposed Callers)
     md.append("### ── Interface Surface (Exposed Callers)")
     method_caller_map = {}
-    with repository.graph.db_conn.session() as conn:
-        for m_sym in methods_list:
-            clean_m = demangle_scip_symbol(m_sym)
-            short_m = clean_m.split(".")[-1]
-            rows = conn.execute(
-                "SELECT source, relation FROM edges WHERE target = ?",
-                (m_sym,)
-            ).fetchall()
-            ext_callers = []
-            for src, _ in rows:
-                if not is_noisy_symbol(src) and not src.startswith(prefix):
-                    clean_caller = demangle_scip_symbol(src)
-                    if clean_caller not in ext_callers:
-                        ext_callers.append(clean_caller)
-            if ext_callers:
-                method_caller_map[short_m] = ext_callers
+    all_caller_syms = set(seen_sources)
+
+    for m_sym in methods_list:
+        clean_m = demangle_scip_symbol(m_sym)
+        short_m = clean_m.split(".")[-1]
+        incoming = repository.graph.get_incoming_edges(m_sym)
+        ext_callers = []
+        for edge in incoming:
+            src = edge["source"]
+            if not is_noisy_symbol(src) and not src.startswith(prefix):
+                all_caller_syms.add(src)
+                clean_caller = demangle_scip_symbol(src)
+                if clean_caller not in ext_callers:
+                    ext_callers.append(clean_caller)
+        if ext_callers:
+            method_caller_map[short_m] = ext_callers
 
     if not method_caller_map:
         md.append("*No external callers recorded for member methods.*")
@@ -185,15 +161,6 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
             for c in sorted(callers):
                 md.append(f"  * Called by `{c}`")
     md.append("")
-
-    # Check for tests and entry points across all callers
-    all_caller_syms = set(seen_sources)
-    with repository.graph.db_conn.session() as conn:
-        for m_sym in methods_list:
-            rows = conn.execute("SELECT source FROM edges WHERE target = ?", (m_sym,)).fetchall()
-            for r in rows:
-                if not is_noisy_symbol(r[0]) and not r[0].startswith(prefix):
-                    all_caller_syms.add(r[0])
 
     if all_caller_syms:
         meta_callers = repository.graph.get_symbols_metadata_batch(list(all_caller_syms))
@@ -229,36 +196,33 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     # Category 3: Downstream Dependencies (Internal & Subsystem Coupling)
     md.append("### ── Downstream Dependencies (Per Method)")
     deps_found = False
-    with repository.graph.db_conn.session() as conn:
-        for m_sym in methods_list:
-            clean_m = demangle_scip_symbol(m_sym)
-            short_m = clean_m.split(".")[-1]
-            rows = conn.execute(
-                "SELECT target, relation FROM edges WHERE source = ?",
-                (m_sym,)
-            ).fetchall()
-            internal_calls = []
-            external_calls = []
-            for tgt, _ in rows:
-                if is_noisy_symbol(tgt):
-                    continue
-                clean_tgt = demangle_scip_symbol(tgt)
-                if tgt.startswith(prefix):
-                    tgt_short = clean_tgt.split(".")[-1]
-                    if tgt_short not in internal_calls:
-                        internal_calls.append(tgt_short)
-                else:
-                    if clean_tgt not in external_calls:
-                        external_calls.append(clean_tgt)
-            if internal_calls or external_calls:
-                deps_found = True
-                md.append(f"- **{clean_focal}.{short_m}**:")
-                if internal_calls:
-                    int_str = ", ".join(f"`{c}`" for c in sorted(internal_calls))
-                    md.append(f"  * Internal Calls: {int_str}")
-                if external_calls:
-                    ext_str = ", ".join(f"`{c}`" for c in sorted(external_calls))
-                    md.append(f"  * External Subsystems: {ext_str}")
+    for m_sym in methods_list:
+        clean_m = demangle_scip_symbol(m_sym)
+        short_m = clean_m.split(".")[-1]
+        outgoing = repository.graph.get_outgoing_edges(m_sym)
+        internal_calls = []
+        external_calls = []
+        for edge in outgoing:
+            tgt = edge["target"]
+            if is_noisy_symbol(tgt):
+                continue
+            clean_tgt = demangle_scip_symbol(tgt)
+            if tgt.startswith(prefix):
+                tgt_short = clean_tgt.split(".")[-1]
+                if tgt_short not in internal_calls:
+                    internal_calls.append(tgt_short)
+            else:
+                if clean_tgt not in external_calls:
+                    external_calls.append(clean_tgt)
+        if internal_calls or external_calls:
+            deps_found = True
+            md.append(f"- **{clean_focal}.{short_m}**:")
+            if internal_calls:
+                int_str = ", ".join(f"`{c}`" for c in sorted(internal_calls))
+                md.append(f"  * Internal Calls: {int_str}")
+            if external_calls:
+                ext_str = ", ".join(f"`{c}`" for c in sorted(external_calls))
+                md.append(f"  * External Subsystems: {ext_str}")
 
     if not deps_found:
         md.append("*No downstream dependencies recorded.*")

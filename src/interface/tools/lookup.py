@@ -24,7 +24,7 @@ def _lookup_single(target: str, repository) -> str:
             raw_matches = repository.graph.search_symbols(target_normalized, 10)
         matching_symbols = [s for s in raw_matches if not str(_get_field(s, "symbol", 0, "")).startswith("local ")]
         if len(matching_symbols) == 1:
-            exact_symbol = repository.graph.get_symbol_exact(_get_field(matching_symbols[0], "symbol", 0))
+            exact_symbol = repository.graph.get_symbol(_get_field(matching_symbols[0], "symbol", 0))
             matching_symbols = []
 
     exact_file = repository.workspace.get_file(target_normalized)

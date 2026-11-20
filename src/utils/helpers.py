@@ -290,7 +290,7 @@ def resolve_symbol_in_repo(repository, target: str) -> Optional[tuple]:
         return None
 
     # 1. Exact match
-    exact = repository.graph.get_symbol_exact(target_clean)
+    exact = repository.graph.get_symbol(target_clean)
     if exact:
         return exact
 

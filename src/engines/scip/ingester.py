@@ -179,14 +179,18 @@ class IndexIngester:
                 csym = sdata.get("clean_symbol") or sid
                 if fp and csym:
                     clean_to_existing_by_fp[fp][csym] = sid
-
-            # Query existing definition occurrences before they are cleared to match by start_line
-            occ_rows = repository.graph.get_definition_occurrences_for_files(list(changed_set))
-            for r in occ_rows:
-                sid, fp, s_line = r["symbol"], r["filepath"], r["start_line"]
-                if sid in existing_symbols:
+                s_line = sdata.get("start_line")
+                if fp and s_line is not None:
                     line_to_existing_by_fp[fp][s_line] = sid
                     occs_by_fp[fp].append((sid, s_line))
+            for fp in changed_set:
+                for occ in repository.graph.get_occurrences_for_file(fp):
+                    if (occ.get("role", 0) & 1) != 0 and occ.get("symbol"):
+                        sid = occ["symbol"]
+                        s_line = occ["start_line"]
+                        if s_line not in line_to_existing_by_fp[fp]:
+                            line_to_existing_by_fp[fp][s_line] = sid
+                            occs_by_fp[fp].append((sid, s_line))
 
         # Map SCIP symbol definition lines from parsed occurrences
         scip_def_lines = {}
@@ -219,14 +223,12 @@ class IndexIngester:
                 sig = existing.get("signature") or sym.get("signature")
                 doc = existing.get("docstring") or sym.get("docstring")
                 parent_sym = existing.get("parent_symbol") or sym.get("parent_symbol")
-                code_block = existing.get("code_block") or sym.get("code_block")
                 body_hash = existing.get("body_hash") or sym.get("body_hash")
                 kind = existing.get("kind") or sym.get("kind")
             else:
                 sig = sym.get("signature")
                 doc = sym.get("docstring")
                 parent_sym = sym.get("parent_symbol")
-                code_block = sym.get("code_block")
                 body_hash = sym.get("body_hash")
                 kind = sym.get("kind")
 
@@ -237,7 +239,6 @@ class IndexIngester:
                 or (sig and existing.get("signature") != sig)
                 or (doc and existing.get("docstring") != doc)
                 or (parent_sym and existing.get("parent_symbol") != parent_sym)
-                or (code_block and existing.get("code_block") != code_block)
             ):
                 symbols_to_ingest.append({
                     "symbol": sym["symbol"],
@@ -248,7 +249,6 @@ class IndexIngester:
                     "docstring": doc,
                     "body_hash": effective_body_hash,
                     "parent_symbol": parent_sym,
-                    "code_block": code_block,
                 })
 
         skipped = total_symbols - len(symbols_to_ingest)
@@ -350,7 +350,7 @@ class IndexIngester:
         print(f"[SCIP Ingest] Writing {len(symbols_to_ingest)} symbols to database...")
         sym_chunk = 10_000
 
-        with repository.db_conn.transaction():
+        with repository.transaction():
             for i in range(0, len(symbols_to_ingest), sym_chunk):
                 chunk = symbols_to_ingest[i:i + sym_chunk]
                 repository.graph.upsert_symbols_bulk(chunk)

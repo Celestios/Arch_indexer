@@ -85,7 +85,7 @@ class TestAuditPipeline:
         repo.graph.get_all_symbols_with_metadata.return_value = symbols
         repo.graph.get_outgoing_edges.return_value = []
         repo.workspace.get_all_files_metadata.return_value = {}
-        repo.graph.get_all_edges_with_relation.return_value = edges
+        repo.graph.get_all_edges.return_value = edges
         repo.workspace.get_all_files_metadata.return_value = {
             "src/main.py": {"filepath": "src/main.py", "manual_fields": {}, "pending_audit": False,
                            "justification": "", "sha256": "abc", "status": "COMPLIANT",

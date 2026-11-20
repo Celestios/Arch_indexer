@@ -65,14 +65,14 @@ class TestRepositoryInterfaces:
                     'get_occurrences_for_symbol', 'upsert_symbols_bulk',
                     'get_symbols_in_file', 'recalculate_connection_weights',
                     'get_all_symbols', 'add_edge', 'get_incoming_edges',
-                    'get_outgoing_edges', 'delete_file', 'delete_files']
+                    'get_outgoing_edges', 'delete_symbols_for_files', 'delete_edges_for_files']
         for method in required:
             assert hasattr(GraphStore, method), f"Missing: {method}"
 
     def test_workspace_store_has_required_methods(self):
         from db.store_workspace import WorkspaceStore
         required = ['upsert_file', 'get_file', 'upsert_files_bulk',
-                    'update_file_manual_status', 'update_file_status',
+                    'update_file_manual_status', 'update_file_statuses',
                     'get_all_files_metadata', 'get_files_pending_audit_count',
                     'get_metadata', 'set_metadata', 'get_co_changes', 'record_co_changes']
         for method in required:
@@ -81,7 +81,7 @@ class TestRepositoryInterfaces:
     def test_quality_store_has_required_methods(self):
         from db.store_quality import QualityStore
         required = ['upsert_rule', 'add_violation', 'get_violations',
-                    'delete_manual_violations', 'delete_automatic_violations',
+                    'delete_violations',
                     'record_violations_bulk', 'get_diagnostics_for_file',
                     'record_diagnostics_bulk']
         for method in required:
@@ -102,3 +102,6 @@ class TestRepositoryInterfaces:
         assert hasattr(repo, 'graph')
         assert hasattr(repo, 'quality')
         assert hasattr(repo, 'analytics')
+        assert hasattr(repo, 'delete_files')
+        assert hasattr(repo, 'delete_file')
+        assert hasattr(repo, 'transaction')

@@ -95,7 +95,7 @@ def test_scip_primitives_ingestion(tmp_path):
     assert sym is not None
     assert sym["parent_symbol"] == "pkg/Bar#"
 
-    sym_exact = repo.graph.get_symbol_exact("pkg/Bar#baz().")
+    sym_exact = repo.graph.get_symbol("pkg/Bar#baz().")
     assert sym_exact is not None
     assert sym_exact["parent_symbol"] == "pkg/Bar#"
 
@@ -164,8 +164,8 @@ def test_clean_symbol_storage_and_querying(tmp_path):
     assert sym_by_clean is not None
     assert sym_by_clean["symbol"] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
 
-    # 3. get_symbol_exact matches clean_symbol
-    exact_by_clean = repo.graph.get_symbol_exact("src.auth.service.py.AuthService.login()")
+    # 3. get_symbol matches clean_symbol
+    exact_by_clean = repo.graph.get_symbol("src.auth.service.py.AuthService.login()")
     assert exact_by_clean is not None
     assert exact_by_clean["symbol"] == "scip-python python my_app 1.0.0 src/auth/service.py/AuthService#login()."
     assert exact_by_clean["clean_symbol"] == "src.auth.service.py.AuthService.login()"
@@ -206,7 +206,6 @@ def test_scip_ingester_fuzzy_line_match(tmp_path):
         kind="Method",
         signature="@override void handleRequest()",
         docstring="Handles client request",
-        code_block="{\n  print('handling');\n}",
         body_hash="ts_hash_123"
     )
     repo.graph.record_occurrences_bulk([
@@ -256,7 +255,6 @@ def test_scip_ingester_fuzzy_line_match(tmp_path):
     merged = repo.graph.get_symbol(scip_sym_id)
     assert merged is not None
     assert merged["signature"] == "@override void handleRequest()"
-    assert merged["code_block"] == "{\n  print('handling');\n}"
     assert merged["body_hash"] == "ts_hash_123"
 
     # 4. Verify duplicate Tree-sitter symbol row was superseded and deleted

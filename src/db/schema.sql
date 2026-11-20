@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS symbols (
     connection_weight INTEGER DEFAULT 0,
     parent_symbol VARCHAR, -- Enclosing symbol (AST parent scope)
     classification VARCHAR DEFAULT '{}', -- Architectural metadata fields (layer, tier, etc.)
-    code_block TEXT, -- Defining code block for the class, method, function, or symbol
     change_count INTEGER DEFAULT 1,
     last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     start_line INTEGER,

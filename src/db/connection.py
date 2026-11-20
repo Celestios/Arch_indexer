@@ -161,32 +161,31 @@ class DbConnection:
             pass
 
         try:
-            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS parent_symbol VARCHAR;")
-            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS classification VARCHAR DEFAULT '{}';")
-            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS code_block TEXT;")
-            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS change_count INTEGER DEFAULT 1;")
-            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
-            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS clean_symbol VARCHAR;")
-            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS start_line INTEGER;")
-            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS start_col INTEGER;")
-            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS end_line INTEGER;")
-            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS end_col INTEGER;")
-            conn.execute("ALTER TABLE edges ADD COLUMN IF NOT EXISTS call_line INTEGER;")
-            try:
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_symbols_clean_symbol ON symbols(clean_symbol);")
-            except Exception:
-                pass
-            # Backfill clean_symbol for existing rows if null
-            null_syms = conn.execute("SELECT symbol FROM symbols WHERE clean_symbol IS NULL").fetchall()
-            if null_syms:
-                from utils.helpers import demangle_scip_symbol
-                updates = [(demangle_scip_symbol(s[0]), s[0]) for s in null_syms]
-                conn.executemany("UPDATE symbols SET clean_symbol = ? WHERE symbol = ?", updates)
-
-            # One-time POSIX normalization update (gated behind schema_version)
+            # Gated schema migration (runs once per database via schema_version)
             schema_ver_row = conn.execute("SELECT value FROM system_metadata WHERE key = 'schema_version'").fetchone()
             current_ver = int(schema_ver_row[0]) if schema_ver_row and schema_ver_row[0].isdigit() else 1
             if current_ver < 2:
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS parent_symbol VARCHAR;")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS classification VARCHAR DEFAULT '{}';")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS change_count INTEGER DEFAULT 1;")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS clean_symbol VARCHAR;")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS start_line INTEGER;")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS start_col INTEGER;")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS end_line INTEGER;")
+                conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS end_col INTEGER;")
+                conn.execute("ALTER TABLE edges ADD COLUMN IF NOT EXISTS call_line INTEGER;")
+                try:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_symbols_clean_symbol ON symbols(clean_symbol);")
+                except Exception:
+                    pass
+                # Backfill clean_symbol for existing rows if null
+                null_syms = conn.execute("SELECT symbol FROM symbols WHERE clean_symbol IS NULL").fetchall()
+                if null_syms:
+                    from utils.helpers import demangle_scip_symbol
+                    updates = [(demangle_scip_symbol(s[0]), s[0]) for s in null_syms]
+                    conn.executemany("UPDATE symbols SET clean_symbol = ? WHERE symbol = ?", updates)
+
                 conn.execute(r"UPDATE files SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
                 conn.execute(r"UPDATE symbols SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
                 conn.execute(r"UPDATE occurrences SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")

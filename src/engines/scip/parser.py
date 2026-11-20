@@ -219,7 +219,6 @@ class ScipParser:
                 "start_line": 1,
                 "end_line": 1,
                 "parent_symbol": parent_sym,
-                "code_block": None,
             }
 
             for rel in getattr(sym_info, "relationships", []):
@@ -329,7 +328,6 @@ class ScipParser:
                         "start_line": start_line + 1,
                         "end_line": end_line + 1,
                         "parent_symbol": parent_sym,
-                        "code_block": None,
                     }
 
                     # Deterministic canonical symbol disambiguation

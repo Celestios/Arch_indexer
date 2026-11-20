@@ -36,7 +36,9 @@ class TestRepository:
     def test_stores_db_conn(self):
         mock_conn = MagicMock()
         repo = Repository(mock_conn)
-        assert repo.db_conn is mock_conn
+        assert repo._db_conn is mock_conn
+        with repo.transaction():
+            pass
 
     def test_domain_stores_integration(self, tmp_path):
         from db.connection import DbConnection
@@ -109,8 +111,8 @@ class TestRepository:
             assert len(viols) == 1
 
             # AnalyticsStore
-            metrics = repo.analytics.get_symbol_metrics()
-            assert metrics["totals"]["symbols"] == 1
+            totals = repo.analytics.get_repo_totals()
+            assert totals["symbols"] == 1
             closure = repo.analytics.get_transitive_closure("my_func")
             assert len(closure["downstream"]) == 1
             assert closure["downstream"][0]["symbol"] == "dep_func"

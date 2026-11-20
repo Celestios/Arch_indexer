@@ -31,7 +31,7 @@ def cmd_set_status(args):
 
         repository.workspace.update_file_manual_status(filepath, status, args.justification)
 
-        repository.quality.delete_manual_violations(filepath)
+        repository.quality.delete_violations(filepath=filepath, origin="manual")
         if status == "VIOLATION_DETECTED":
             from utils.violation_id import ViolationId
             violation_id = ViolationId.generate("manual_logical_audit", filepath, args.justification)

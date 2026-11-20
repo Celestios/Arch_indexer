@@ -1,12 +1,8 @@
 import logging
 from typing import Dict, List, Any, Optional
-from db.base import BaseRepository
+from db.base import BaseRepository, normalize_path
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_path(filepath: Optional[str]) -> Optional[str]:
-    return filepath.replace("\\", "/") if filepath else None
 
 
 class AnalyticsStore(BaseRepository):
@@ -40,7 +36,7 @@ class AnalyticsStore(BaseRepository):
         prefix_counts: Dict[str, int] = {}
         rows = self._fetch_all("SELECT filepath FROM symbols WHERE filepath IS NOT NULL")
         for r in rows:
-            fp_norm = _normalize_path(r["filepath"])
+            fp_norm = normalize_path(r["filepath"])
             if not fp_norm:
                 continue
             parts = fp_norm.split("/")
@@ -53,14 +49,6 @@ class AnalyticsStore(BaseRepository):
                 prefix = "./"
             prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
         return prefix_counts
-
-    def get_symbol_metrics(self) -> Dict[str, Any]:
-        """Consolidates symbol counts, repo totals, and directory distributions."""
-        return {
-            "totals": self.get_repo_totals(),
-            "by_kind": self.get_symbol_counts_by_kind(),
-            "by_prefix": self.get_symbols_by_file_prefix(),
-        }
 
     def count_symbols_by_languages(self, languages: List[str]) -> int:
         """Returns the count of symbols originating from files of specific languages."""

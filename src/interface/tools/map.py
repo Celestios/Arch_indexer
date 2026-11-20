@@ -141,30 +141,18 @@ def handle_map(
     # 2. Fetch repository totals & raw entities
     totals = repository.analytics.get_repo_totals()
 
-    with repository.db_conn.session() as conn:
-        sym_rows = conn.execute(
-            "SELECT symbol, clean_symbol, filepath, kind, signature, parent_symbol FROM symbols"
-        ).fetchall()
-        edge_rows = conn.execute(
-            "SELECT source, target, weight FROM edges"
-        ).fetchall()
+    sym_rows = repository.graph.get_all_symbols()
+    edge_rows = repository.graph.get_all_edges()
 
-    symbols_dict: Dict[str, Dict[str, Any]] = {}
-    for r in sym_rows:
-        sym_id = r[0]
-        symbols_dict[sym_id] = {
-            "symbol": sym_id,
-            "clean_symbol": r[1],
-            "filepath": r[2],
-            "kind": r[3],
-            "signature": r[4],
-            "parent_symbol": r[5],
-        }
+    symbols_dict: Dict[str, Dict[str, Any]] = {r["symbol"]: r for r in sym_rows}
 
     # 3. Compute degree and call weights per symbol
     in_degrees: Dict[str, int] = defaultdict(int)
     out_degrees: Dict[str, int] = defaultdict(int)
-    for src, tgt, weight in edge_rows:
+    for edge in edge_rows:
+        src = edge["source"]
+        tgt = edge["target"]
+        weight = edge.get("weight", 1)
         if not global_allow_ext:
             src_fp = symbols_dict.get(src, {}).get("filepath")
             tgt_fp = symbols_dict.get(tgt, {}).get("filepath")
@@ -208,7 +196,10 @@ def handle_map(
     group_outbound: Dict[str, int] = defaultdict(int)
     inter_group_calls: Dict[Tuple[str, str], int] = defaultdict(int)
 
-    for src, tgt, weight in edge_rows:
+    for edge in edge_rows:
+        src = edge["source"]
+        tgt = edge["target"]
+        weight = edge.get("weight", 1)
         src_grp = symbol_to_group.get(src)
         tgt_grp = symbol_to_group.get(tgt)
         if not src_grp or not tgt_grp:

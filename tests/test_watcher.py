@@ -122,7 +122,7 @@ def test_shrink_guard(tmp_path):
     ScipWrapper.ingest_index(repository, parsed_data, project_root=root, force=True)
     
     # Verify no symbols left
-    with repository.db_conn.session() as conn:
+    with db_conn.session() as conn:
         count = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
         assert count == 0
 
@@ -148,7 +148,7 @@ def test_shrink_guard(tmp_path):
     # This should succeed without raising ValueError
     ScipWrapper.ingest_index(repository, parsed_data_99, project_root=root, force=False)
     
-    with repository.db_conn.session() as conn:
+    with db_conn.session() as conn:
         count = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
         assert count == 99
 

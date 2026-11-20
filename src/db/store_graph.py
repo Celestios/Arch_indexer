@@ -1,18 +1,14 @@
 import logging
 from typing import Dict, List, Any, Optional, Set, Iterable
-from db.base import BaseRepository, UPSERT_SYMBOL_SQL, UPSERT_EDGE_SQL
+from db.base import BaseRepository, UPSERT_SYMBOL_SQL, UPSERT_EDGE_SQL, normalize_path
 from utils.helpers import demangle_scip_symbol
 
 logger = logging.getLogger(__name__)
 
 
-def _normalize_path(filepath: Optional[str]) -> Optional[str]:
-    return filepath.replace("\\", "/") if filepath else None
-
-
 class GraphStore(BaseRepository):
     """
-    Domain store owning symbols, edges, occurrences, and atomic cascade deletions.
+    Domain store owning symbols, edges, and occurrences.
     Enforces POSIX path normalization on ingress and maintains graph topology integrity.
     """
 
@@ -22,7 +18,7 @@ class GraphStore(BaseRepository):
             return None
         res = dict(row)
         if "filepath" in res and res["filepath"]:
-            res["filepath"] = _normalize_path(res["filepath"])
+            res["filepath"] = normalize_path(res["filepath"])
         if not res.get("clean_symbol") and res.get("symbol"):
             res["clean_symbol"] = demangle_scip_symbol(res["symbol"])
         return res
@@ -33,18 +29,7 @@ class GraphStore(BaseRepository):
         """Retrieves details of a registered symbol declaration."""
         row = self._fetch_one(
             """SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight,
-                      parent_symbol, classification, change_count, code_block, clean_symbol,
-                      start_line, start_col, end_line, end_col
-               FROM symbols WHERE symbol = ? OR clean_symbol = ?""",
-            (symbol, symbol)
-        )
-        return self._format_symbol_dict(row)
-
-    def get_symbol_exact(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Exact lookup by primary symbol ID or clean_symbol."""
-        row = self._fetch_one(
-            """SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight,
-                      parent_symbol, classification, change_count, code_block, clean_symbol,
+                      parent_symbol, classification, change_count, clean_symbol,
                       start_line, start_col, end_line, end_col
                FROM symbols WHERE symbol = ? OR clean_symbol = ?""",
             (symbol, symbol)
@@ -56,7 +41,7 @@ class GraphStore(BaseRepository):
         pattern = f"%{query}%"
         rows = self._fetch_all(
             """SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight,
-                      parent_symbol, classification, change_count, code_block, clean_symbol,
+                      parent_symbol, classification, change_count, clean_symbol,
                       start_line, start_col, end_line, end_col
                FROM symbols WHERE LOWER(clean_symbol) LIKE LOWER(?) OR LOWER(symbol) LIKE LOWER(?) LIMIT ?""",
             (pattern, pattern, limit)
@@ -73,7 +58,6 @@ class GraphStore(BaseRepository):
         body_hash: Optional[str] = None,
         connection_weight: int = 0,
         parent_symbol: Optional[str] = None,
-        code_block: Optional[str] = None,
         clean_symbol: Optional[str] = None,
         start_line: Optional[int] = None,
         start_col: Optional[int] = None,
@@ -83,7 +67,7 @@ class GraphStore(BaseRepository):
         """Inserts or updates a symbol declaration."""
         if clean_symbol is None and symbol:
             clean_symbol = demangle_scip_symbol(symbol)
-        norm_fp = _normalize_path(filepath)
+        norm_fp = normalize_path(filepath)
         self._execute(
             UPSERT_SYMBOL_SQL,
             (
@@ -96,7 +80,6 @@ class GraphStore(BaseRepository):
                 body_hash,
                 connection_weight,
                 parent_symbol,
-                code_block,
                 start_line,
                 start_col,
                 end_line,
@@ -112,14 +95,13 @@ class GraphStore(BaseRepository):
             (
                 sym["symbol"],
                 sym.get("clean_symbol") or demangle_scip_symbol(sym["symbol"]),
-                _normalize_path(sym.get("filepath")),
+                normalize_path(sym.get("filepath")),
                 sym["kind"],
                 sym.get("signature"),
                 sym.get("docstring"),
                 sym.get("body_hash"),
                 sym.get("connection_weight", 0),
                 sym.get("parent_symbol"),
-                sym.get("code_block"),
                 sym.get("start_line"),
                 sym.get("start_col"),
                 sym.get("end_line"),
@@ -135,9 +117,9 @@ class GraphStore(BaseRepository):
         """Get all symbols for a list of filepaths, returned as {symbol: {kind, body_hash, ...}}."""
         if not filepaths:
             return {}
-        fps = [_normalize_path(fp) for fp in filepaths]
+        fps = [normalize_path(fp) for fp in filepaths]
         rows = self._fetch_all(
-            """SELECT symbol, kind, body_hash, signature, docstring, filepath, parent_symbol, classification, code_block, clean_symbol,
+            """SELECT symbol, kind, body_hash, signature, docstring, filepath, parent_symbol, classification, clean_symbol,
                       start_line, start_col, end_line, end_col
                FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))""",
             (fps,)
@@ -151,10 +133,10 @@ class GraphStore(BaseRepository):
 
     def get_symbols_in_file(self, filepath: str) -> List[Dict[str, Any]]:
         """Returns all symbols declared in a given file."""
-        norm_fp = _normalize_path(filepath)
+        norm_fp = normalize_path(filepath)
         rows = self._fetch_all(
             """SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight,
-                      parent_symbol, classification, change_count, code_block, clean_symbol,
+                      parent_symbol, classification, change_count, clean_symbol,
                       start_line, start_col, end_line, end_col
                FROM symbols WHERE filepath = ?""",
             (norm_fp,)
@@ -166,7 +148,7 @@ class GraphStore(BaseRepository):
         if not symbols:
             return {}
         rows = self._fetch_all(
-            """SELECT symbol, kind, signature, docstring, filepath, parent_symbol, classification, code_block, clean_symbol,
+            """SELECT symbol, kind, signature, docstring, filepath, parent_symbol, classification, clean_symbol,
                       start_line, start_col, end_line, end_col
                FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))""",
             (symbols,)
@@ -177,7 +159,7 @@ class GraphStore(BaseRepository):
         """Retrieves all symbols in the workspace."""
         rows = self._fetch_all(
             """SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight,
-                      parent_symbol, classification, change_count, code_block, clean_symbol,
+                      parent_symbol, classification, change_count, clean_symbol,
                       start_line, start_col, end_line, end_col
                FROM symbols"""
         )
@@ -188,8 +170,19 @@ class GraphStore(BaseRepository):
         rows = self._fetch_all("SELECT symbol, filepath, kind, clean_symbol FROM symbols")
         for r in rows:
             if r.get("filepath"):
-                r["filepath"] = _normalize_path(r["filepath"])
+                r["filepath"] = normalize_path(r["filepath"])
         return rows
+
+    def get_member_symbols(self, parent_symbol: str) -> List[Dict[str, Any]]:
+        """Retrieves member methods and constructors belonging to a class symbol."""
+        prefix = parent_symbol if parent_symbol.endswith("#") else parent_symbol + "#"
+        return self._fetch_all(
+            """SELECT symbol, kind, signature, docstring FROM symbols
+               WHERE parent_symbol = ?
+                  OR (symbol LIKE ? AND (kind IN ('Method', 'Constructor') OR symbol LIKE '%().'))
+               ORDER BY symbol""",
+            (parent_symbol, prefix + "%")
+        )
 
     def get_existing_symbols(self, symbols: Iterable[str]) -> Set[str]:
         """Returns set of symbols that exist in database."""
@@ -229,11 +222,6 @@ class GraphStore(BaseRepository):
         if not symbols:
             return
         self._execute("DELETE FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))", (symbols,))
-
-    def delete_symbols_for_file(self, filepath: str):
-        """Delete symbols belonging to a file."""
-        norm_fp = _normalize_path(filepath)
-        self._execute("DELETE FROM symbols WHERE filepath = ?", (norm_fp,))
 
     def delete_symbols_for_files(self, filepaths: List[str]):
         """Delete symbols belonging to multiple files."""
@@ -302,24 +290,30 @@ class GraphStore(BaseRepository):
             (symbol,)
         )
 
-    def get_all_edges(self) -> List[Dict[str, Any]]:
-        """Returns all edges with source, target, weight."""
-        return self._fetch_all("SELECT source, target, weight FROM edges")
+    def get_edges_by_targets(self, targets: List[str]) -> List[Dict[str, Any]]:
+        """Returns incoming edges to any of the target symbols."""
+        if not targets:
+            return []
+        return self._fetch_all(
+            "SELECT source, target, relation, weight, call_line FROM edges WHERE target IN (SELECT UNNEST(?::VARCHAR[]))",
+            (targets,)
+        )
 
-    def get_all_edges_with_relation(self) -> List[Dict[str, Any]]:
+    def get_all_edges(self) -> List[Dict[str, Any]]:
         """Returns all edges including relation and call_line."""
         return self._fetch_all("SELECT source, target, relation, weight, call_line FROM edges")
 
-    def get_edges_by_relation(self, relation: str) -> List[Dict[str, Any]]:
-        """Retrieves edges with a specific relation."""
+    def get_edges_with_locations(self) -> List[Dict[str, Any]]:
+        """Returns edges with call line locations joined from occurrences/call_line."""
         return self._fetch_all(
-            "SELECT source, target, relation, weight, call_line FROM edges WHERE relation = ?",
-            (relation,)
+            """
+            SELECT e.source, e.target, e.relation, e.weight,
+                   COALESCE(e.call_line, o.start_line) AS line, o.start_col AS col
+            FROM edges e
+            LEFT JOIN symbols s ON e.source = s.symbol
+            LEFT JOIN occurrences o ON e.target = o.symbol AND s.filepath = o.filepath
+            """
         )
-
-    def delete_edges_by_relation(self, relation: str):
-        """Deletes edges of a specific relation."""
-        self._execute("DELETE FROM edges WHERE relation = ?", (relation,))
 
     def update_edge_weights_bulk(self, weight_updates: List[tuple]):
         """Batch update edge weights: list of (weight, source, target, relation)."""
@@ -330,21 +324,15 @@ class GraphStore(BaseRepository):
             weight_updates
         )
 
-    def delete_edges_for_file(self, filepath: str):
-        """Delete all edges linking to symbols declared in a file."""
-        norm_fp = _normalize_path(filepath)
-        self._execute(
-            """DELETE FROM edges
-               WHERE source IN (SELECT symbol FROM symbols WHERE filepath = ?)
-                  OR target IN (SELECT symbol FROM symbols WHERE filepath = ?)""",
-            (norm_fp, norm_fp)
-        )
+    def delete_edges_by_relation(self, relation: str):
+        """Deletes edges of a specific relation."""
+        self._execute("DELETE FROM edges WHERE relation = ?", (relation,))
 
     def delete_edges_for_files(self, filepaths: List[str]):
         """Delete all edges linking to symbols in multiple files."""
         if not filepaths:
             return
-        fps = [_normalize_path(fp) for fp in filepaths]
+        fps = [normalize_path(fp) for fp in filepaths]
         self._execute(
             """DELETE FROM edges
                WHERE source IN (SELECT symbol FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[])))
@@ -371,7 +359,7 @@ class GraphStore(BaseRepository):
         """Finds files containing symbols that depend on the given files."""
         if not filepaths:
             return []
-        fps = [_normalize_path(fp) for fp in filepaths]
+        fps = [normalize_path(fp) for fp in filepaths]
         rows = self._fetch_all(
             """SELECT DISTINCT s_src.filepath
                FROM edges e
@@ -382,7 +370,7 @@ class GraphStore(BaseRepository):
                  AND s_src.filepath IS NOT NULL""",
             (fps, fps)
         )
-        return [_normalize_path(r["filepath"]) for r in rows if r.get("filepath")]
+        return [normalize_path(r["filepath"]) for r in rows if r.get("filepath")]
 
     # ------------------ Occurrences Domain ------------------
 
@@ -393,7 +381,7 @@ class GraphStore(BaseRepository):
         data = [
             (
                 occ["symbol"],
-                _normalize_path(occ["filepath"]),
+                normalize_path(occ["filepath"]),
                 occ["start_line"],
                 occ["start_col"],
                 occ["end_line"],
@@ -422,7 +410,7 @@ class GraphStore(BaseRepository):
         """Inserts an occurrence."""
         self._execute(
             "INSERT INTO occurrences (symbol, filepath, start_line, start_col, end_line, end_col, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (symbol, _normalize_path(filepath), start_line, start_col, end_line, end_col, role)
+            (symbol, normalize_path(filepath), start_line, start_col, end_line, end_col, role)
         )
 
     def get_occurrences_for_symbol(self, symbol: str) -> List[Dict[str, Any]]:
@@ -432,24 +420,47 @@ class GraphStore(BaseRepository):
             (symbol,)
         )
         for r in rows:
-            r["filepath"] = _normalize_path(r["filepath"])
+            r["filepath"] = normalize_path(r["filepath"])
         return rows
 
     def get_occurrences_for_file(self, filepath: str) -> List[Dict[str, Any]]:
         """Returns all occurrences located in a file."""
-        norm_fp = _normalize_path(filepath)
+        norm_fp = normalize_path(filepath)
         rows = self._fetch_all(
             "SELECT symbol, filepath, start_line, start_col, end_line, end_col, role FROM occurrences WHERE filepath = ?",
             (norm_fp,)
         )
         for r in rows:
-            r["filepath"] = _normalize_path(r["filepath"])
+            r["filepath"] = normalize_path(r["filepath"])
+        return rows
+
+    def get_occurrences_filtered(
+        self,
+        filepath_filter: Optional[str] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetches occurrences matching optional filepath filter."""
+        query = "SELECT symbol, filepath, start_line, start_col, end_line, end_col, role FROM occurrences"
+        params: List[Any] = []
+        if filepath_filter:
+            query += " WHERE filepath LIKE ?"
+            params.append(f"%{normalize_path(filepath_filter)}%")
+        query += " ORDER BY filepath, start_line, start_col"
+        if limit:
+            query += f" LIMIT {int(limit)}"
+        rows = self._fetch_all(query, params)
+        for r in rows:
+            r["filepath"] = normalize_path(r.get("filepath"))
         return rows
 
     def get_definitions_map(self) -> Dict[str, Dict[str, Any]]:
-        """Fetches symbol definitions from occurrences where role & 1 != 0."""
+        """Fetches symbol definitions from symbols (where start_line IS NOT NULL) and occurrences (role & 1 != 0)."""
         rows = self._fetch_all(
-            "SELECT symbol, filepath, start_line, start_col, end_line, end_col FROM occurrences WHERE (role & 1) != 0"
+            """SELECT symbol, filepath, start_line, start_col, end_line, end_col
+               FROM symbols WHERE start_line IS NOT NULL
+               UNION
+               SELECT symbol, filepath, start_line, start_col, end_line, end_col
+               FROM occurrences WHERE (role & 1) != 0"""
         )
         defs = {}
         for r in rows:
@@ -457,48 +468,17 @@ class GraphStore(BaseRepository):
             if sym not in defs:
                 defs[sym] = {
                     "symbol": sym,
-                    "filepath": _normalize_path(r["filepath"]),
-                    "start_line": int(r["start_line"]),
-                    "start_col": int(r["start_col"]),
-                    "end_line": int(r["end_line"]),
-                    "end_col": int(r["end_col"]),
+                    "filepath": normalize_path(r["filepath"]),
+                    "start_line": int(r["start_line"]) if r.get("start_line") is not None else 0,
+                    "start_col": int(r["start_col"]) if r.get("start_col") is not None else 0,
+                    "end_line": int(r["end_line"]) if r.get("end_line") is not None else 0,
+                    "end_col": int(r["end_col"]) if r.get("end_col") is not None else 0,
                 }
         return defs
-
-    def get_definition_occurrences_for_files(self, filepaths: List[str]) -> List[Dict[str, Any]]:
-        """Returns definition occurrences for symbols in multiple files."""
-        if not filepaths:
-            return []
-        fps = [_normalize_path(fp) for fp in filepaths]
-        rows = self._fetch_all(
-            "SELECT symbol, filepath, start_line FROM occurrences WHERE filepath IN (SELECT UNNEST(?::VARCHAR[])) AND (role & 1) != 0",
-            (fps,)
-        )
-        for r in rows:
-            r["filepath"] = _normalize_path(r["filepath"])
-        return rows
-
-    def get_definition_occurrences_for_file(self, filepath: str) -> List[Dict[str, Any]]:
-        """Returns definition occurrences for symbols in a single file."""
-        norm_fp = _normalize_path(filepath)
-        return self._fetch_all(
-            "SELECT symbol, start_line FROM occurrences WHERE filepath = ? AND (role & 1) != 0",
-            (norm_fp,)
-        )
-
-    def delete_occurrences_for_file(self, filepath: str):
-        """Delete occurrences in a file."""
-        norm_fp = _normalize_path(filepath)
-        self._execute("DELETE FROM occurrences WHERE filepath = ?", (norm_fp,))
 
     def delete_occurrences_for_files(self, filepaths: List[str]):
         """Delete occurrences in multiple files."""
         self._delete_by_filepaths("occurrences", filepaths)
-
-    def delete_occurrences_by_role(self, filepath: str, role: int):
-        """Delete occurrences in a file matching role bitmask."""
-        norm_fp = _normalize_path(filepath)
-        self._execute("DELETE FROM occurrences WHERE filepath = ? AND role = ?", (norm_fp, role))
 
     def delete_orphaned_occurrences(self) -> int:
         """Deletes occurrences whose symbol no longer exists in symbols table."""
@@ -510,42 +490,3 @@ class GraphStore(BaseRepository):
             "DELETE FROM occurrences WHERE symbol NOT IN (SELECT symbol FROM symbols)"
         )
         return cnt
-
-    # ------------------ Atomic Cascade Deletion ------------------
-
-    def delete_files(self, filepaths: List[str]):
-        """Atomic cascade delete across edges, occurrences, diagnostics, symbols, and files."""
-        if not filepaths:
-            return
-        fps = [_normalize_path(fp) for fp in filepaths]
-        with self._db_conn.transaction() as conn:
-            conn.execute(
-                """
-                DELETE FROM edges
-                WHERE source IN (SELECT symbol FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[])))
-                   OR target IN (SELECT symbol FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[])))
-                """,
-                (fps, fps)
-            )
-            conn.execute(
-                "DELETE FROM occurrences WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
-                (fps,)
-            )
-            conn.execute(
-                "DELETE FROM diagnostics WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
-                (fps,)
-            )
-            conn.execute(
-                "DELETE FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
-                (fps,)
-            )
-            conn.execute(
-                "DELETE FROM files WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
-                (fps,)
-            )
-
-    def delete_file(self, filepath: str):
-        """Atomic cascade delete for a single file."""
-        self.delete_files([filepath])
-
-    delete_files_bulk = delete_files

@@ -2,16 +2,16 @@ from typing import List, Any, Optional, Tuple, Dict
 from db.connection import DbConnection
 
 
+def normalize_path(filepath: Optional[str]) -> str:
+    """Canonical POSIX path normalization for database persistence."""
+    return filepath.replace("\\", "/") if filepath else ""
+
+
 class BaseRepository:
     """Shared base class for all repository and store implementations. Eliminates DRY violations."""
 
     def __init__(self, db_conn: DbConnection):
         self._db_conn = db_conn
-
-    @property
-    def db_conn(self) -> DbConnection:
-        """Backward compatibility property for callers accessing .db_conn."""
-        return self._db_conn
 
     def _fetch_one(self, sql: str, params: Optional[Any] = None) -> Optional[Dict[str, Any]]:
         with self._db_conn.session() as conn:
@@ -41,15 +41,10 @@ class BaseRepository:
         with self._db_conn.session() as conn:
             return conn.executemany(sql, seq_of_params)
 
-    def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
-        """Backward compatible tuple-based fetchall query."""
-        with self._db_conn.session() as conn:
-            return conn.execute(sql, params or ()).fetchall()
-
     def _delete_by_filepaths(self, table: str, filepaths: List[str]):
         if not filepaths:
             return
-        fps = [fp.replace("\\", "/") for fp in filepaths]
+        fps = [normalize_path(fp) for fp in filepaths]
         self._execute(
             f"DELETE FROM {table} WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
             (fps,)
@@ -68,8 +63,8 @@ ON CONFLICT (filepath) DO UPDATE SET
 """
 
 UPSERT_SYMBOL_SQL = """
-INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, code_block, start_line, start_col, end_line, end_col)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, start_line, start_col, end_line, end_col)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (symbol) DO UPDATE SET
     clean_symbol = COALESCE(NULLIF(excluded.clean_symbol, ''), symbols.clean_symbol),
     filepath = COALESCE(excluded.filepath, symbols.filepath),
@@ -90,7 +85,6 @@ ON CONFLICT (symbol) DO UPDATE SET
     body_hash = COALESCE(excluded.body_hash, symbols.body_hash),
     connection_weight = excluded.connection_weight,
     parent_symbol = COALESCE(excluded.parent_symbol, symbols.parent_symbol),
-    code_block = COALESCE(excluded.code_block, symbols.code_block),
     start_line = COALESCE(excluded.start_line, symbols.start_line),
     start_col = COALESCE(excluded.start_col, symbols.start_col),
     end_line = COALESCE(excluded.end_line, symbols.end_line),

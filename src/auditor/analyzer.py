@@ -90,9 +90,9 @@ class Auditor:
 
     def _clear_old_violations(self, filepath_filter: Optional[str]):
         if filepath_filter:
-            self.repository.quality.delete_automatic_violations_for_path(filepath_filter)
+            self.repository.quality.delete_violations(filepath_prefix=filepath_filter, origin="automatic")
         else:
-            self.repository.quality.delete_automatic_violations()
+            self.repository.quality.delete_violations(origin="automatic")
 
     def _handle_config_change(self):
         from change_tracker.tracker import ChangeTracker

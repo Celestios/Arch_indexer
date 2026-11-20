@@ -40,7 +40,6 @@ class SymbolDeclaration:
         docstring: str = "",
         body_hash: str = "",
         parent_symbol: Optional[str] = None,
-        code_block: Optional[str] = None,
         annotations: Optional[Dict[str, Any]] = None,
         complexity: int = 1,
         nesting_depth: int = 0,
@@ -78,7 +77,6 @@ class SymbolDeclaration:
         self.docstring = docstring
         self.body_hash = body_hash
         self.parent_symbol = parent_symbol
-        self.code_block = code_block
         self.annotations = annotations or {}
         self.complexity = complexity
         self.nesting_depth = nesting_depth
@@ -98,7 +96,6 @@ class SymbolDeclaration:
             "docstring": self.docstring,
             "body_hash": self.body_hash,
             "parent_symbol": self.parent_symbol,
-            "code_block": self.code_block,
             "annotations": self.annotations,
             "complexity": self.complexity,
             "nesting_depth": self.nesting_depth,
@@ -202,7 +199,6 @@ class TreesitterExtractor:
         """Constructs a normalized SymbolDeclaration with computed hash, annotations, and metrics."""
         body_bytes = code_bytes[body_node.start_byte:body_node.end_byte] if body_node else b""
         b_hash = hashlib.sha256(body_bytes).hexdigest()[:16]
-        code_block = code_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
         annotations = AnnotationExtractor.extract_annotations(node, code_bytes, language)
         metrics = MetricsCalculator.calculate_metrics(node, code_bytes)
 
@@ -219,7 +215,6 @@ class TreesitterExtractor:
             docstring=docstring,
             body_hash=b_hash,
             parent_symbol=parent_symbol,
-            code_block=code_block,
             annotations=annotations,
             complexity=metrics["cyclomatic_complexity"],
             nesting_depth=metrics["max_nesting_depth"],

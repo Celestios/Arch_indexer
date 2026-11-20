@@ -385,7 +385,7 @@ def test_auditor_manual_status_logical_flag(tmp_path):
 
     # Clear manual status back to COMPLIANT
     repository.workspace.update_file_manual_status('lib/ui/widget.dart', 'COMPLIANT')
-    repository.quality.delete_manual_violations('lib/ui/widget.dart')
+    repository.quality.delete_violations(filepath='lib/ui/widget.dart', origin='manual')
     
     all_v2 = repository.quality.get_violations()
     manual_v2 = [v for v in all_v2 if v["origin"] == "manual"]
