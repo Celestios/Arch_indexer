@@ -10,24 +10,37 @@ from utils.violation_id import ViolationId
 class NamingViolationChecker(BaseViolationChecker):
     """Checks naming conventions for architectural boundary compliance."""
 
-    def __init__(self, repository: Repository, tracer: PathTracer):
+    def __init__(self, repository: Optional[Repository] = None, tracer: Optional[PathTracer] = None):
         super().__init__(repository)
-        self.tracer = tracer
+        self.tracer = tracer or PathTracer(repository)
 
     def check(
         self,
-        symbol_classifications: Any,
-        all_edges: Any = None,
+        snapshot: Any,
+        symbol_classifications: Any = None,
         config: Any = None,
         filepath_filter: Optional[str] = None,
         propagation_sources: Optional[Dict] = None,
-        snapshot: Optional[Any] = None
+        **kwargs: Any
     ) -> List[Dict[str, Any]]:
+        from auditor.snapshot import AuditSnapshot
+
+        if isinstance(snapshot, AuditSnapshot):
+            snap = snapshot
+            classifications = symbol_classifications or {}
+            cfg = config
+            fp_filter = filepath_filter
+        else:
+            classifications = snapshot
+            cfg = config
+            fp_filter = filepath_filter
+            snap = kwargs.get("snapshot")
+
         violations = []
-        if not config:
+        if not cfg:
             return violations
         naming_rules = []
-        for prefix, prefix_conf in config.items():
+        for prefix, prefix_conf in cfg.items():
             rules = prefix_conf.get("rules", [])
             for r in rules:
                 if r.get("rule_type") == "naming_convention":
@@ -38,11 +51,11 @@ class NamingViolationChecker(BaseViolationChecker):
                     if r.get("rule_type") == "naming_convention":
                         naming_rules.append((prefix, r))
 
-        for sym, data in symbol_classifications.items():
+        for sym, data in classifications.items():
             filepath = data["symbol_info"]["filepath"]
             if not filepath:
                 continue
-            if not matches_filter(filepath, filepath_filter):
+            if not matches_filter(filepath, fp_filter):
                 continue
 
             for prefix, rule in naming_rules:
@@ -59,12 +72,16 @@ class NamingViolationChecker(BaseViolationChecker):
                         continue
                     msg = rule.get("message", f"Naming convention violation: '{simple_name}' must match constraints for {classification}")
                     line_number = None
-                    if snapshot is not None:
-                        def_info = snapshot.definitions_by_symbol.get(sym)
+                    if snap is not None:
+                        def_info = snap.definitions_by_symbol.get(sym)
                         if def_info:
                             line_number = def_info.get("start_line")
-                    if line_number is None:
+                        if line_number is None and sym in snap.symbol_map:
+                            line_number = snap.symbol_map[sym].get("start_line")
+                    if line_number is None and self.repository:
                         line_number = find_definition_line(self.repository, sym, filepath)
+                    if line_number is None:
+                        line_number = 1
                     violation_id = ViolationId.generate(sym, "naming", classification)
                     rule_id = f"naming_{classification}".lower().replace("/", "_").replace(".", "_")
                     vdata = {"violation_id": violation_id, "rule_id": rule_id, "symbol": sym,

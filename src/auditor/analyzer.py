@@ -8,7 +8,7 @@ from auditor.propagation import MetadataPropagator
 from auditor.path_tracer import PathTracer
 from auditor.config_loader import ConfigLoader
 from auditor.field_validator import FieldValidator
-from auditor.edge_weights import EdgeWeightUpdater
+from engines.edge_weights import EdgeWeightUpdater
 from auditor.snapshot import AuditSnapshot
 from auditor.violation_checkers.dependency import DependencyViolationChecker
 from auditor.violation_checkers.naming import NamingViolationChecker
@@ -40,11 +40,6 @@ class Auditor:
             NamingViolationChecker(repository, self.tracer),
             PendingAuditChecker(repository),
         ]
-
-        from auditor.registry import ViolationCheckerRegistry
-        ViolationCheckerRegistry.clear()
-        for checker in self.checkers:
-            ViolationCheckerRegistry.register(checker)
 
     def load_config(self) -> Dict[str, Any]:
         """Loads the workspace architectural configuration."""
@@ -81,10 +76,11 @@ class Auditor:
         violations = []
         for checker in self.checkers:
             violations.extend(checker.check(
-                symbol_classifications, all_edges,
-                config, filepath_filter=filepath_filter,
+                snapshot=snapshot,
+                symbol_classifications=symbol_classifications,
+                config=config,
+                filepath_filter=filepath_filter,
                 propagation_sources=propagation_sources,
-                snapshot=snapshot
             ))
 
         self.repository.compliance.upsert_violations_bulk(violations)

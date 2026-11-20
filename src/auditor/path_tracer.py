@@ -10,7 +10,7 @@ class PathTracer:
     """
     Traces and formats call graph coordinates, checks blocklists, and extracts symbol names.
     """
-    def __init__(self, repository: Repository):
+    def __init__(self, repository: Optional[Repository] = None):
         self.repository = repository
 
     def get_simple_name(self, symbol: str) -> str:
@@ -26,36 +26,45 @@ class PathTracer:
         trace_lines = []
         for i, sym in enumerate(path):
             if snapshot is not None:
-                symbol_info = snapshot.get_symbol(sym)
-            else:
-                symbol_info = self.repository.symbols.get_symbol(sym)
-            filepath = symbol_info.get("filepath") if symbol_info else None
-            
-            line_str = ""
-            if filepath:
-                if i < len(path) - 1:
-                    next_sym = path[i+1]
-                    if snapshot is not None:
-                        occs = snapshot.get_occurrences(next_sym)
+                symbol_info = snapshot.symbol_map.get(sym)
+                filepath = symbol_info.get("filepath") if symbol_info else None
+                line_str = ""
+                if filepath:
+                    if i < len(path) - 1:
+                        next_sym = path[i+1]
+                        call_line = None
+                        for edge in snapshot.incoming_map.get(next_sym, []):
+                            if edge.get("source") == sym and edge.get("call_line"):
+                                call_line = edge.get("call_line")
+                                break
+                        if call_line is None:
+                            call_line = symbol_info.get("start_line") or (snapshot.definitions_by_symbol.get(sym, {}).get("start_line"))
+                        if call_line is not None:
+                            line_str = f":L{call_line}"
                     else:
-                        occs = self.repository.symbols.get_occurrences_for_symbol(next_sym)
-                    call_line = None
-                    for occ in occs:
-                        if occ.get("filepath") == filepath:
-                            call_line = occ.get("start_line")
-                            break
-                    if call_line is not None:
-                        line_str = f":L{call_line}"
-                else:
-                    def_line = None
-                    if snapshot is not None:
                         def_info = snapshot.definitions_by_symbol.get(sym)
-                        if def_info:
-                            def_line = def_info.get("start_line")
-                    if def_line is None:
-                        def_line = find_definition_line(self.repository, sym, filepath)
-                    if def_line is not None:
-                        line_str = f":L{def_line}"
+                        def_line = def_info.get("start_line") if def_info else symbol_info.get("start_line")
+                        if def_line is not None:
+                            line_str = f":L{def_line}"
+            else:
+                symbol_info = self.repository.symbols.get_symbol(sym) if self.repository else None
+                filepath = symbol_info.get("filepath") if symbol_info else None
+                line_str = ""
+                if filepath:
+                    if i < len(path) - 1:
+                        next_sym = path[i+1]
+                        occs = self.repository.symbols.get_occurrences_for_symbol(next_sym) if self.repository else []
+                        call_line = None
+                        for occ in occs:
+                            if occ.get("filepath") == filepath:
+                                call_line = occ.get("start_line")
+                                break
+                        if call_line is not None:
+                            line_str = f":L{call_line}"
+                    else:
+                        def_line = find_definition_line(self.repository, sym, filepath) if self.repository else None
+                        if def_line is not None:
+                            line_str = f":L{def_line}"
             
             fp_display = filepath if filepath else "[external]"
             trace_lines.append(f"  {i+1}. {fp_display}{line_str} (symbol: {sym})")

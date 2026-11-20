@@ -119,7 +119,12 @@ class TestCanonicalDisambiguationInParser:
         # Doc 2: Src file defines crate_sym
         doc_src = MagicMock()
         doc_src.relative_path = "src/lib.rs"
-        doc_src.symbols = []
+        sym_src = MagicMock()
+        sym_src.symbol = crate_sym
+        sym_src.documentation = ["Primary crate root"]
+        sym_src.kind = 1
+        sym_src.relationships = []
+        doc_src.symbols = [sym_src]
         occ_src = MagicMock()
         occ_src.symbol = crate_sym
         occ_src.symbol_roles = 1  # Definition

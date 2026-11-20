@@ -1,82 +1,13 @@
-import hashlib
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from utils.exclusions import load_include_dirs, load_exclude_patterns, is_included, is_excluded
 from utils.helpers import infer_scip_kind, score_definition_candidate
-from utils.code_extractor import CodeExtractor
 
 try:
     from engines import scip_pb2
 except ImportError:
     import scip_pb2
-
-
-def extract_source_signature(lines: List[str], start_line: int, end_line: int) -> Optional[str]:
-    """Extract a clean declaration signature from source lines (1-indexed)."""
-    if not lines or start_line < 1 or start_line > len(lines):
-        return None
-    decl_lines = []
-    max_l = min(start_line + 4, end_line if end_line >= start_line else start_line, len(lines))
-    for i in range(start_line - 1, max_l):
-        l = lines[i].strip()
-        if not l:
-            continue
-        decl_lines.append(l)
-        if l.endswith("{") or l.endswith(";") or (l.endswith(":") and not l.startswith("@")):
-            break
-    if not decl_lines:
-        return None
-    sig = " ".join(decl_lines)
-    if sig.endswith("{"):
-        sig = sig[:-1].strip()
-    return sig[:300] if sig else None
-
-
-def extract_source_docstring(lines: List[str], start_line: int) -> str:
-    """Extract immediately preceding doc comments (///, /**, *, #, //) scanning upward (1-indexed)."""
-    if not lines or start_line <= 1 or start_line > len(lines):
-        return ""
-    doc_lines = []
-    idx = start_line - 2  # line right before start_line (0-indexed)
-    comment_prefixes = ("///", "//", "#", "*", "/**", "/*!", "/*")
-
-    if idx >= 0 and not lines[idx].strip():
-        idx -= 1
-
-    while idx >= 0:
-        raw_l = lines[idx]
-        stripped = raw_l.strip()
-        if not stripped:
-            break
-        matched_prefix = None
-        for p in comment_prefixes:
-            if stripped.startswith(p):
-                matched_prefix = p
-                break
-        if not matched_prefix:
-            break
-
-        content = stripped
-        if content.startswith("///"):
-            content = content[3:]
-        elif content.startswith("//"):
-            content = content[2:]
-        elif content.startswith("/**"):
-            content = content[3:].rstrip("*/")
-        elif content.startswith("/*"):
-            content = content[2:].rstrip("*/")
-        elif content.startswith("*"):
-            content = content[1:].rstrip("*/")
-        elif content.startswith("#"):
-            content = content[1:]
-        doc_lines.append(content.strip())
-        idx -= 1
-
-    if not doc_lines:
-        return ""
-    doc_lines.reverse()
-    return "\n".join(doc_lines)
 
 
 def _is_int(val: Any) -> bool:
@@ -271,29 +202,6 @@ class ScipParser:
             "diagnostics": []
         }
 
-        # Cache file lines on disk to avoid repeated I/O during source grounding
-        file_lines_cache: Dict[str, Optional[List[str]]] = {}
-
-        def get_file_lines(rel_fp: str) -> Optional[List[str]]:
-            if rel_fp in file_lines_cache:
-                return file_lines_cache[rel_fp]
-            if not project_root:
-                return None
-            target_path = project_root / rel_fp
-            if not target_path.exists() or not target_path.is_file():
-                file_lines_cache[rel_fp] = None
-                return None
-            try:
-                with open(target_path, "r", encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
-                    file_lines_cache[rel_fp] = lines
-                    return lines
-            except Exception:
-                file_lines_cache[rel_fp] = None
-                return None
-
-        code_extractor = CodeExtractor(root_dir=str(project_root))
-
         # 1. Parse external symbols (from external packages)
         for sym_info in index.external_symbols:
             docs = "\n".join(sym_info.documentation) if sym_info.documentation else ""
@@ -410,43 +318,18 @@ class ScipParser:
 
                     docs = meta["docs"]
                     parent_sym = meta.get("parent_symbol")
-                    sig = None
-                    body_hash = None
-
-                    code_block = None
-                    if resolved_filepath:
-                        code_res = code_extractor.extract_code(
-                            filepath=resolved_filepath,
-                            label=symbol,
-                            raw_symbol=symbol,
-                            line=start_line + 1,
-                            parent_class=parent_sym,
-                        )
-                        if code_res:
-                            code_block = code_res[2]
-
-                    # Source grounding: synthesize signature, docstring, and body hash from disk
-                    flines = get_file_lines(resolved_filepath)
-                    if flines:
-                        sig = extract_source_signature(flines, start_line + 1, end_line + 1)
-                        if not docs:
-                            docs = extract_source_docstring(flines, start_line + 1)
-                        if end_line >= start_line and start_line < len(flines):
-                            span_text = "".join(flines[start_line:end_line + 1])
-                            if span_text:
-                                body_hash = hashlib.sha256(span_text.encode("utf-8")).hexdigest()[:16]
 
                     new_candidate = {
                         "symbol": symbol,
                         "filepath": resolved_filepath,
                         "kind": kind,
-                        "signature": sig,
+                        "signature": None,
                         "docstring": docs,
-                        "body_hash": body_hash,
+                        "body_hash": None,
                         "start_line": start_line + 1,
                         "end_line": end_line + 1,
                         "parent_symbol": parent_sym,
-                        "code_block": code_block,
+                        "code_block": None,
                     }
 
                     # Deterministic canonical symbol disambiguation
@@ -529,7 +412,8 @@ class ScipParser:
                     parsed_data["edges"].append({
                         "source": caller_symbol,
                         "target": symbol,
-                        "relation": "Calls"
+                        "relation": "Calls",
+                        "call_line": ref_line,
                     })
 
         # 4. Third pass: Missing symbol recovery / synthesis

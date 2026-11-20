@@ -9,18 +9,18 @@ if TYPE_CHECKING:
 class BaseViolationChecker(ABC):
     """Abstract base class for architectural violation checkers."""
 
-    def __init__(self, repository: Repository):
+    def __init__(self, repository: Optional[Repository] = None):
         self.repository = repository
 
     @abstractmethod
     def check(
         self,
-        symbol_classifications: Dict,
-        all_edges: Optional[List[Dict]] = None,
-        config: Optional[Dict] = None,
+        snapshot: Any,
+        symbol_classifications: Optional[Dict[str, Any]] = None,
+        config: Optional[Dict[str, Any]] = None,
         filepath_filter: Optional[str] = None,
-        propagation_sources: Optional[Dict] = None,
-        snapshot: Optional["AuditSnapshot"] = None
+        propagation_sources: Optional[Dict[str, Any]] = None,
+        **kwargs: Any
     ) -> List[Dict[str, Any]]:
         """Evaluate architectural compliance rules and return detected violations."""
         pass

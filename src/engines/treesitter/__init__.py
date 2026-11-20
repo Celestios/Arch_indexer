@@ -122,7 +122,6 @@ class TreesitterEngine:
         # 3. Upsert symbols
         symbols_to_upsert = []
         occurrences_to_insert = []
-        superseded_treesitter_symbols = []
 
         from engines.reconciler import reconcile_symbol_id
 
@@ -138,9 +137,6 @@ class TreesitterEngine:
             ) or decl.clean_symbol
 
             decl.symbol = target_symbol_id
-
-            if target_symbol_id != decl.clean_symbol and decl.clean_symbol in existing:
-                superseded_treesitter_symbols.append(decl.clean_symbol)
 
             symbols_to_upsert.append({
                 "symbol": target_symbol_id,
@@ -164,10 +160,6 @@ class TreesitterEngine:
                 "end_col": decl.end_col,
                 "role": 1,  # SCIP SymbolRole.Definition
             })
-
-        # Remove any superseded duplicate Tree-sitter rows
-        if superseded_treesitter_symbols:
-            repository.graph.delete_symbols_bulk(superseded_treesitter_symbols)
 
         # Upsert symbols
         repository.symbols.upsert_symbols_bulk(symbols_to_upsert)

@@ -157,10 +157,10 @@ def test_auditor_upstream_propagation_and_path_tracing(tmp_path):
                 ('infra_sym', 'lib/infra/client.dart', 80, 1, 80, 10, 1)
         """)
         conn.execute("""
-            INSERT INTO edges (source, target, relation)
+            INSERT INTO edges (source, target, relation, call_line)
             VALUES 
-                ('presentation_sym', 'core_sym', 'Calls'),
-                ('core_sym', 'infra_sym', 'Calls')
+                ('presentation_sym', 'core_sym', 'Calls', 45),
+                ('core_sym', 'infra_sym', 'Calls', 12)
         """)
 
     auditor = Auditor(repository, root)
@@ -220,10 +220,10 @@ def test_auditor_respects_propagation_barriers(tmp_path):
                 ('infra_sym', 'lib/infra/client.dart', 'Method', null, null, null)
         """)
         conn.execute("""
-            INSERT INTO edges (source, target, relation)
+            INSERT INTO edges (source, target, relation, call_line)
             VALUES 
-                ('presentation_sym', 'core_sym', 'Calls'),
-                ('core_sym', 'infra_sym', 'Calls')
+                ('presentation_sym', 'core_sym', 'Calls', 45),
+                ('core_sym', 'infra_sym', 'Calls', 12)
         """)
 
     auditor = Auditor(repository, root)
@@ -565,10 +565,10 @@ def test_auditor_manual_fields_override_automatic_and_propagate(tmp_path):
                 ('infra_sym', 'lib/infra/client.dart', 'Method', null, null, null)
         """)
         conn.execute("""
-            INSERT INTO edges (source, target, relation)
+            INSERT INTO edges (source, target, relation, call_line)
             VALUES 
-                ('presentation_sym', 'core_sym', 'Calls'),
-                ('core_sym', 'infra_sym', 'Calls')
+                ('presentation_sym', 'core_sym', 'Calls', 45),
+                ('core_sym', 'infra_sym', 'Calls', 12)
         """)
 
     auditor = Auditor(repository, root)

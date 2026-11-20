@@ -8,7 +8,7 @@ It centralizes two invariants that were previously duplicated across consumers:
   field's own name when not explicitly configured).
 """
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 
 def _normalize_exclude(value: Any) -> List[str]:
@@ -203,6 +203,39 @@ class ArchConfig(_MappingMixin):
                 extra[key] = value
 
         return cls(prefixes=prefixes, exclude=exclude, extra=extra)
+
+    @classmethod
+    def parse_and_validate(cls, path: Union[str, Any]) -> Tuple[Optional["ArchConfig"], Dict[str, Any]]:
+        """Parses and validates the configuration from a project root or config file path.
+        Returns a tuple (arch_config_or_none, validation_result_dict).
+        """
+        import json
+        from pathlib import Path
+        p = Path(path)
+        if p.is_dir():
+            target = p / ".arch" / "config.json"
+            root = p
+        elif p.name == "config.json":
+            target = p
+            root = p.parent.parent if p.parent.name == ".arch" else p.parent
+        else:
+            target = p
+            root = p.parent
+
+        from auditor.validator import ConfigValidator
+        validator = ConfigValidator(root)
+        validator.config_path = target
+        val_result = validator.validate()
+
+        if not val_result.get("success", False):
+            return None, val_result
+
+        try:
+            with open(target, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return cls.from_dict(data), val_result
+        except Exception as e:
+            return None, {"success": False, "errors": [str(e)], "warnings": []}
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.prefixes.get(key, default)

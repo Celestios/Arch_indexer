@@ -1,8 +1,8 @@
 """Immutable snapshot of the architectural index used during a single audit pass.
 
-The snapshot performs the bulk database reads once and exposes cheap accessors for
-the hot paths (symbol/occurrence/incoming-edge lookups) so the audit and the
-violation checkers no longer issue redundant per-node queries.
+The snapshot performs the bulk database reads once and exposes pure accessors for
+the hot paths (symbol/definition/incoming-edge lookups) so the audit and the
+violation checkers operate completely in-memory with zero per-node database queries.
 """
 
 from dataclasses import dataclass, field
@@ -14,9 +14,8 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class AuditSnapshot:
-    """Bulk-loaded view of files, symbols, edges and definitions."""
+    """Bulk-loaded, pure immutable view of files, symbols, edges and definitions."""
 
-    repository: "Repository" = field(repr=False, compare=False)
     all_files: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     all_symbols: List[Dict[str, Any]] = field(default_factory=list)
     all_edges: List[Dict[str, Any]] = field(default_factory=list)
@@ -24,8 +23,6 @@ class AuditSnapshot:
     outgoing_map: Dict[str, List[str]] = field(default_factory=dict)
     incoming_map: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     definitions_by_symbol: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    occurrence_cache: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    symbol_cache: Dict[str, Optional[Dict[str, Any]]] = field(default_factory=dict)
 
     @classmethod
     def build(
@@ -60,12 +57,12 @@ class AuditSnapshot:
                     "source": src,
                     "relation": edge.get("relation"),
                     "weight": edge.get("weight", 1.0),
+                    "call_line": edge.get("call_line"),
                 })
 
         definitions_by_symbol = repository.symbols.get_definitions_map()
 
         return cls(
-            repository=repository,
             all_files=files,
             all_symbols=symbols,
             all_edges=edges,
@@ -76,25 +73,17 @@ class AuditSnapshot:
         )
 
     def get_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Returns symbol metadata from the bulk map, falling back to a cached query."""
-        if symbol in self.symbol_map:
-            return self.symbol_map[symbol]
-        if symbol in self.symbol_cache:
-            return self.symbol_cache[symbol]
-        record = self.repository.symbols.get_symbol(symbol)
-        self.symbol_cache[symbol] = record
-        return record
-
-    def get_occurrences(self, symbol: str) -> List[Dict[str, Any]]:
-        """Returns occurrences for a symbol, memoizing the repository query."""
-        if symbol not in self.occurrence_cache:
-            self.occurrence_cache[symbol] = self.repository.symbols.get_occurrences_for_symbol(symbol)
-        return self.occurrence_cache[symbol]
+        """Returns symbol metadata from the snapshot."""
+        return self.symbol_map.get(symbol)
 
     def get_definition(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Returns definition metadata (filepath, start_line, etc.) for a symbol."""
         return self.definitions_by_symbol.get(symbol)
 
     def get_incoming(self, symbol: str) -> List[Dict[str, Any]]:
-        """Returns incoming edges (with source/relation/weight) for a symbol."""
+        """Returns incoming edges (with source/relation/weight/call_line) for a symbol."""
         return self.incoming_map.get(symbol, [])
+
+    def get_outgoing(self, symbol: str) -> List[str]:
+        """Returns outgoing callee symbol identifiers."""
+        return self.outgoing_map.get(symbol, [])

@@ -76,8 +76,38 @@ def find_definition_line(repository, symbol: str, filepath: str) -> int:
     return 1
 
 
-def find_call_site_or_definition_line(repository, source_sym: str, target_sym: str, filepath: str) -> int:
-    """Find the call site line where target_sym is referenced in filepath, falling back to source_sym definition line."""
+def find_call_site_or_definition_line(
+    repository,
+    source_sym: str,
+    target_sym: str,
+    filepath: str,
+    edge: Optional[Dict[str, Any]] = None,
+    snapshot: Optional[Any] = None,
+) -> int:
+    """Find the call site line where target_sym is referenced in filepath, falling back to source_sym definition line.
+    If snapshot or edge is provided, returns coordinate directly without DB queries.
+    """
+    if edge and edge.get("call_line"):
+        return edge["call_line"]
+
+    if snapshot is not None:
+        if hasattr(snapshot, "incoming_map"):
+            for incoming_edge in snapshot.incoming_map.get(target_sym, []):
+                if incoming_edge.get("source") == source_sym and incoming_edge.get("call_line"):
+                    return incoming_edge["call_line"]
+        if hasattr(snapshot, "definitions_by_symbol"):
+            def_info = snapshot.definitions_by_symbol.get(source_sym)
+            if def_info and def_info.get("start_line"):
+                return def_info["start_line"]
+        if hasattr(snapshot, "symbol_map"):
+            sym_info = snapshot.symbol_map.get(source_sym)
+            if sym_info and sym_info.get("start_line"):
+                return sym_info["start_line"]
+        return 1
+
+    if repository is None:
+        return 1
+
     norm_fp = filepath.replace("\\", "/")
     occs = repository.symbols.get_occurrences_for_symbol(target_sym)
     for occ in occs:
@@ -95,6 +125,9 @@ def load_config(project_root: Path) -> ArchConfig:
     if not config_path.exists():
         return ArchConfig()
     try:
+        config, _ = ArchConfig.parse_and_validate(config_path)
+        if config is not None:
+            return config
         with open(config_path, "r", encoding="utf-8") as f:
             return ArchConfig.from_dict(json.load(f))
     except Exception:

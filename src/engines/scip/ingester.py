@@ -197,7 +197,6 @@ class IndexIngester:
                 scip_def_lines[(fp_norm, occ["symbol"])] = occ["start_line"]
 
         symbols_to_ingest = []
-        superseded_ts_symbols = set()
 
         for sym_id, sym in filtered_symbols.items():
             sym_fp = sym.get("filepath")
@@ -216,32 +215,26 @@ class IndexIngester:
                 )
 
             existing = existing_symbols.get(existing_id) if existing_id else None
-            if existing_id and existing_id != sym_id:
-                superseded_ts_symbols.add(existing_id)
-
-            sig = sym.get("signature")
-            doc = sym.get("docstring")
-            parent_sym = sym.get("parent_symbol")
-            code_block = sym.get("code_block")
-            body_hash = sym.get("body_hash")
 
             if existing:
-                # Merge code_block, body_hash, and AST signatures into the canonical symbol
-                if existing.get("signature"):
-                    sig = existing["signature"]
-                if existing.get("docstring") and not doc:
-                    doc = existing["docstring"]
-                if existing.get("parent_symbol") and not parent_sym:
-                    parent_sym = existing["parent_symbol"]
-                if existing.get("code_block") and not code_block:
-                    code_block = existing["code_block"]
-                if existing.get("body_hash") and not body_hash:
-                    body_hash = existing["body_hash"]
+                sig = existing.get("signature") or sym.get("signature")
+                doc = existing.get("docstring") or sym.get("docstring")
+                parent_sym = existing.get("parent_symbol") or sym.get("parent_symbol")
+                code_block = existing.get("code_block") or sym.get("code_block")
+                body_hash = existing.get("body_hash") or sym.get("body_hash")
+                kind = existing.get("kind") or sym.get("kind")
+            else:
+                sig = sym.get("signature")
+                doc = sym.get("docstring")
+                parent_sym = sym.get("parent_symbol")
+                code_block = sym.get("code_block")
+                body_hash = sym.get("body_hash")
+                kind = sym.get("kind")
 
             effective_body_hash = body_hash or sym.get("body_hash")
             if not existing or (
                 existing.get("body_hash") != effective_body_hash
-                or existing.get("kind") != sym.get("kind")
+                or existing.get("kind") != kind
                 or (sig and existing.get("signature") != sig)
                 or (doc and existing.get("docstring") != doc)
                 or (parent_sym and existing.get("parent_symbol") != parent_sym)
@@ -251,7 +244,7 @@ class IndexIngester:
                     "symbol": sym["symbol"],
                     "clean_symbol": demangle_scip_symbol(sym["symbol"]),
                     "filepath": sym["filepath"],
-                    "kind": sym["kind"],
+                    "kind": kind,
                     "signature": sig,
                     "docstring": doc,
                     "body_hash": effective_body_hash,
@@ -290,13 +283,13 @@ class IndexIngester:
                 "target": edge["target"],
                 "relation": edge["relation"],
                 "weight": 1.0,
+                "call_line": edge.get("call_line"),
             })
 
         return {
             "changed_set": changed_set,
             "filtered_symbols": filtered_symbols,
             "existing_symbols": existing_symbols,
-            "superseded_ts_symbols": superseded_ts_symbols,
             "symbols_to_ingest": symbols_to_ingest,
             "occurrences_to_ingest": filtered_occurrences,
             "diagnostics_to_ingest": filtered_diagnostics,
@@ -320,8 +313,6 @@ class IndexIngester:
                 filtered_symbols = staged_data.get("filtered_symbols")
             if existing_symbols is None:
                 existing_symbols = staged_data.get("existing_symbols")
-            if superseded_ts_symbols is None:
-                superseded_ts_symbols = staged_data.get("superseded_ts_symbols")
 
         changed_set = {fp.replace("\\", "/") for fp in changed_files}
 
@@ -347,10 +338,6 @@ class IndexIngester:
                 ]
                 if removed_symbols:
                     repository.graph.delete_symbols_bulk(removed_symbols)
-
-        # Delete any temporary duplicate Tree-sitter rows superseded by canonical SCIP IDs
-        if superseded_ts_symbols:
-            repository.graph.delete_symbols_bulk(list(superseded_ts_symbols))
 
     @classmethod
     def _write_index_batches(

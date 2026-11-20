@@ -1,4 +1,4 @@
-from typing import Dict, Any, Set
+from typing import Dict, Any, Set, List, Optional
 
 
 class EdgeWeightCalculator:
@@ -58,3 +58,44 @@ class EdgeWeightCalculator:
                 if field_conf.get("handler") == "propagation":
                     barriers.update(field_conf.get("barriers") or [])
         return barriers
+
+
+def update_edge_weights(
+    repository,
+    all_edges: List[Dict[str, Any]],
+    symbol_classifications: Dict[str, Dict[str, Any]],
+    config: Dict[str, Any]
+) -> List[tuple]:
+    """Updates edge weights based on layer, tier, and barrier rules."""
+    all_barriers = EdgeWeightCalculator.collect_barriers(config)
+
+    updated_edges = []
+    for edge in all_edges:
+        src, tgt, rel = edge["source"], edge["target"], edge["relation"]
+        src_data = symbol_classifications.get(src)
+        tgt_data = symbol_classifications.get(tgt)
+
+        src_fields = src_data["fields"] if src_data else None
+        tgt_fields = tgt_data["fields"] if tgt_data else None
+
+        weight = EdgeWeightCalculator.calculate_weight(src_fields, tgt_fields, all_barriers)
+        updated_edges.append((weight, src, tgt, rel))
+
+    if updated_edges and repository:
+        repository.edges.update_edge_weights_bulk(updated_edges)
+    return updated_edges
+
+
+class EdgeWeightUpdater:
+    """Computes and updates edge weights based on symbol classifications."""
+
+    def __init__(self, repository):
+        self.repository = repository
+
+    def update_edge_weights(
+        self,
+        all_edges: List[Dict[str, Any]],
+        symbol_classifications: Dict[str, Dict[str, Any]],
+        config: Dict[str, Any]
+    ) -> List[tuple]:
+        return update_edge_weights(self.repository, all_edges, symbol_classifications, config)

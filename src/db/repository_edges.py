@@ -1,18 +1,18 @@
 from collections import deque
 from typing import Dict, List, Any, Optional
 from db.connection import DbConnection
-from db.base import BaseRepository
+from db.base import BaseRepository, UPSERT_EDGE_SQL
 
 
 class EdgesRepository(BaseRepository):
     """Handles queries and updates to the 'edges' table."""
 
-    def add_edge(self, source: str, target: str, relation: str, weight: float = 1.0):
+    def add_edge(self, source: str, target: str, relation: str, weight: float = 1.0, call_line: Optional[int] = None):
         """Registers a structural call or dependency link between two symbols."""
         with self.db_conn.session() as conn:
             conn.execute(
-                "INSERT INTO edges (source, target, relation, weight) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (source, target, relation, weight)
+                UPSERT_EDGE_SQL,
+                (source, target, relation, weight, call_line)
             )
 
     def get_outgoing_edges(self, symbol: str) -> List[Dict[str, Any]]:
@@ -42,13 +42,14 @@ class EdgesRepository(BaseRepository):
                 edge["source"],
                 edge["target"],
                 edge["relation"],
-                edge.get("weight", 1.0)
+                edge.get("weight", 1.0),
+                edge.get("call_line")
             )
             for edge in edges_list
         ]
         with self.db_conn.session() as conn:
             conn.executemany(
-                "INSERT INTO edges (source, target, relation, weight) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                UPSERT_EDGE_SQL,
                 data
             )
 
@@ -145,10 +146,19 @@ class EdgesRepository(BaseRepository):
             return [{"source": r[0], "target": r[1], "weight": r[2]} for r in res]
 
     def get_all_edges_with_relation(self):
-        """Returns all edges with source, target, relation."""
+        """Returns all edges with source, target, relation, weight, and call_line."""
         with self.db_conn.session() as conn:
-            res = conn.execute("SELECT source, target, relation FROM edges").fetchall()
-            return [{"source": r[0], "target": r[1], "relation": r[2]} for r in res]
+            res = conn.execute("SELECT source, target, relation, weight, call_line FROM edges").fetchall()
+            return [
+                {
+                    "source": r[0],
+                    "target": r[1],
+                    "relation": r[2],
+                    "weight": r[3] if len(r) > 3 and r[3] is not None else 1.0,
+                    "call_line": r[4] if len(r) > 4 else None,
+                }
+                for r in res
+            ]
 
     def update_edge_weights_bulk(self, weight_updates):
         """Bulk update edge weights in a single transaction."""

@@ -2,109 +2,56 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from engines.scip.parser import (
-    extract_source_signature,
-    extract_source_docstring,
-    ScipParser,
-)
+from engines.scip.parser import ScipParser
 from utils.helpers import infer_scip_kind
 
 
-class TestScipSynthesizerSignatures:
-    def test_extract_rust_signature(self):
-        lines = [
-            "/// Documentation for daemon\n",
-            "#[derive(Debug, Clone)]\n",
-            "pub struct DaemonHandle {\n",
-            "    pub id: String,\n",
-            "}\n",
-        ]
-        # start_line = 3 (pub struct DaemonHandle)
-        sig = extract_source_signature(lines, start_line=3, end_line=5)
-        assert sig == "pub struct DaemonHandle"
+class TestScipCallsEdgeCallLine:
+    @patch("engines.scip.parser.scip_pb2.Index")
+    def test_calls_edge_records_call_line(self, mock_index_cls, tmp_path):
+        scip_file = tmp_path / "index.scip"
+        scip_file.write_bytes(b"dummy")
 
-    def test_extract_dart_signature(self):
-        lines = [
-            "/// Client interaction service\n",
-            "abstract class ClientInteractionService {\n",
-            "  void execute();\n",
-            "}\n",
-        ]
-        # start_line = 2 (abstract class ClientInteractionService)
-        sig = extract_source_signature(lines, start_line=2, end_line=4)
-        assert sig == "abstract class ClientInteractionService"
+        mock_index = MagicMock()
+        mock_index_cls.return_value = mock_index
+        mock_index.external_symbols = []
 
-    def test_extract_python_signature(self):
-        lines = [
-            "# Core dispatch function\n",
-            "def dispatch_event(\n",
-            "    name: str,\n",
-            "    payload: dict\n",
-            ") -> bool:\n",
-            "    return True\n",
-        ]
-        # start_line = 2, multiline signature
-        sig = extract_source_signature(lines, start_line=2, end_line=5)
-        assert "def dispatch_event(" in sig
-        assert "-> bool:" in sig
+        doc = MagicMock()
+        doc.relative_path = "src/service.py"
+        doc.symbols = []
 
-    def test_extract_single_line_statement(self):
-        lines = ["const int MAX_RETRIES = 5;\n"]
-        sig = extract_source_signature(lines, start_line=1, end_line=1)
-        assert sig == "const int MAX_RETRIES = 5;"
+        callee_sym = MagicMock()
+        callee_sym.symbol = "scip-python python test 0.1.0 pkg/Callee#execute()."
+        callee_sym.kind = 3
+        callee_sym.documentation = []
+        doc.symbols = [callee_sym]
 
-    def test_invalid_line_returns_none(self):
-        lines = ["line 1\n"]
-        assert extract_source_signature(lines, start_line=0, end_line=1) is None
-        assert extract_source_signature(lines, start_line=5, end_line=5) is None
-        assert extract_source_signature([], start_line=1, end_line=1) is None
+        caller_def = MagicMock()
+        caller_def.symbol = "scip-python python test 0.1.0 pkg/Caller#run()."
+        caller_def.symbol_roles = 1
+        caller_def.range = [10, 4, 25, 5]
 
+        callee_def = MagicMock()
+        callee_def.symbol = "scip-python python test 0.1.0 pkg/Callee#execute()."
+        callee_def.symbol_roles = 1
+        callee_def.range = [30, 4, 35, 5]
 
-class TestScipSynthesizerDocstrings:
-    def test_extract_rust_triple_slash_docstring(self):
-        lines = [
-            "/// First doc line\n",
-            "/// Second doc line\n",
-            "pub fn start() {}\n",
-        ]
-        docs = extract_source_docstring(lines, start_line=3)
-        assert docs == "First doc line\nSecond doc line"
+        callee_ref = MagicMock()
+        callee_ref.symbol = "scip-python python test 0.1.0 pkg/Callee#execute()."
+        callee_ref.symbol_roles = 0
+        callee_ref.range = [15, 8, 15, 20]
 
-    def test_extract_dart_docstring(self):
-        lines = [
-            "/// Service implementation\n",
-            "class MyService {}\n",
-        ]
-        docs = extract_source_docstring(lines, start_line=2)
-        assert docs == "Service implementation"
+        doc.occurrences = [caller_def, callee_def, callee_ref]
+        mock_index.documents = [doc]
 
-    def test_extract_c_block_docstring(self):
-        lines = [
-            "/**\n",
-            " * Computes hash\n",
-            " * @return hash value\n",
-            " */\n",
-            "int compute();\n",
-        ]
-        docs = extract_source_docstring(lines, start_line=5)
-        assert "Computes hash" in docs
-        assert "@return hash value" in docs
+        parsed = ScipParser.parse_index(scip_file, tmp_path)
 
-    def test_extract_python_hash_comments(self):
-        lines = [
-            "# Utility function\n",
-            "# Performs parsing\n",
-            "def parse():\n",
-        ]
-        docs = extract_source_docstring(lines, start_line=3)
-        assert docs == "Utility function\nPerforms parsing"
-
-    def test_no_preceding_doc_returns_empty(self):
-        lines = [
-            "let x = 1;\n",
-            "pub fn start() {}\n",
-        ]
-        assert extract_source_docstring(lines, start_line=2) == ""
+        assert len(parsed["edges"]) == 1
+        edge = parsed["edges"][0]
+        assert edge["source"] == "scip-python python test 0.1.0 pkg/Caller#run()."
+        assert edge["target"] == "scip-python python test 0.1.0 pkg/Callee#execute()."
+        assert edge["relation"] == "Calls"
+        assert edge["call_line"] == 16
 
 
 class TestScipDescriptorKindInference:
