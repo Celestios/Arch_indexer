@@ -6,7 +6,6 @@ from db.repository import Repository
 from auditor.classifier import SymbolClassifier
 from auditor.propagation import MetadataPropagator
 from auditor.path_tracer import PathTracer
-from auditor.config_loader import ConfigLoader
 from auditor.field_validator import FieldValidator
 from engines.edge_weights import EdgeWeightUpdater
 from auditor.snapshot import AuditSnapshot
@@ -14,6 +13,7 @@ from auditor.violation_checkers.dependency import DependencyViolationChecker
 from auditor.violation_checkers.naming import NamingViolationChecker
 from auditor.violation_checkers.pending import PendingAuditChecker
 from utils.helpers import config_path_for, load_config
+from utils.arch_config import ArchConfig
 
 
 class Auditor:
@@ -28,7 +28,7 @@ class Auditor:
         self.project_root = project_root
         self.config_path = config_path_for(project_root)
 
-        self.config_loader = ConfigLoader(self.config_path)
+        self.config_loader = None
         self.classifier = SymbolClassifier(repository)
         self.propagator = MetadataPropagator()
         self.tracer = PathTracer(repository)
@@ -51,7 +51,7 @@ class Auditor:
         Resolves symbols classifications, checks dependency rules, and saves violations.
         If filepath_filter is provided, only audits files matching that path prefix.
         """
-        config = self.config_loader.load_config()
+        config = self.config_loader.load_config() if self.config_loader else self.load_config()
         if not config:
             print("No architectural rules found in .arch/config.json. Skipping audit.", file=sys.stderr)
             return []
@@ -109,7 +109,12 @@ class Auditor:
             filepath = sym.get("filepath")
             if not filepath:
                 continue
-            prefix_conf = self.config_loader.get_applicable_config(filepath, config)
+            if self.config_loader and hasattr(self.config_loader, "get_applicable_config"):
+                prefix_conf = self.config_loader.get_applicable_config(filepath, config)
+            elif hasattr(config, "get_applicable_config"):
+                prefix_conf = config.get_applicable_config(filepath)
+            else:
+                prefix_conf = ArchConfig.find_applicable_config(filepath, config)
             if not prefix_conf:
                 continue
             outgoing = outgoing_map.get(sym["symbol"], [])

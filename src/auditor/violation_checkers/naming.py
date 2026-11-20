@@ -2,16 +2,15 @@ from typing import Dict, List, Any, Optional
 
 from db.repository import Repository
 from auditor.path_tracer import PathTracer
-from auditor.violation_checkers.base import BaseViolationChecker
 from utils.helpers import matches_filter, find_definition_line
 from utils.violation_id import ViolationId
 
 
-class NamingViolationChecker(BaseViolationChecker):
+class NamingViolationChecker:
     """Checks naming conventions for architectural boundary compliance."""
 
     def __init__(self, repository: Optional[Repository] = None, tracer: Optional[PathTracer] = None):
-        super().__init__(repository)
+        self.repository = repository
         self.tracer = tracer or PathTracer(repository)
 
     def check(

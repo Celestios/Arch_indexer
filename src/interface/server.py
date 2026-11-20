@@ -364,9 +364,8 @@ async def analyze(project_root: str, ctx: Context = None) -> str:
     """
     try:
         resolved_root, _ = await _resolve_context(ctx=ctx, project_root=project_root)
-        from auditor.validator import ConfigValidator
-        validator = ConfigValidator(resolved_root)
-        res = validator.validate()
+        from utils.arch_config import ArchConfig
+        _, res = ArchConfig.parse_and_validate(resolved_root)
         lines = ["=== Configuration Sanity & Completeness Analysis ==="]
         if res["warnings"]:
             lines.append(f"\n[WARNING] Reachability warnings ({len(res['warnings'])}):")

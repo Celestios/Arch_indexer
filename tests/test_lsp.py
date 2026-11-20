@@ -53,22 +53,3 @@ class TestBaseReportLSP:
         for checker_cls in [DependencyViolationChecker, NamingViolationChecker, PendingAuditChecker]:
             assert hasattr(checker_cls, 'check')
             assert callable(checker_cls.check)
-
-    def test_registry_returns_all_checkers(self):
-        from auditor.registry import ViolationCheckerRegistry
-        from auditor.violation_checkers.dependency import DependencyViolationChecker
-        from auditor.violation_checkers.naming import NamingViolationChecker
-        from auditor.violation_checkers.pending import PendingAuditChecker
-        # Ensure default checkers are registered
-        existing = ViolationCheckerRegistry.get_all()
-        existing_types = {type(c) for c in existing}
-        for cls in [DependencyViolationChecker, NamingViolationChecker, PendingAuditChecker]:
-            if cls not in existing_types:
-                instance = cls.__new__(cls)
-                ViolationCheckerRegistry.register(instance)
-        checkers = ViolationCheckerRegistry.get_all()
-        assert len(checkers) >= 3
-        types = [type(c) for c in checkers]
-        assert DependencyViolationChecker in types
-        assert NamingViolationChecker in types
-        assert PendingAuditChecker in types

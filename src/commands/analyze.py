@@ -1,6 +1,6 @@
 import sys
 
-from auditor.validator import ConfigValidator
+from utils.arch_config import ArchConfig
 from utils.session import get_project_root
 
 
@@ -13,8 +13,7 @@ def register(subparsers):
 def cmd_analyze(args):
     """Validates the architectural configuration ontology (config.json) completeness and sanity."""
     project_root = get_project_root(args)
-    validator = ConfigValidator(project_root)
-    res = validator.validate()
+    _, res = ArchConfig.parse_and_validate(project_root)
 
     print("=== Configuration Sanity & Completeness Analysis ===")
     

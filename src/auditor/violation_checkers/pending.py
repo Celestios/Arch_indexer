@@ -1,15 +1,14 @@
 from typing import Dict, List, Any, Optional
 from db.repository import Repository
-from auditor.violation_checkers.base import BaseViolationChecker
 from utils.helpers import matches_filter
 from utils.violation_id import ViolationId
 
 
-class PendingAuditChecker(BaseViolationChecker):
+class PendingAuditChecker:
     """Checks pending audit files for architectural boundary compliance."""
 
     def __init__(self, repository: Optional[Repository] = None):
-        super().__init__(repository)
+        self.repository = repository
 
     def check(
         self,

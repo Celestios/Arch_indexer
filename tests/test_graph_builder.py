@@ -287,7 +287,7 @@ def test_html_generator():
 
 
 def test_code_extractor_and_defining_blocks(tmp_path):
-    from src.utils.code_extractor import CodeExtractor
+    from src.utils.helpers import extract_code_slice
 
     # Create dummy python file
     code_file = tmp_path / "sample_service.py"
@@ -303,30 +303,22 @@ def test_code_extractor_and_defining_blocks(tmp_path):
         "    return x * 2\n"
     )
 
-    extractor = CodeExtractor(root_dir=str(tmp_path))
-    
     # 1. Test class extraction
-    cls_res = extractor.extract_code("sample_service.py", "SampleService", line=4)
-    assert cls_res is not None
-    start, end, text = cls_res
-    assert start == 3  # includes @dataclass decorator
-    assert end == 9
-    assert "class SampleService:" in text
-    assert "def do_work" in text
+    cls_text = extract_code_slice("sample_service.py", 3, 9, project_root=tmp_path)
+    assert cls_text is not None
+    assert "class SampleService:" in cls_text
+    assert "def do_work" in cls_text
 
     # 2. Test method extraction
-    m_res = extractor.extract_code("sample_service.py", "do_work()", line=7, parent_class="SampleService")
-    assert m_res is not None
-    m_s, m_e, m_text = m_res
-    assert m_s == 7
-    assert m_e == 9
+    m_text = extract_code_slice("sample_service.py", 7, 9, project_root=tmp_path)
+    assert m_text is not None
     assert "def do_work" in m_text
     assert "return count > 0" in m_text
 
     # 3. Test function extraction
-    fn_res = extractor.extract_code("sample_service.py", "top_level_fn()", line=11)
-    assert fn_res is not None
-    assert "def top_level_fn" in fn_res[2]
+    fn_text = extract_code_slice("sample_service.py", 11, 12, project_root=tmp_path)
+    assert fn_text is not None
+    assert "def top_level_fn" in fn_text
 
 
 def test_compact_nodes_serialization_with_code():

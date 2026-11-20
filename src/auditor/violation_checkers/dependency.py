@@ -2,25 +2,24 @@ from typing import Dict, List, Any, Optional, TYPE_CHECKING
 
 from db.repository import Repository
 from auditor.path_tracer import PathTracer
-from auditor.config_loader import ConfigLoader
-from auditor.violation_checkers.base import BaseViolationChecker
 from utils.helpers import matches_filter, find_definition_line, find_call_site_or_definition_line
 from utils.violation_id import ViolationId
+from utils.arch_config import ArchConfig
 
 if TYPE_CHECKING:
     from auditor.snapshot import AuditSnapshot
 
 
-class DependencyViolationChecker(BaseViolationChecker):
+class DependencyViolationChecker:
     """Checks dependency rules for architectural boundary compliance."""
 
     def __init__(
         self,
         repository: Optional[Repository] = None,
         tracer: Optional[PathTracer] = None,
-        config_loader: Optional[ConfigLoader] = None
+        config_loader: Optional[Any] = None
     ):
-        super().__init__(repository)
+        self.repository = repository
         self.tracer = tracer or PathTracer(repository)
         self.config_loader = config_loader
 
@@ -113,10 +112,12 @@ class DependencyViolationChecker(BaseViolationChecker):
         violation_id = ViolationId.generate(source_sym, target_sym, field_name, forbidden_source, forbidden_target)
         rule_id = f"{field_name}_{forbidden_source}_{forbidden_target}".lower().replace("/", "_").replace(".", "_")
         matched_prefix = None
-        if self.config_loader:
-            matched_prefix = self.config_loader.get_applicable_prefix(filepath, config)
-        elif hasattr(config, "get_applicable_prefix"):
+        if hasattr(config, "get_applicable_prefix"):
             matched_prefix = config.get_applicable_prefix(filepath)
+        elif self.config_loader and hasattr(self.config_loader, "get_applicable_prefix"):
+            matched_prefix = self.config_loader.get_applicable_prefix(filepath, config)
+        else:
+            matched_prefix = ArchConfig.find_applicable_prefix(filepath, config)
         if matched_prefix:
             rule_id = f"{matched_prefix}_{rule_id}".lower().replace("/", "_").replace(".", "_")
 

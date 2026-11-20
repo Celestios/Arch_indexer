@@ -8,7 +8,6 @@ from .ingestion.scip_parser import ScipParser
 from .domain.types import NodeType, EdgeType, NODE_COLORS, NODE_SIZES, EDGE_COLORS
 from .domain.entities import GraphNode, GraphEdge
 from .domain.model import GraphModel
-from .layout.spatial_layout import SpatialLayoutEngine
 from .layout.circuit_layout import CircuitLayoutEngine
 from .layout.zone_classifier import TopologicalZoneClassifier
 from .layout.package_sizer import PackageSizer
@@ -32,7 +31,6 @@ __all__ = [
     "GraphNode",
     "GraphEdge",
     "GraphModel",
-    "SpatialLayoutEngine",
     "CircuitLayoutEngine",
     "TopologicalZoneClassifier",
     "PackageSizer",

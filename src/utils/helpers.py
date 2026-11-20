@@ -60,6 +60,33 @@ def matches_filter(filepath: str, filepath_filter: Optional[str]) -> bool:
     """Check if filepath matches the filter prefix. Returns True if no filter."""
     if not filepath_filter:
         return True
+    return filepath.replace("\\", "/").startswith(filepath_filter.replace("\\", "/"))
+
+
+def extract_code_slice(
+    filepath: str,
+    start_line: Optional[int],
+    end_line: Optional[int],
+    project_root: Optional[Path] = None,
+) -> Optional[str]:
+    """Reads source lines from disk using 1-based start_line and end_line coordinates."""
+    if not start_line or not end_line or start_line <= 0:
+        return None
+    p = Path(filepath)
+    if not p.is_absolute() and project_root:
+        p = project_root / p
+    if not p.exists():
+        return None
+    try:
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        s_idx = max(0, start_line - 1)
+        e_idx = min(len(lines), end_line)
+        return "".join(lines[s_idx:e_idx]).rstrip()
+    except Exception:
+        return None
+    if not filepath_filter:
+        return True
     normalized = filepath.replace("\\", "/")
     return normalized.startswith(filepath_filter.replace("\\", "/"))
 

@@ -28,7 +28,6 @@ class TestAuditPipeline:
             auditor = Auditor(repo, project_root)
         
         assert auditor.repository == repo
-        assert auditor.config_loader is not None
         assert auditor.classifier is not None
         assert auditor.propagator is not None
         assert auditor.tracer is not None
@@ -98,19 +97,6 @@ class TestAuditPipeline:
         # Should complete without error
         assert isinstance(violations, list)
 
-    def test_violation_checker_registry_has_all_checkers(self):
-        """Registry contains all three built-in checkers."""
-        from auditor.registry import ViolationCheckerRegistry
-        from auditor.violation_checkers.dependency import DependencyViolationChecker
-        from auditor.violation_checkers.naming import NamingViolationChecker
-        from auditor.violation_checkers.pending import PendingAuditChecker
-        
-        checkers = ViolationCheckerRegistry.get_all()
-        types = [type(c) for c in checkers]
-        assert DependencyViolationChecker in types
-        assert NamingViolationChecker in types
-        assert PendingAuditChecker in types
-
 
 class TestLanguageDetection:
     """Integration tests for language detection across the codebase."""
@@ -134,21 +120,6 @@ class TestLanguageDetection:
         from engines.registry import LanguageRegistry
         assert LanguageRegistry.detect_language("file.xyz") is None
         assert LanguageRegistry.detect_language_from_name("Makefile") is None
-
-
-class TestDependencyContainer:
-    """Integration tests for the dependency injection container."""
-
-    def test_container_initializes(self):
-        from interfaces.container import DependencyContainer
-        container = DependencyContainer(Path("/fake/project"))
-        assert container.project_root == Path("/fake/project")
-        assert container.arch_dir == Path("/fake/project/.arch")
-
-    def test_container_context_manager(self):
-        from interfaces.container import DependencyContainer
-        with DependencyContainer(Path("/fake/project")) as container:
-            assert container is not None
 
 
 class TestServerConfig:

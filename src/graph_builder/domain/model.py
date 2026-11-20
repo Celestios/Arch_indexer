@@ -11,7 +11,7 @@ from pathlib import Path
 from .types import NodeType, EdgeType, NODE_COLORS, NODE_SIZES, EDGE_COLORS
 from .entities import GraphNode, GraphEdge
 from ..serialization.compressor import compress_circuit_data
-from utils.code_extractor import CodeExtractor
+from utils.helpers import extract_code_slice
 
 
 class GraphModel:
@@ -179,7 +179,6 @@ class GraphModel:
         symbols = reader.fetch_symbols()
         db_edges = reader.fetch_edges()
         symbol_defs = reader.fetch_symbol_definitions() if hasattr(reader, "fetch_symbol_definitions") else {}
-        code_extractor = CodeExtractor()
 
         if not files:
             unique_fps = {s["filepath"] for s in symbols if s.get("filepath")}
@@ -260,17 +259,8 @@ class GraphModel:
             col = def_info["start_col"] if def_info else None
             end_line = def_info["end_line"] if def_info else None
             code_text = s.get("code_block")
-
-            if not code_text and sym_filepath:
-                code_res = code_extractor.extract_code(
-                    filepath=sym_filepath,
-                    label=s["label"],
-                    raw_symbol=s["symbol"],
-                    line=line,
-                    parent_class=parent_cls_id,
-                )
-                if code_res:
-                    line, end_line, code_text = code_res
+            if not code_text and sym_filepath and line and end_line:
+                code_text = extract_code_slice(sym_filepath, line, end_line)
 
             node_label = s["label"]
             if (parent_cls_id or ntype in (NodeType.METHOD, NodeType.CONSTRUCTOR)) and "#" in node_label:

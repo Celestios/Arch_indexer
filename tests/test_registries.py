@@ -50,42 +50,6 @@ class TestLanguageRegistry:
         assert len(LanguageRegistry.list_languages()) == 0
 
 
-class TestViolationCheckerRegistry:
-    """Tests for ViolationCheckerRegistry."""
-
-    def setup_method(self):
-        from auditor.registry import ViolationCheckerRegistry
-        ViolationCheckerRegistry.clear()
-
-    def test_register_checker(self):
-        from auditor.registry import ViolationCheckerRegistry
-        checker = {"check": lambda: []}
-        ViolationCheckerRegistry.register(checker)
-        assert len(ViolationCheckerRegistry.get_all()) == 1
-
-    def test_get_all_returns_copy(self):
-        from auditor.registry import ViolationCheckerRegistry
-        checker = {"check": lambda: []}
-        ViolationCheckerRegistry.register(checker)
-        result = ViolationCheckerRegistry.get_all()
-        result.clear()  # Modify the copy
-        assert len(ViolationCheckerRegistry.get_all()) == 1  # Original unchanged
-
-    def test_register_multiple(self):
-        from auditor.registry import ViolationCheckerRegistry
-        c1, c2, c3 = {"name": "a"}, {"name": "b"}, {"name": "c"}
-        ViolationCheckerRegistry.register(c1)
-        ViolationCheckerRegistry.register(c2)
-        ViolationCheckerRegistry.register(c3)
-        assert len(ViolationCheckerRegistry.get_all()) == 3
-
-    def test_clear_resets(self):
-        from auditor.registry import ViolationCheckerRegistry
-        ViolationCheckerRegistry.register({"name": "x"})
-        ViolationCheckerRegistry.clear()
-        assert len(ViolationCheckerRegistry.get_all()) == 0
-
-
 class TestConditionEvaluatorRegistry:
     """Tests for ConditionEvaluatorRegistry."""
 

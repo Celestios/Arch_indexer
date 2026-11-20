@@ -205,6 +205,136 @@ class ArchConfig(_MappingMixin):
         return cls(prefixes=prefixes, exclude=exclude, extra=extra)
 
     @classmethod
+    def validate_dict(cls, config: Any) -> Dict[str, Any]:
+        """Validates structural correctness, completeness, and referential integrity of a config dict."""
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        if not isinstance(config, dict):
+            errors.append("Top-level configuration must be a JSON object (dictionary)")
+            return {"success": False, "errors": errors, "warnings": warnings}
+
+        for prefix, prefix_conf in config.items():
+            if prefix == "exclude":
+                if not isinstance(prefix_conf, (list, str)):
+                    errors.append("'exclude' must be a list of glob patterns or a string")
+                continue
+
+            if not isinstance(prefix_conf, dict):
+                errors.append(f"Prefix '{prefix}' configuration must be a JSON object")
+                continue
+
+            manual_fields = prefix_conf.get("manual_fields", {})
+            auto_fields = prefix_conf.get("automatic_fields", {})
+
+            if not isinstance(manual_fields, dict):
+                errors.append(f"Prefix '{prefix}' manual_fields must be a JSON object")
+                manual_fields = {}
+            if not isinstance(auto_fields, dict):
+                errors.append(f"Prefix '{prefix}' automatic_fields must be a JSON object")
+                auto_fields = {}
+
+            all_fields = {**manual_fields, **auto_fields}
+
+            def get_field_cfg(name: str):
+                if name in auto_fields:
+                    return auto_fields[name]
+                return manual_fields.get(name)
+
+            for field_name, field_conf in all_fields.items():
+                if not isinstance(field_conf, dict):
+                    errors.append(f"Prefix '{prefix}' field '{field_name}' configuration must be a JSON object")
+                    continue
+
+                default_val = field_conf.get("default")
+                allowed_values = field_conf.get("values")
+
+                # Reachability checks
+                if allowed_values is not None and field_name in auto_fields:
+                    if not isinstance(allowed_values, list):
+                        errors.append(f"Prefix '{prefix}' field '{field_name}' allowed values list must be a list")
+                    else:
+                        assigned = set()
+                        assignment_rules = field_conf.get("assignment_rules", [])
+                        if isinstance(assignment_rules, list):
+                            for rule in assignment_rules:
+                                if isinstance(rule, dict) and "value" in rule:
+                                    assigned.add(rule["value"])
+
+                        unused_values = [
+                            val for val in allowed_values
+                            if val != default_val and val not in assigned
+                        ]
+                        if unused_values:
+                            warnings.append(
+                                f"Prefix '{prefix}' field '{field_name}': Values that are defined but not used: {unused_values}"
+                            )
+
+                # Dependency rules referential integrity
+                rules = field_conf.get("rules", [])
+                if rules:
+                    if not isinstance(rules, list):
+                        errors.append(f"Prefix '{prefix}' field '{field_name}' rules must be a list")
+                    else:
+                        for idx, rule in enumerate(rules):
+                            if not isinstance(rule, dict):
+                                errors.append(f"Prefix '{prefix}' field '{field_name}' rule at index {idx} must be a JSON object")
+                                continue
+                            rule_type = rule.get("rule_type", "dependency_check")
+                            if rule_type == "package_restriction":
+                                source = rule.get("source")
+                                blocklist = rule.get("blocklist")
+                                if not source or blocklist is None:
+                                    errors.append(f"Prefix '{prefix}' field '{field_name}' rule at index {idx} must specify both 'source' and 'blocklist'")
+                                    continue
+                                if allowed_values is not None and source not in allowed_values:
+                                    errors.append(f"Prefix '{prefix}' field '{field_name}' rule source '{source}' is not in allowed values list {allowed_values}")
+                            elif rule_type == "naming_convention":
+                                classification = rule.get("classification")
+                                suffix = rule.get("name_suffix")
+                                prefix_pattern = rule.get("name_prefix")
+                                if not classification or (not suffix and not prefix_pattern):
+                                    errors.append(f"Prefix '{prefix}' field '{field_name}' rule at index {idx} must specify 'classification' and at least one of 'name_suffix' or 'name_prefix'")
+                                    continue
+                                if allowed_values is not None and classification not in allowed_values:
+                                    errors.append(f"Prefix '{prefix}' field '{field_name}' rule classification '{classification}' is not in allowed values list {allowed_values}")
+                            else:
+                                source = rule.get("source")
+                                target = rule.get("target")
+                                if not source or not target:
+                                    errors.append(f"Prefix '{prefix}' field '{field_name}' rule at index {idx} must specify both 'source' and 'target'")
+                                    continue
+                                if allowed_values is not None:
+                                    if source not in allowed_values:
+                                        errors.append(f"Prefix '{prefix}' field '{field_name}' rule source '{source}' is not in allowed values list {allowed_values}")
+                                    if target not in allowed_values:
+                                        errors.append(f"Prefix '{prefix}' field '{field_name}' rule target '{target}' is not in allowed values list {allowed_values}")
+
+                # Propagation barriers referential integrity
+                barriers = field_conf.get("barriers", [])
+                if barriers:
+                    if not isinstance(barriers, list):
+                        errors.append(f"Prefix '{prefix}' field '{field_name}' barriers must be a list")
+                    else:
+                        barrier_field_name = FieldConfig.from_dict(field_name, field_conf).barrier_field
+                        barrier_field_cfg = get_field_cfg(barrier_field_name)
+
+                        if not barrier_field_cfg:
+                            errors.append(
+                                f"Prefix '{prefix}' field '{field_name}' specifies barrier_field '{barrier_field_name}' which is not defined under this prefix"
+                            )
+                        else:
+                            barrier_allowed_values = barrier_field_cfg.get("values")
+                            if barrier_allowed_values is not None:
+                                invalid_barriers = [b for b in barriers if b not in barrier_allowed_values]
+                                if invalid_barriers:
+                                    errors.append(
+                                        f"Prefix '{prefix}' field '{field_name}' barrier(s) {invalid_barriers} are not in allowed values list {barrier_allowed_values} of barrier_field '{barrier_field_name}'"
+                                    )
+
+        return {"success": len(errors) == 0, "errors": errors, "warnings": warnings}
+
+    @classmethod
     def parse_and_validate(cls, path: Union[str, Any]) -> Tuple[Optional["ArchConfig"], Dict[str, Any]]:
         """Parses and validates the configuration from a project root or config file path.
         Returns a tuple (arch_config_or_none, validation_result_dict).
@@ -214,28 +344,86 @@ class ArchConfig(_MappingMixin):
         p = Path(path)
         if p.is_dir():
             target = p / ".arch" / "config.json"
-            root = p
         elif p.name == "config.json":
             target = p
-            root = p.parent.parent if p.parent.name == ".arch" else p.parent
         else:
             target = p
-            root = p.parent
 
-        from auditor.validator import ConfigValidator
-        validator = ConfigValidator(root)
-        validator.config_path = target
-        val_result = validator.validate()
-
-        if not val_result.get("success", False):
-            return None, val_result
+        if not target.exists():
+            return None, {"success": False, "errors": [f"Configuration file not found at {target}"], "warnings": []}
 
         try:
             with open(target, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return cls.from_dict(data), val_result
+        except json.JSONDecodeError as e:
+            return None, {"success": False, "errors": [f"Failed to parse config.json as JSON: {e}"], "warnings": []}
         except Exception as e:
-            return None, {"success": False, "errors": [str(e)], "warnings": []}
+            return None, {"success": False, "errors": [f"Failed to read config.json: {e}"], "warnings": []}
+
+        val_result = cls.validate_dict(data)
+        if not val_result.get("success", False):
+            return None, val_result
+
+        return cls.from_dict(data), val_result
+
+    @classmethod
+    def find_applicable_prefix(cls, filepath: str, config: Union["ArchConfig", Dict[str, Any]]) -> Optional[str]:
+        if isinstance(config, ArchConfig):
+            return config.get_applicable_prefix(filepath)
+        prefixes = config.get("prefixes", config) if isinstance(config, dict) else {}
+        normalized_path = filepath.replace("\\", "/")
+        matching = None
+        for prefix in prefixes.keys():
+            if prefix == ".":
+                if matching is None:
+                    matching = "."
+            elif normalized_path.startswith(prefix):
+                if matching is None or len(prefix) > len(matching):
+                    matching = prefix
+        return matching
+
+    @classmethod
+    def find_applicable_config(cls, filepath: str, config: Union["ArchConfig", Dict[str, Any]]) -> Optional[Any]:
+        if isinstance(config, ArchConfig):
+            return config.get_applicable_config(filepath)
+        prefix = cls.find_applicable_prefix(filepath, config)
+        return config.get(prefix) if prefix and isinstance(config, dict) else None
+
+    def get_applicable_prefix(
+        self,
+        filepath: str,
+        config: Optional[Union["ArchConfig", Dict[str, Any]]] = None,
+    ) -> Optional[str]:
+        """Resolves the most specific directory prefix matching the filepath."""
+        if config is not None:
+            prefixes = config.prefixes if isinstance(config, ArchConfig) else config
+        else:
+            prefixes = self.prefixes
+
+        normalized_path = filepath.replace("\\", "/")
+        matching_prefix = None
+        for prefix in prefixes.keys():
+            if prefix == ".":
+                if matching_prefix is None:
+                    matching_prefix = "."
+            elif normalized_path.startswith(prefix):
+                if matching_prefix is None or len(prefix) > len(matching_prefix):
+                    matching_prefix = prefix
+        return matching_prefix
+
+    def get_applicable_config(
+        self,
+        filepath: str,
+        config: Optional[Union["ArchConfig", Dict[str, Any]]] = None,
+    ) -> Optional[Any]:
+        """Resolves the most specific directory prefix configuration matching the filepath."""
+        if config is not None:
+            prefixes = config.prefixes if isinstance(config, ArchConfig) else config
+        else:
+            prefixes = self.prefixes
+
+        matching_prefix = self.get_applicable_prefix(filepath, prefixes)
+        return prefixes.get(matching_prefix) if matching_prefix else None
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.prefixes.get(key, default)

@@ -1,14 +1,14 @@
 import sys
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from db.repository import Repository
-from auditor.config_loader import ConfigLoader
+from utils.arch_config import ArchConfig
 
 
 class FieldValidator:
     """Validates and resets manual fields based on config rules."""
 
-    def __init__(self, repository: Repository, config_loader: ConfigLoader):
+    def __init__(self, repository: Repository, config_loader: Optional[Any] = None):
         self.repository = repository
         self.config_loader = config_loader
 
@@ -18,7 +18,12 @@ class FieldValidator:
         db_updated = False
 
         for filepath, meta in file_metadata.items():
-            prefix_conf = self.config_loader.get_applicable_config(filepath, config)
+            if hasattr(config, "get_applicable_config"):
+                prefix_conf = config.get_applicable_config(filepath)
+            elif self.config_loader and hasattr(self.config_loader, "get_applicable_config"):
+                prefix_conf = self.config_loader.get_applicable_config(filepath, config)
+            else:
+                prefix_conf = ArchConfig.find_applicable_config(filepath, config)
             if not prefix_conf:
                 continue
 
