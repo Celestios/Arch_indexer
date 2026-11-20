@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import tree_sitter
 
+from engines.registry import LanguageRegistry
 from engines.treesitter.loader import TreesitterLoader
 from engines.treesitter.annotations import AnnotationExtractor
 from engines.treesitter.metrics import MetricsCalculator
@@ -152,17 +153,7 @@ class TreesitterExtractor:
 
         # Derive module prefix from filepath
         module_prefix = cls._derive_module_prefix(norm_fp)
-
-        if language in ("tsx", "javascript", "jsx"):
-            extractor_fn = cls._extract_typescript
-        else:
-            extractor_fn = getattr(cls, f"_extract_{language}", None)
-
-        if not extractor_fn:
-            # Fallback for generic C-like / other languages
-            extractor_fn = cls._extract_generic
-
-        return extractor_fn(tree.root_node, code_bytes, norm_fp, module_prefix, language)
+        return cls._extract_ast(tree.root_node, code_bytes, norm_fp, module_prefix, language)
 
     @classmethod
     def _derive_module_prefix(cls, filepath: str) -> str:
@@ -194,7 +185,49 @@ class TreesitterExtractor:
         return stem
 
     @classmethod
-    def _extract_python(
+    def _build_declaration(
+        cls,
+        node: tree_sitter.Node,
+        name: str,
+        clean_symbol: str,
+        kind: str,
+        filepath: str,
+        signature: str,
+        docstring: str,
+        body_node: Optional[tree_sitter.Node],
+        code_bytes: bytes,
+        parent_symbol: Optional[str],
+        language: str,
+    ) -> SymbolDeclaration:
+        """Constructs a normalized SymbolDeclaration with computed hash, annotations, and metrics."""
+        body_bytes = code_bytes[body_node.start_byte:body_node.end_byte] if body_node else b""
+        b_hash = hashlib.sha256(body_bytes).hexdigest()[:16]
+        code_block = code_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+        annotations = AnnotationExtractor.extract_annotations(node, code_bytes, language)
+        metrics = MetricsCalculator.calculate_metrics(node, code_bytes)
+
+        return SymbolDeclaration(
+            name=name,
+            clean_symbol=clean_symbol,
+            kind=kind,
+            filepath=filepath,
+            start_line=node.start_point.row + 1,
+            start_col=node.start_point.column,
+            end_line=node.end_point.row + 1,
+            end_col=node.end_point.column,
+            signature=signature,
+            docstring=docstring,
+            body_hash=b_hash,
+            parent_symbol=parent_symbol,
+            code_block=code_block,
+            annotations=annotations,
+            complexity=metrics["cyclomatic_complexity"],
+            nesting_depth=metrics["max_nesting_depth"],
+            loc=metrics["loc"],
+        )
+
+    @classmethod
+    def _extract_ast(
         cls,
         root: tree_sitter.Node,
         code_bytes: bytes,
@@ -202,114 +235,154 @@ class TreesitterExtractor:
         module_prefix: str,
         language: str,
     ) -> List[SymbolDeclaration]:
+        """Parameterized AST symbol extractor leveraging declarative node kinds from LanguageRegistry."""
         symbols: List[SymbolDeclaration] = []
+        spec = LanguageRegistry.get_spec(language)
+        node_kinds = spec.ast_node_kinds if spec and spec.ast_node_kinds else {}
 
         def visit(node: tree_sitter.Node, parent_scope: str, parent_clean: Optional[str]):
             actual_node = node
-            # If wrapped in decorated_definition, inspect inner definition
-            if node.type == "decorated_definition":
+            # Unwrap decorated or exported definitions
+            if node.type in ("decorated_definition", "export_statement", "export_declaration"):
                 for child in node.children:
-                    if child.type in ("class_definition", "function_definition"):
+                    if child.type in node_kinds or any(k in child.type for k in ("class", "function", "method", "interface", "struct", "enum", "trait", "type")):
                         actual_node = child
                         break
 
-            if actual_node.type == "class_definition":
-                name_node = actual_node.child_by_field_name("name")
+            # Handle Rust impl_item special case
+            if actual_node.type == "impl_item":
+                type_node = actual_node.child_by_field_name("type")
                 body_node = actual_node.child_by_field_name("body")
-                if name_node and body_node:
-                    class_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
-                    clean_sym = f"{parent_scope}.{class_name}" if parent_scope else class_name
-                    
-                    # Signature: from node start (or actual_node start) to body start
-                    sig_bytes = code_bytes[actual_node.start_byte:body_node.start_byte].strip()
-                    sig = sig_bytes.decode("utf-8", errors="replace")
-                    
-                    # Docstring: first string expression statement in body
-                    doc = cls._extract_python_docstring(body_node, code_bytes)
-                    
-                    body_bytes = code_bytes[body_node.start_byte:body_node.end_byte]
-                    b_hash = hashlib.sha256(body_bytes).hexdigest()[:16]
-                    code_block = code_bytes[actual_node.start_byte:actual_node.end_byte].decode("utf-8", errors="replace")
-                    annotations = AnnotationExtractor.extract_annotations(actual_node, code_bytes, language)
-                    metrics = MetricsCalculator.calculate_metrics(actual_node, code_bytes)
-
-                    sym_decl = SymbolDeclaration(
-                        name=class_name,
-                        clean_symbol=clean_sym,
-                        kind="Class",
-                        filepath=filepath,
-                        start_line=actual_node.start_point.row + 1,
-                        start_col=actual_node.start_point.column,
-                        end_line=actual_node.end_point.row + 1,
-                        end_col=actual_node.end_point.column,
-                        signature=sig,
-                        docstring=doc,
-                        body_hash=b_hash,
-                        parent_symbol=parent_clean,
-                        code_block=code_block,
-                        annotations=annotations,
-                        complexity=metrics["cyclomatic_complexity"],
-                        nesting_depth=metrics["max_nesting_depth"],
-                        loc=metrics["loc"],
-                    )
-                    symbols.append(sym_decl)
-
-                    # Recurse inside class body
+                impl_name = code_bytes[type_node.start_byte:type_node.end_byte].decode("utf-8", errors="replace") if type_node else ""
+                clean_impl = f"{module_prefix}.{impl_name}" if impl_name else module_prefix
+                if body_node:
                     for child in body_node.children:
-                        visit(child, clean_sym, clean_sym)
-                    return
+                        visit(child, clean_impl, clean_impl)
+                return
 
-            elif actual_node.type == "function_definition":
+            kind = None
+            if actual_node.type in node_kinds:
+                kind = node_kinds[actual_node.type]
+            elif "class" in actual_node.type:
+                kind = "Class"
+            elif "interface" in actual_node.type:
+                kind = "Interface"
+            elif "struct" in actual_node.type:
+                kind = "Struct"
+            elif "enum" in actual_node.type:
+                kind = "Enum"
+            elif "trait" in actual_node.type:
+                kind = "Trait"
+            elif "function" in actual_node.type or "method" in actual_node.type:
+                kind = "Function"
+
+            if kind:
                 name_node = actual_node.child_by_field_name("name")
+                if not name_node and actual_node.child_by_field_name("declarator"):
+                    decl = actual_node.child_by_field_name("declarator")
+                    while decl and decl.type in ("function_declarator", "pointer_declarator"):
+                        sub_decl = decl.child_by_field_name("declarator")
+                        if sub_decl:
+                            decl = sub_decl
+                        else:
+                            break
+                    if decl and decl.type == "identifier":
+                        name_node = decl
+                    elif decl:
+                        name_node = decl.child_by_field_name("declarator") or decl
+
                 body_node = actual_node.child_by_field_name("body")
-                if name_node and body_node:
-                    fn_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
-                    kind = "Method" if parent_clean else "Function"
-                    if fn_name == "__init__":
-                        kind = "Constructor"
-                    clean_sym = f"{parent_scope}.{fn_name}()" if parent_scope else f"{fn_name}()"
+                if name_node:
+                    item_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
 
-                    sig_bytes = code_bytes[actual_node.start_byte:body_node.start_byte].strip()
-                    sig = sig_bytes.decode("utf-8", errors="replace")
-                    doc = cls._extract_python_docstring(body_node, code_bytes)
+                    # Refine method / constructor kind
+                    if kind in ("Function", "Method"):
+                        if item_name == "__init__":
+                            kind = "Constructor"
+                        elif parent_clean:
+                            kind = "Method"
+                        else:
+                            kind = "Function"
 
-                    body_bytes = code_bytes[body_node.start_byte:body_node.end_byte]
-                    b_hash = hashlib.sha256(body_bytes).hexdigest()[:16]
-                    code_block = code_bytes[actual_node.start_byte:actual_node.end_byte].decode("utf-8", errors="replace")
-                    annotations = AnnotationExtractor.extract_annotations(actual_node, code_bytes, language)
-                    metrics = MetricsCalculator.calculate_metrics(actual_node, code_bytes)
+                    is_callable = kind in ("Function", "Method", "Constructor")
+                    if is_callable:
+                        clean_sym = f"{parent_scope}.{item_name}()" if parent_scope else f"{item_name}()"
+                    else:
+                        clean_sym = f"{parent_scope}.{item_name}" if parent_scope else item_name
 
-                    sym_decl = SymbolDeclaration(
-                        name=fn_name,
+                    # Signature & docstring extraction
+                    if language == "python":
+                        sig_bytes = code_bytes[actual_node.start_byte:body_node.start_byte].strip() if body_node else code_bytes[actual_node.start_byte:actual_node.end_byte].strip()
+                        sig = sig_bytes.decode("utf-8", errors="replace")
+                        doc = cls._extract_python_docstring(body_node, code_bytes)
+                    else:
+                        if body_node:
+                            sig_bytes = code_bytes[actual_node.start_byte:body_node.start_byte].strip()
+                        else:
+                            sig_bytes = code_bytes[actual_node.start_byte:actual_node.end_byte].strip()
+                        sig = sig_bytes.decode("utf-8", errors="replace").rstrip("{").strip()
+                        doc = cls._extract_doc_comments(actual_node, code_bytes)
+
+                    sym_decl = cls._build_declaration(
+                        node=actual_node,
+                        name=item_name,
                         clean_symbol=clean_sym,
                         kind=kind,
                         filepath=filepath,
-                        start_line=actual_node.start_point.row + 1,
-                        start_col=actual_node.start_point.column,
-                        end_line=actual_node.end_point.row + 1,
-                        end_col=actual_node.end_point.column,
                         signature=sig,
                         docstring=doc,
-                        body_hash=b_hash,
+                        body_node=body_node,
+                        code_bytes=code_bytes,
                         parent_symbol=parent_clean,
-                        code_block=code_block,
-                        annotations=annotations,
-                        complexity=metrics["cyclomatic_complexity"],
-                        nesting_depth=metrics["max_nesting_depth"],
-                        loc=metrics["loc"],
+                        language=language,
                     )
                     symbols.append(sym_decl)
 
-                    # Also visit nested functions if any
-                    for child in body_node.children:
-                        visit(child, clean_sym[:-2], clean_sym)
-                    return
+                    # Recurse inside container bodies
+                    if body_node:
+                        if language == "python":
+                            if kind == "Class":
+                                for child in body_node.children:
+                                    visit(child, clean_sym, clean_sym)
+                                return
+                            elif kind in ("Function", "Method", "Constructor"):
+                                for child in body_node.children:
+                                    visit(child, clean_sym[:-2], clean_sym)
+                                return
+                        elif kind in ("Class", "Interface", "Struct", "Trait"):
+                            for child in body_node.children:
+                                visit(child, clean_sym, clean_sym)
+                            return
 
             for child in node.children:
                 visit(child, parent_scope, parent_clean)
 
         visit(root, module_prefix, None)
         return symbols
+
+    @classmethod
+    def _extract_python(
+        cls, root: tree_sitter.Node, code_bytes: bytes, filepath: str, module_prefix: str, language: str = "python"
+    ) -> List[SymbolDeclaration]:
+        return cls._extract_ast(root, code_bytes, filepath, module_prefix, language)
+
+    @classmethod
+    def _extract_rust(
+        cls, root: tree_sitter.Node, code_bytes: bytes, filepath: str, module_prefix: str, language: str = "rust"
+    ) -> List[SymbolDeclaration]:
+        return cls._extract_ast(root, code_bytes, filepath, module_prefix, language)
+
+    @classmethod
+    def _extract_typescript(
+        cls, root: tree_sitter.Node, code_bytes: bytes, filepath: str, module_prefix: str, language: str = "typescript"
+    ) -> List[SymbolDeclaration]:
+        return cls._extract_ast(root, code_bytes, filepath, module_prefix, language)
+
+    @classmethod
+    def _extract_generic(
+        cls, root: tree_sitter.Node, code_bytes: bytes, filepath: str, module_prefix: str, language: str = "generic"
+    ) -> List[SymbolDeclaration]:
+        return cls._extract_ast(root, code_bytes, filepath, module_prefix, language)
 
     @classmethod
     def _extract_python_docstring(cls, body_node: tree_sitter.Node, code_bytes: bytes) -> str:
@@ -327,290 +400,6 @@ class TreesitterExtractor:
                         break
                 return raw_text.strip()
         return ""
-
-    @classmethod
-    def _extract_rust(
-        cls,
-        root: tree_sitter.Node,
-        code_bytes: bytes,
-        filepath: str,
-        module_prefix: str,
-        language: str,
-    ) -> List[SymbolDeclaration]:
-        symbols: List[SymbolDeclaration] = []
-
-        def visit(node: tree_sitter.Node, parent_scope: str, parent_clean: Optional[str]):
-            kind = None
-            if node.type == "struct_item":
-                kind = "Struct"
-            elif node.type == "enum_item":
-                kind = "Enum"
-            elif node.type == "trait_item":
-                kind = "Trait"
-            elif node.type == "function_item":
-                kind = "Method" if parent_clean else "Function"
-            elif node.type == "type_item":
-                kind = "TypeAlias"
-
-            if kind:
-                name_node = node.child_by_field_name("name")
-                if not name_node and node.child_by_field_name("declarator"):
-                    decl = node.child_by_field_name("declarator")
-                    while decl and decl.type in ("function_declarator", "pointer_declarator"):
-                        sub_decl = decl.child_by_field_name("declarator")
-                        if sub_decl:
-                            decl = sub_decl
-                        else:
-                            break
-                    if decl and decl.type == "identifier":
-                        name_node = decl
-                    elif decl:
-                        name_node = decl.child_by_field_name("declarator") or decl
-
-                body_node = node.child_by_field_name("body")
-                if name_node:
-                    item_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
-                    is_callable = kind in ("Function", "Method")
-                    clean_sym = f"{parent_scope}.{item_name}()" if is_callable else f"{parent_scope}.{item_name}"
-                    if not parent_scope:
-                        clean_sym = f"{item_name}()" if is_callable else item_name
-
-                    # Signature
-                    if body_node:
-                        sig_bytes = code_bytes[node.start_byte:body_node.start_byte].strip()
-                    else:
-                        sig_bytes = code_bytes[node.start_byte:node.end_byte].strip()
-                    sig = sig_bytes.decode("utf-8", errors="replace").rstrip("{").strip()
-
-                    # Doc comment preceding node
-                    doc = cls._extract_doc_comments(node, code_bytes)
-
-                    body_bytes = code_bytes[body_node.start_byte:body_node.end_byte] if body_node else b""
-                    b_hash = hashlib.sha256(body_bytes).hexdigest()[:16]
-                    code_block = code_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
-                    annotations = AnnotationExtractor.extract_annotations(node, code_bytes, language)
-                    metrics = MetricsCalculator.calculate_metrics(node, code_bytes)
-
-                    sym_decl = SymbolDeclaration(
-                        name=item_name,
-                        clean_symbol=clean_sym,
-                        kind=kind,
-                        filepath=filepath,
-                        start_line=node.start_point.row + 1,
-                        start_col=node.start_point.column,
-                        end_line=node.end_point.row + 1,
-                        end_col=node.end_point.column,
-                        signature=sig,
-                        docstring=doc,
-                        body_hash=b_hash,
-                        parent_symbol=parent_clean,
-                        code_block=code_block,
-                        annotations=annotations,
-                        complexity=metrics["cyclomatic_complexity"],
-                        nesting_depth=metrics["max_nesting_depth"],
-                        loc=metrics["loc"],
-                    )
-                    symbols.append(sym_decl)
-
-                    if body_node and kind in ("Trait", "Struct"):
-                        for child in body_node.children:
-                            visit(child, clean_sym, clean_sym)
-                    return
-
-            elif node.type == "impl_item":
-                # Find type being implemented
-                type_node = node.child_by_field_name("type")
-                body_node = node.child_by_field_name("body")
-                impl_name = code_bytes[type_node.start_byte:type_node.end_byte].decode("utf-8", errors="replace") if type_node else ""
-                clean_impl = f"{module_prefix}.{impl_name}" if impl_name else module_prefix
-                if body_node:
-                    for child in body_node.children:
-                        visit(child, clean_impl, clean_impl)
-                return
-
-            for child in node.children:
-                visit(child, parent_scope, parent_clean)
-
-        visit(root, module_prefix, None)
-        return symbols
-
-    @classmethod
-    def _extract_typescript(
-        cls,
-        root: tree_sitter.Node,
-        code_bytes: bytes,
-        filepath: str,
-        module_prefix: str,
-        language: str,
-    ) -> List[SymbolDeclaration]:
-        symbols: List[SymbolDeclaration] = []
-
-        def visit(node: tree_sitter.Node, parent_scope: str, parent_clean: Optional[str]):
-            actual_node = node
-            if node.type in ("export_statement", "export_declaration"):
-                for child in node.children:
-                    if child.type in (
-                        "class_declaration", "interface_declaration", "type_alias_declaration",
-                        "enum_declaration", "function_declaration"
-                    ):
-                        actual_node = child
-                        break
-
-            kind = None
-            if actual_node.type == "class_declaration":
-                kind = "Class"
-            elif actual_node.type == "interface_declaration":
-                kind = "Interface"
-            elif actual_node.type == "type_alias_declaration":
-                kind = "TypeAlias"
-            elif actual_node.type == "enum_declaration":
-                kind = "Enum"
-            elif actual_node.type in ("function_declaration", "method_definition"):
-                kind = "Method" if parent_clean else "Function"
-
-            if kind:
-                name_node = actual_node.child_by_field_name("name")
-                body_node = actual_node.child_by_field_name("body")
-                if name_node:
-                    item_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
-                    is_callable = kind in ("Function", "Method")
-                    clean_sym = f"{parent_scope}.{item_name}()" if is_callable else f"{parent_scope}.{item_name}"
-
-                    if body_node:
-                        sig_bytes = code_bytes[actual_node.start_byte:body_node.start_byte].strip()
-                    else:
-                        sig_bytes = code_bytes[actual_node.start_byte:actual_node.end_byte].strip()
-                    sig = sig_bytes.decode("utf-8", errors="replace").rstrip("{").strip()
-
-                    doc = cls._extract_doc_comments(actual_node, code_bytes)
-                    body_bytes = code_bytes[body_node.start_byte:body_node.end_byte] if body_node else b""
-                    b_hash = hashlib.sha256(body_bytes).hexdigest()[:16]
-                    code_block = code_bytes[actual_node.start_byte:actual_node.end_byte].decode("utf-8", errors="replace")
-                    annotations = AnnotationExtractor.extract_annotations(actual_node, code_bytes, language)
-                    metrics = MetricsCalculator.calculate_metrics(actual_node, code_bytes)
-
-                    sym_decl = SymbolDeclaration(
-                        name=item_name,
-                        clean_symbol=clean_sym,
-                        kind=kind,
-                        filepath=filepath,
-                        start_line=actual_node.start_point.row + 1,
-                        start_col=actual_node.start_point.column,
-                        end_line=actual_node.end_point.row + 1,
-                        end_col=actual_node.end_point.column,
-                        signature=sig,
-                        docstring=doc,
-                        body_hash=b_hash,
-                        parent_symbol=parent_clean,
-                        code_block=code_block,
-                        annotations=annotations,
-                        complexity=metrics["cyclomatic_complexity"],
-                        nesting_depth=metrics["max_nesting_depth"],
-                        loc=metrics["loc"],
-                    )
-                    symbols.append(sym_decl)
-
-                    if body_node and kind in ("Class", "Interface"):
-                        for child in body_node.children:
-                            visit(child, clean_sym, clean_sym)
-                    return
-
-            for child in node.children:
-                visit(child, parent_scope, parent_clean)
-
-        visit(root, module_prefix, None)
-        return symbols
-
-    @classmethod
-    def _extract_generic(
-        cls,
-        root: tree_sitter.Node,
-        code_bytes: bytes,
-        filepath: str,
-        module_prefix: str,
-        language: str,
-    ) -> List[SymbolDeclaration]:
-        """Generic fallback extractor for Go, C/C++, C#, Java, etc."""
-        symbols: List[SymbolDeclaration] = []
-
-        def visit(node: tree_sitter.Node, parent_scope: str, parent_clean: Optional[str]):
-            kind = None
-            if "class" in node.type:
-                kind = "Class"
-            elif "interface" in node.type:
-                kind = "Interface"
-            elif "struct" in node.type:
-                kind = "Struct"
-            elif "enum" in node.type:
-                kind = "Enum"
-            elif "function" in node.type or "method" in node.type:
-                kind = "Method" if parent_clean else "Function"
-
-            if kind:
-                name_node = node.child_by_field_name("name")
-                if not name_node and node.child_by_field_name("declarator"):
-                    decl = node.child_by_field_name("declarator")
-                    while decl and decl.type in ("function_declarator", "pointer_declarator"):
-                        sub_decl = decl.child_by_field_name("declarator")
-                        if sub_decl:
-                            decl = sub_decl
-                        else:
-                            break
-                    if decl and decl.type == "identifier":
-                        name_node = decl
-                    elif decl:
-                        name_node = decl.child_by_field_name("declarator") or decl
-
-                body_node = node.child_by_field_name("body")
-                if name_node:
-                    item_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
-                    is_callable = kind in ("Function", "Method")
-                    clean_sym = f"{parent_scope}.{item_name}()" if is_callable else f"{parent_scope}.{item_name}"
-
-                    if body_node:
-                        sig_bytes = code_bytes[node.start_byte:body_node.start_byte].strip()
-                    else:
-                        sig_bytes = code_bytes[node.start_byte:node.end_byte].strip()
-                    sig = sig_bytes.decode("utf-8", errors="replace").rstrip("{").strip()
-
-                    doc = cls._extract_doc_comments(node, code_bytes)
-                    body_bytes = code_bytes[body_node.start_byte:body_node.end_byte] if body_node else b""
-                    b_hash = hashlib.sha256(body_bytes).hexdigest()[:16]
-                    code_block = code_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
-                    annotations = AnnotationExtractor.extract_annotations(node, code_bytes, language)
-                    metrics = MetricsCalculator.calculate_metrics(node, code_bytes)
-
-                    sym_decl = SymbolDeclaration(
-                        name=item_name,
-                        clean_symbol=clean_sym,
-                        kind=kind,
-                        filepath=filepath,
-                        start_line=node.start_point.row + 1,
-                        start_col=node.start_point.column,
-                        end_line=node.end_point.row + 1,
-                        end_col=node.end_point.column,
-                        signature=sig,
-                        docstring=doc,
-                        body_hash=b_hash,
-                        parent_symbol=parent_clean,
-                        code_block=code_block,
-                        annotations=annotations,
-                        complexity=metrics["cyclomatic_complexity"],
-                        nesting_depth=metrics["max_nesting_depth"],
-                        loc=metrics["loc"],
-                    )
-                    symbols.append(sym_decl)
-
-                    if body_node and kind in ("Class", "Interface", "Struct"):
-                        for child in body_node.children:
-                            visit(child, clean_sym, clean_sym)
-                    return
-
-            for child in node.children:
-                visit(child, parent_scope, parent_clean)
-
-        visit(root, module_prefix, None)
-        return symbols
 
     @classmethod
     def _extract_doc_comments(cls, node: tree_sitter.Node, code_bytes: bytes) -> str:

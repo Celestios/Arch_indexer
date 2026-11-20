@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 from utils.exclusions import load_include_dirs, is_included
+from engines.registry import LanguageRegistry
 from engines.scip.indexers import (
     index_rust, index_dart, index_python, index_generic, _move_index_to_arch
 )
@@ -16,87 +17,109 @@ class ScipWrapper:
     Handles Dart/Flutter and Rust toolchain indexing and extracts normalized symbols & edges.
     """
 
+    _SPECIALIZED_INDEXERS = {
+        "dart": index_dart,
+        "rust": index_rust,
+        "python": index_python,
+    }
+
     @staticmethod
     def _move_index_to_arch(project_dir: Path, language: str, cargo_root: Path = None) -> Optional[Path]:
         """Move generated index.scip to .arch/index_{language}.scip."""
         return _move_index_to_arch(project_dir, language, cargo_root)
 
-    @staticmethod
-    def detect_languages(project_dir: Path) -> List[str]:
-        """Detects if the project contains Dart/Flutter, Rust, Go, TypeScript/JavaScript, Java, or Python source files."""
-        languages = []
-
-        if (project_dir / "pubspec.yaml").exists():
-            languages.append("dart")
-        elif any(p.parent != project_dir for p in project_dir.rglob("pubspec.yaml")
-                 if ".dart_tool" not in str(p) and "dart_analyzer" not in str(p)):
-            languages.append("dart")
-        if (project_dir / "Cargo.toml").exists():
-            languages.append("rust")
-        elif any(p.parent != project_dir for p in project_dir.rglob("Cargo.toml")
-                 if "target" not in str(p) and ".arch" not in str(p)):
-            languages.append("rust")
-        if (project_dir / "go.mod").exists():
-            languages.append("go")
-        if (project_dir / "package.json").exists():
-            languages.append("typescript")
-        if (project_dir / "pom.xml").exists() or (project_dir / "build.gradle").exists():
-            languages.append("java")
-
+    @classmethod
+    def detect_languages(cls, project_dir: Path) -> List[str]:
+        """Detects languages present in the project using LanguageRegistry manifests and extensions."""
+        languages: List[str] = []
         include_dirs = load_include_dirs(project_dir)
-        def _filtered_glob(pattern):
-            for p in project_dir.glob(pattern):
-                if include_dirs is None or is_included(str(p.relative_to(project_dir)), include_dirs):
-                    yield p
 
-        if any(_filtered_glob("**/requirements.txt")) or any(_filtered_glob("**/*.py")):
-            languages.append("python")
+        def _is_path_included(p: Path) -> bool:
+            return include_dirs is None or is_included(str(p.relative_to(project_dir)), include_dirs)
+
+        # Candidates with SCIP support
+        scip_candidate_order = ["dart", "rust", "go", "typescript", "java", "python"]
+        for lang in LanguageRegistry.list_languages():
+            if lang not in scip_candidate_order:
+                spec = LanguageRegistry.get_spec(lang)
+                if spec and spec.scip_binary and lang != "javascript":
+                    scip_candidate_order.append(lang)
+
+        for lang in scip_candidate_order:
+            spec = LanguageRegistry.get_spec(lang)
+            if not spec:
+                continue
+
+            detected = False
+            # 1. Check primary manifests at project root
+            for manifest in spec.manifest_names:
+                if (project_dir / manifest).exists():
+                    detected = True
+                    break
+
+            # 2. Check recursive manifests (excluding standard build/cache artifacts)
+            if not detected and spec.manifest_names:
+                for manifest in spec.manifest_names:
+                    for p in project_dir.rglob(manifest):
+                        p_str = str(p).replace("\\", "/")
+                        if any(skip in p_str for skip in (".dart_tool", "dart_analyzer", "/target/", "/.arch/", "/node_modules/", "/.git/")):
+                            continue
+                        if _is_path_included(p):
+                            detected = True
+                            break
+                    if detected:
+                        break
+
+            # 3. Check source file extensions under include_dirs
+            if not detected and spec.extensions:
+                for ext in spec.extensions:
+                    pattern = f"**/*{ext}"
+                    for p in project_dir.glob(pattern):
+                        p_str = str(p).replace("\\", "/")
+                        if any(skip in p_str for skip in (".dart_tool", "/target/", "/.arch/", "/node_modules/", "/.git/", "/__pycache__/")):
+                            continue
+                        if _is_path_included(p):
+                            detected = True
+                            break
+                    if detected:
+                        break
+
+            if detected and lang not in languages:
+                languages.append(lang)
+
         return languages
 
-    @staticmethod
-    def verify_environment(languages: List[str]) -> Dict[str, bool]:
+    @classmethod
+    def verify_environment(cls, languages: List[str]) -> Dict[str, bool]:
         """Checks if the required toolchains are installed and available."""
-        status = {}
-        if "dart" in languages:
-            status["dart"] = shutil.which("dart") is not None
-
-        if "rust" in languages:
-            has_rustup = shutil.which("rustup") is not None
-            has_ra = shutil.which("rust-analyzer") is not None
-            status["rust"] = has_rustup or has_ra
-
-        if "go" in languages:
-            status["go"] = shutil.which("scip-go") is not None
-
-        if "typescript" in languages:
-            status["typescript"] = shutil.which("scip-typescript") is not None
-
-        if "java" in languages:
-            status["java"] = shutil.which("scip-java") is not None
-
-        if "python" in languages:
-            status["python"] = shutil.which("scip-python") is not None
-
+        status: Dict[str, bool] = {}
+        for lang in languages:
+            spec = LanguageRegistry.get_spec(lang)
+            if lang == "rust":
+                has_rustup = shutil.which("rustup") is not None
+                has_ra = shutil.which("rust-analyzer") is not None
+                status["rust"] = has_rustup or has_ra
+            elif spec and spec.scip_binary:
+                status[lang] = shutil.which(spec.scip_binary) is not None
+            elif spec and spec.tool_names:
+                status[lang] = any(shutil.which(tool) is not None for tool in spec.tool_names)
+            else:
+                status[lang] = False
         return status
 
-    @staticmethod
-    def run_indexer(project_dir: Path, language: str) -> Optional[Path]:
+    @classmethod
+    def run_indexer(cls, project_dir: Path, language: str) -> Optional[Path]:
         """
         Executes the language-specific SCIP indexer and returns the path to the generated index.scip.
+        Queries LanguageRegistry for toolchain availability.
         """
-        handlers = {
-            "dart": index_dart,
-            "rust": index_rust,
-            "go": index_generic,
-            "typescript": index_generic,
-            "java": index_generic,
-            "python": index_python,
-        }
-        handler = handlers.get(language)
-        if handler:
-            if language in ("go", "typescript", "java"):
-                return handler(project_dir, language)
-            return handler(project_dir)
+        if language in cls._SPECIALIZED_INDEXERS:
+            return cls._SPECIALIZED_INDEXERS[language](project_dir)
+
+        spec = LanguageRegistry.get_spec(language)
+        if spec and (spec.scip_binary or language in ("go", "typescript", "java")):
+            return index_generic(project_dir, language)
+
         return None
 
     @staticmethod

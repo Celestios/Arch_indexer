@@ -2,6 +2,7 @@
 Tree-sitter language loader and parser cache.
 Manages Language and Parser instances for all supported programming languages.
 """
+import importlib
 from pathlib import Path
 import threading
 from typing import Dict, Optional, Tuple, Any
@@ -71,44 +72,28 @@ class TreesitterLoader:
 
     @classmethod
     def _load_language(cls, lang: str) -> Optional[tree_sitter.Language]:
-        """Internal loader attempting to import modern tree-sitter language modules."""
+        """Internal loader attempting to dynamically import tree-sitter language modules via LanguageRegistry."""
         try:
-            if lang == "python":
-                import tree_sitter_python
-                return tree_sitter.Language(tree_sitter_python.language())
-            elif lang == "rust":
-                import tree_sitter_rust
-                return tree_sitter.Language(tree_sitter_rust.language())
-            elif lang in ("typescript", "ts"):
-                import tree_sitter_typescript
-                return tree_sitter.Language(tree_sitter_typescript.language_typescript())
-            elif lang in ("tsx", "javascript", "js"):
-                import tree_sitter_typescript
-                return tree_sitter.Language(tree_sitter_typescript.language_tsx())
-            elif lang == "go":
-                import tree_sitter_go
-                return tree_sitter.Language(tree_sitter_go.language())
-            elif lang == "java":
-                import tree_sitter_java
-                return tree_sitter.Language(tree_sitter_java.language())
-            elif lang == "c":
-                import tree_sitter_c
-                return tree_sitter.Language(tree_sitter_c.language())
-            elif lang in ("cpp", "c++"):
-                import tree_sitter_cpp
-                return tree_sitter.Language(tree_sitter_cpp.language())
-            elif lang in ("csharp", "c_sharp", "cs"):
-                import tree_sitter_c_sharp
-                return tree_sitter.Language(tree_sitter_c_sharp.language())
-            elif lang == "ruby":
-                import tree_sitter_ruby
-                return tree_sitter.Language(tree_sitter_ruby.language())
-            elif lang == "dart":
-                try:
-                    import tree_sitter_dart
-                    return tree_sitter.Language(tree_sitter_dart.language())
-                except ImportError:
-                    return None
-        except Exception as e:
+            spec = LanguageRegistry.get_spec(lang)
+            if spec and spec.ts_module and spec.ts_factory:
+                mod = importlib.import_module(spec.ts_module)
+                factory = getattr(mod, spec.ts_factory)
+                return tree_sitter.Language(factory())
+
+            # Fallback for known aliases if registry spec was not found
+            fallback_map = {
+                "ts": ("tree_sitter_typescript", "language_typescript"),
+                "js": ("tree_sitter_typescript", "language_tsx"),
+                "tsx": ("tree_sitter_typescript", "language_tsx"),
+                "c++": ("tree_sitter_cpp", "language"),
+                "c_sharp": ("tree_sitter_c_sharp", "language"),
+                "cs": ("tree_sitter_c_sharp", "language"),
+            }
+            if lang in fallback_map:
+                mod_name, fn_name = fallback_map[lang]
+                mod = importlib.import_module(mod_name)
+                factory = getattr(mod, fn_name)
+                return tree_sitter.Language(factory())
+        except Exception:
             return None
         return None

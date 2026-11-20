@@ -10,6 +10,10 @@ class LanguageSpec:
     extensions: Tuple[str, ...]
     manifest_names: Tuple[str, ...] = ()
     tool_names: Tuple[str, ...] = ()
+    ts_module: Optional[str] = None
+    ts_factory: Optional[str] = None
+    scip_binary: Optional[str] = None
+    ast_node_kinds: Optional[Dict[str, str]] = None
 
 
 class LanguageRegistry:
@@ -24,6 +28,16 @@ class LanguageRegistry:
     _name_map: Dict[str, str] = {}
     _manifest_map: Dict[str, str] = {}
 
+    _DEFAULT_ALIASES: Dict[str, str] = {
+        "ts": "typescript",
+        "js": "javascript",
+        "jsx": "javascript",
+        "tsx": "javascript",
+        "c++": "cpp",
+        "c_sharp": "csharp",
+        "cs": "csharp",
+    }
+
     @classmethod
     def register(cls,
                   language: str,
@@ -31,14 +45,22 @@ class LanguageRegistry:
                   tool_names: Optional[Sequence[str]] = None,
                   manifest_names: Optional[Sequence[str]] = None,
                   spec: Optional[LanguageSpec] = None,
+                  ts_module: Optional[str] = None,
+                  ts_factory: Optional[str] = None,
+                  scip_binary: Optional[str] = None,
+                  ast_node_kinds: Optional[Dict[str, str]] = None,
                   **kwargs) -> None:
-        """Register a language with its file extensions, manifests, and tool names."""
+        """Register a language with its file extensions, manifests, tool names, and backend bindings."""
         if spec is None:
             spec = LanguageSpec(
                 name=language,
                 extensions=tuple(extensions or ()),
                 manifest_names=tuple(manifest_names or ()),
                 tool_names=tuple(tool_names or ()),
+                ts_module=ts_module if ts_module is not None else kwargs.get("ts_module"),
+                ts_factory=ts_factory if ts_factory is not None else kwargs.get("ts_factory"),
+                scip_binary=scip_binary if scip_binary is not None else kwargs.get("scip_binary"),
+                ast_node_kinds=ast_node_kinds if ast_node_kinds is not None else kwargs.get("ast_node_kinds"),
             )
 
         cls._languages.add(language)
@@ -54,8 +76,14 @@ class LanguageRegistry:
 
     @classmethod
     def get_spec(cls, language: str) -> Optional[LanguageSpec]:
-        """Get LanguageSpec by language name."""
-        return cls._specs.get(language)
+        """Get LanguageSpec by language name or alias."""
+        lang_key = language.lower()
+        if lang_key in cls._specs:
+            return cls._specs[lang_key]
+        canonical = cls._DEFAULT_ALIASES.get(lang_key)
+        if canonical and canonical in cls._specs:
+            return cls._specs[canonical]
+        return None
 
     @classmethod
     def list_extensions(cls) -> Set[str]:
@@ -65,7 +93,7 @@ class LanguageRegistry:
     @classmethod
     def get_manifest_for_language(cls, language: str) -> Optional[str]:
         """Return the primary package manifest filename for a language."""
-        spec = cls._specs.get(language)
+        spec = cls.get_spec(language)
         if spec and spec.manifest_names:
             return spec.manifest_names[0]
         return None
@@ -83,7 +111,7 @@ class LanguageRegistry:
 
     @classmethod
     def detect_language_from_name(cls, name: str) -> Optional[str]:
-        """Detect language from tool/project name (e.g., 'Cargo.toml' → 'rust')."""
+        """Detect language from tool/project name (e.g., 'Cargo.toml' -> 'rust')."""
         return cls._name_map.get(name) or cls._manifest_map.get(name)
 
     @classmethod
@@ -109,69 +137,167 @@ class LanguageRegistry:
             extensions=(".rs",),
             manifest_names=("Cargo.toml",),
             tool_names=("Cargo.toml", "rust-analyzer"),
+            ts_module="tree_sitter_rust",
+            ts_factory="language",
+            scip_binary="rust-analyzer",
+            ast_node_kinds={
+                "struct_item": "Struct",
+                "enum_item": "Enum",
+                "trait_item": "Trait",
+                "function_item": "Function",
+                "type_item": "TypeAlias",
+            },
         )
         cls.register(
             "dart",
             extensions=(".dart",),
             manifest_names=("pubspec.yaml",),
             tool_names=("pubspec.yaml", "dart"),
+            ts_module="tree_sitter_dart",
+            ts_factory="language",
+            scip_binary="dart",
+            ast_node_kinds={
+                "class_definition": "Class",
+                "function_signature": "Function",
+                "method_signature": "Method",
+            },
         )
         cls.register(
             "python",
             extensions=(".py", ".pyi"),
             manifest_names=("requirements.txt", "pyproject.toml", "setup.py"),
             tool_names=("setup.py", "pyproject.toml", "requirements.txt"),
+            ts_module="tree_sitter_python",
+            ts_factory="language",
+            scip_binary="scip-python",
+            ast_node_kinds={
+                "class_definition": "Class",
+                "function_definition": "Function",
+            },
         )
         cls.register(
             "go",
             extensions=(".go",),
             manifest_names=("go.mod",),
             tool_names=("go.mod",),
+            ts_module="tree_sitter_go",
+            ts_factory="language",
+            scip_binary="scip-go",
+            ast_node_kinds={
+                "type_declaration": "Struct",
+                "function_declaration": "Function",
+                "method_declaration": "Method",
+            },
         )
         cls.register(
             "typescript",
             extensions=(".ts", ".tsx"),
             manifest_names=("package.json", "tsconfig.json"),
             tool_names=("tsconfig.json", "package.json"),
+            ts_module="tree_sitter_typescript",
+            ts_factory="language_typescript",
+            scip_binary="scip-typescript",
+            ast_node_kinds={
+                "class_declaration": "Class",
+                "interface_declaration": "Interface",
+                "type_alias_declaration": "TypeAlias",
+                "enum_declaration": "Enum",
+                "function_declaration": "Function",
+                "method_definition": "Method",
+            },
         )
         cls.register(
             "javascript",
             extensions=(".js", ".jsx", ".mjs", ".cjs"),
             manifest_names=("package.json",),
             tool_names=("package.json",),
+            ts_module="tree_sitter_typescript",
+            ts_factory="language_tsx",
+            scip_binary="scip-typescript",
+            ast_node_kinds={
+                "class_declaration": "Class",
+                "function_declaration": "Function",
+                "method_definition": "Method",
+            },
         )
         cls.register(
             "java",
             extensions=(".java",),
             manifest_names=("pom.xml", "build.gradle"),
             tool_names=("pom.xml", "build.gradle"),
+            ts_module="tree_sitter_java",
+            ts_factory="language",
+            scip_binary="scip-java",
+            ast_node_kinds={
+                "class_declaration": "Class",
+                "interface_declaration": "Interface",
+                "method_declaration": "Method",
+            },
         )
         cls.register(
             "cpp",
             extensions=(".cpp", ".cxx", ".cc", ".hpp", ".hxx"),
             manifest_names=("CMakeLists.txt",),
+            ts_module="tree_sitter_cpp",
+            ts_factory="language",
+            ast_node_kinds={
+                "class_specifier": "Class",
+                "struct_specifier": "Struct",
+                "function_definition": "Function",
+            },
         )
         cls.register(
             "c",
             extensions=(".c", ".h"),
+            ts_module="tree_sitter_c",
+            ts_factory="language",
+            ast_node_kinds={
+                "struct_specifier": "Struct",
+                "function_definition": "Function",
+            },
         )
         cls.register(
             "csharp",
             extensions=(".cs",),
             manifest_names=("*.csproj",),
             tool_names=("*.csproj",),
+            ts_module="tree_sitter_c_sharp",
+            ts_factory="language",
+            ast_node_kinds={
+                "class_declaration": "Class",
+                "interface_declaration": "Interface",
+                "struct_declaration": "Struct",
+                "enum_declaration": "Enum",
+                "method_declaration": "Method",
+            },
         )
         cls.register(
             "ruby",
             extensions=(".rb",),
             manifest_names=("Gemfile",),
             tool_names=("Gemfile",),
+            ts_module="tree_sitter_ruby",
+            ts_factory="language",
+            ast_node_kinds={
+                "class": "Class",
+                "module": "Module",
+                "method": "Method",
+                "singleton_method": "Method",
+            },
         )
         cls.register(
             "php",
             extensions=(".php",),
             manifest_names=("composer.json",),
             tool_names=("composer.json",),
+            ts_module="tree_sitter_php",
+            ts_factory="language_php",
+            ast_node_kinds={
+                "class_declaration": "Class",
+                "interface_declaration": "Interface",
+                "function_declaration": "Function",
+                "method_declaration": "Method",
+            },
         )
         cls.register(
             "html",

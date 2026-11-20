@@ -9,6 +9,15 @@ import tree_sitter
 class TypesExtractor:
     """Extracts syntactic types from declaration nodes."""
 
+    _DISPATCH_TABLE = {
+        "python": "_extract_python",
+        "rust": "_extract_rust",
+        "typescript": "_extract_typescript",
+        "tsx": "_extract_typescript",
+        "javascript": "_extract_typescript",
+        "js": "_extract_typescript",
+    }
+
     @classmethod
     def extract_types(cls, node: tree_sitter.Node, code_bytes: bytes, language: str) -> Dict[str, Any]:
         """
@@ -21,13 +30,10 @@ class TypesExtractor:
             "return_type": None,
         }
 
-        lang = language.lower()
-        if lang == "python":
-            cls._extract_python(node, code_bytes, result)
-        elif lang == "rust":
-            cls._extract_rust(node, code_bytes, result)
-        elif lang in ("typescript", "tsx", "javascript"):
-            cls._extract_typescript(node, code_bytes, result)
+        handler_name = cls._DISPATCH_TABLE.get(language.lower())
+        if handler_name:
+            handler = getattr(cls, handler_name)
+            handler(node, code_bytes, result)
 
         return result
 

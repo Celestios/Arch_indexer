@@ -9,6 +9,20 @@ import tree_sitter
 class AnnotationExtractor:
     """Extracts decorators, attributes, and visibility modifiers from AST nodes."""
 
+    _DISPATCH_TABLE = {
+        "python": "_extract_python",
+        "rust": "_extract_rust",
+        "typescript": "_extract_typescript",
+        "tsx": "_extract_typescript",
+        "javascript": "_extract_typescript",
+        "js": "_extract_typescript",
+        "go": "_extract_go",
+        "java": "_extract_csharp_java",
+        "csharp": "_extract_csharp_java",
+        "c_sharp": "_extract_csharp_java",
+        "cs": "_extract_csharp_java",
+    }
+
     @staticmethod
     def extract_annotations(node: tree_sitter.Node, code_bytes: bytes, language: str) -> Dict[str, Any]:
         """
@@ -27,17 +41,10 @@ class AnnotationExtractor:
             "is_abstract": False,
         }
 
-        lang = language.lower()
-        if lang == "python":
-            AnnotationExtractor._extract_python(node, code_bytes, result)
-        elif lang == "rust":
-            AnnotationExtractor._extract_rust(node, code_bytes, result)
-        elif lang in ("typescript", "tsx", "javascript"):
-            AnnotationExtractor._extract_typescript(node, code_bytes, result)
-        elif lang == "go":
-            AnnotationExtractor._extract_go(node, code_bytes, result)
-        elif lang in ("java", "csharp", "c_sharp"):
-            AnnotationExtractor._extract_csharp_java(node, code_bytes, result)
+        handler_name = AnnotationExtractor._DISPATCH_TABLE.get(language.lower())
+        if handler_name:
+            handler = getattr(AnnotationExtractor, handler_name)
+            handler(node, code_bytes, result)
 
         return result
 

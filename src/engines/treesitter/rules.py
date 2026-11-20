@@ -11,6 +11,15 @@ from engines.treesitter.loader import TreesitterLoader
 class StructuralRuleChecker:
     """Checks source code AST for syntactic anti-patterns."""
 
+    _DISPATCH_TABLE = {
+        "python": "_check_python",
+        "rust": "_check_rust",
+        "typescript": "_check_typescript",
+        "tsx": "_check_typescript",
+        "javascript": "_check_typescript",
+        "js": "_check_typescript",
+    }
+
     @classmethod
     def check_file(cls, filepath: str | Path, source: str | bytes, language: str) -> List[Dict[str, Any]]:
         """Scans a file for structural anti-patterns and returns violations."""
@@ -30,13 +39,10 @@ class StructuralRuleChecker:
         violations: List[Dict[str, Any]] = []
         fp_str = str(filepath).replace("\\", "/")
 
-        lang = language.lower()
-        if lang == "python":
-            cls._check_python(tree.root_node, code_bytes, fp_str, violations)
-        elif lang == "rust":
-            cls._check_rust(tree.root_node, code_bytes, fp_str, violations)
-        elif lang in ("typescript", "tsx", "javascript"):
-            cls._check_typescript(tree.root_node, code_bytes, fp_str, violations)
+        handler_name = cls._DISPATCH_TABLE.get(language.lower())
+        if handler_name:
+            handler = getattr(cls, handler_name)
+            handler(tree.root_node, code_bytes, fp_str, violations)
 
         return violations
 
