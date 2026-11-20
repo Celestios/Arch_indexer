@@ -1,10 +1,13 @@
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, TYPE_CHECKING
 
 from db.repository import Repository
 from auditor.path_tracer import PathTracer
 from auditor.config_loader import ConfigLoader
 from utils.helpers import matches_filter, find_definition_line, find_call_site_or_definition_line
 from utils.violation_id import ViolationId
+
+if TYPE_CHECKING:
+    from auditor.snapshot import AuditSnapshot
 
 
 class DependencyViolationChecker:
@@ -17,7 +20,8 @@ class DependencyViolationChecker:
 
     def check(self, repository, symbol_classifications: Dict, all_edges: List[Dict],
               config: Dict, filepath_filter: Optional[str],
-              propagation_sources: Dict) -> List[Dict[str, Any]]:
+              propagation_sources: Dict,
+              snapshot: Optional["AuditSnapshot"] = None) -> List[Dict[str, Any]]:
         violations = []
         for edge in all_edges:
             source_sym, target_sym = edge["source"], edge["target"]
@@ -40,7 +44,7 @@ class DependencyViolationChecker:
                         violations.extend(self._check_package_restriction(rule, source_sym, target_sym, source_data, filepath, field_name))
                     elif rule.get("rule_type", "dependency_check") == "dependency_check" and target_sym in symbol_classifications:
                         target_data = symbol_classifications[target_sym]
-                        v = self._check_single_dependency(rule, source_sym, target_sym, source_data, target_data, filepath, field_name, config, propagation_sources, field_conf, symbol_classifications)
+                        v = self._check_single_dependency(rule, source_sym, target_sym, source_data, target_data, filepath, field_name, config, propagation_sources, field_conf, symbol_classifications, snapshot=snapshot)
                         if v:
                             violations.append(v)
         return violations
@@ -59,7 +63,7 @@ class DependencyViolationChecker:
                 "filepath": filepath, "line": line_number, "message": msg, "origin": "automatic"}
         return [data]
 
-    def _check_single_dependency(self, rule, source_sym, target_sym, source_data, target_data, filepath, field_name, config, propagation_sources, field_conf, symbol_classifications) -> Optional[Dict[str, Any]]:
+    def _check_single_dependency(self, rule, source_sym, target_sym, source_data, target_data, filepath, field_name, config, propagation_sources, field_conf, symbol_classifications, snapshot: Optional["AuditSnapshot"] = None) -> Optional[Dict[str, Any]]:
         source_val = source_data["static_fields"].get(field_name)
         target_val = target_data["fields"].get(field_name)
         if source_val is None or target_val is None:
@@ -70,21 +74,17 @@ class DependencyViolationChecker:
 
         msg = rule.get("message", f"Dependency violation: {source_val} is not allowed to call {target_val}")
         path = self._trace_propagation_path(source_sym, target_sym, field_name, propagation_sources, field_conf)
-        trace_msg = msg + self.tracer.format_path_trace(path)
+        trace_msg = msg + self.tracer.format_path_trace(path, snapshot=snapshot)
 
         # Counterfactual fix suggestions: Find existing barrier intermediaries
-        fix_hint = self._find_counterfactual_fix(target_sym, target_data, field_name, field_conf, symbol_classifications)
+        fix_hint = self._find_counterfactual_fix(target_sym, target_data, field_name, field_conf, symbol_classifications, snapshot=snapshot)
         if fix_hint:
             trace_msg += f"\n  Suggested Fix: {fix_hint}"
         line_number = find_call_site_or_definition_line(self.repository, source_sym, target_sym, filepath)
 
         violation_id = ViolationId.generate(source_sym, target_sym, field_name, forbidden_source, forbidden_target)
         rule_id = f"{field_name}_{forbidden_source}_{forbidden_target}".lower().replace("/", "_").replace(".", "_")
-        matched_prefix = None
-        for prefix in config.keys():
-            if filepath.replace("\\", "/").startswith(prefix):
-                if matched_prefix is None or len(prefix) > len(matched_prefix):
-                    matched_prefix = prefix
+        matched_prefix = self.config_loader.get_applicable_prefix(filepath, config)
         if matched_prefix:
             rule_id = f"{matched_prefix}_{rule_id}".lower().replace("/", "_").replace(".", "_")
 
@@ -124,16 +124,22 @@ class DependencyViolationChecker:
         seen = set()
         return [node for node in path if node not in seen and not seen.add(node)]
 
-    def _find_counterfactual_fix(self, target_sym: str, target_data: Dict, field_name: str, field_conf: Dict, symbol_classifications: Dict) -> Optional[str]:
+    def _find_counterfactual_fix(self, target_sym: str, target_data: Dict, field_name: str, field_conf: Dict, symbol_classifications: Dict, snapshot: Optional["AuditSnapshot"] = None) -> Optional[str]:
         barriers = field_conf.get("barriers", [])
         if not barriers:
             return None
         barrier_field = field_conf.get("barrier_field")
 
-        incoming = self.repository.edges.get_incoming_edges(target_sym)
+        if snapshot is not None:
+            incoming = snapshot.get_incoming(target_sym)
+        else:
+            incoming = self.repository.edges.get_incoming_edges(target_sym)
         parent_sym = target_data.get("symbol_info", {}).get("parent_symbol")
         if parent_sym:
-            incoming = incoming + self.repository.edges.get_incoming_edges(parent_sym)
+            if snapshot is not None:
+                incoming = incoming + snapshot.get_incoming(parent_sym)
+            else:
+                incoming = incoming + self.repository.edges.get_incoming_edges(parent_sym)
 
         candidates = []
         from utils.helpers import demangle_scip_symbol

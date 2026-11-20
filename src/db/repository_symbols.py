@@ -116,6 +116,28 @@ class SymbolsRepository(BaseRepository):
                 for r in res
             ]
 
+    def get_definitions_map(self) -> Dict[str, Dict[str, Any]]:
+        """Returns all definition occurrences as {symbol: {filepath, start_line, ...}} in one query."""
+        with self.db_conn.session() as conn:
+            res = conn.execute(
+                """
+                SELECT symbol, filepath, start_line, start_col, end_line, end_col, role
+                FROM occurrences
+                WHERE (role & 1) = 1
+                """
+            ).fetchall()
+            result = {}
+            for r in res:
+                result[r[0]] = {
+                    "filepath": r[1],
+                    "start_line": r[2],
+                    "start_col": r[3],
+                    "end_line": r[4],
+                    "end_col": r[5],
+                    "role": r[6],
+                }
+            return result
+
     def upsert_symbols_bulk(self, symbols_list: List[Dict[str, Any]], progress_callback=None):
         """Bulk upserts a list of symbols in a single transaction."""
         if not symbols_list:
@@ -345,6 +367,44 @@ class SymbolsRepository(BaseRepository):
                 }
                 for r in res
             ]
+
+    def get_diagnostics_batch(self, symbols: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """Get all diagnostics recorded for a batch of symbols, returned as {symbol: [diag, ...]}."""
+        if not symbols:
+            return {}
+        result: Dict[str, List[Dict[str, Any]]] = {sym: [] for sym in symbols}
+        unique_symbols = list(set(symbols))
+        chunk_size = 500
+        with self.db_conn.session() as conn:
+            for i in range(0, len(unique_symbols), chunk_size):
+                chunk = unique_symbols[i:i + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                res = conn.execute(
+                    f"""
+                    SELECT filepath, symbol, line, col, severity, code, message, tags
+                    FROM diagnostics
+                    WHERE symbol IN ({placeholders})
+                    ORDER BY line, col
+                    """,
+                    chunk
+                ).fetchall()
+                for r in res:
+                    sym = r[1]
+                    diag = {
+                        "filepath": r[0],
+                        "symbol": sym,
+                        "line": r[2],
+                        "col": r[3],
+                        "severity": r[4],
+                        "code": r[5],
+                        "message": r[6],
+                        "tags": r[7]
+                    }
+                    if sym in result:
+                        result[sym].append(diag)
+                    else:
+                        result[sym] = [diag]
+        return result
 
     def delete_orphaned_occurrences(self) -> int:
         """Delete occurrences where the referenced symbol no longer exists in the symbols table.

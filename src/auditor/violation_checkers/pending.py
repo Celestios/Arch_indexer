@@ -9,9 +9,13 @@ class PendingAuditChecker:
 
     def check(self, repository, symbol_classifications: Dict, all_edges: List[Dict],
               config: Dict, filepath_filter: Optional[str],
-              propagation_sources: Dict) -> List[Dict[str, Any]]:
+              propagation_sources: Dict,
+              snapshot: Optional[Any] = None) -> List[Dict[str, Any]]:
         violations = []
-        file_metadata = repository.files.get_all_files_metadata()
+        if snapshot is not None and snapshot.all_files:
+            file_metadata = snapshot.all_files
+        else:
+            file_metadata = repository.files.get_all_files_metadata()
         for f_path, meta in file_metadata.items():
             if not meta.get("pending_audit"):
                 continue

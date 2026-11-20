@@ -150,7 +150,8 @@ class ContextCompiler:
         resolution: str,
         direction: str,
         radius: int,
-        max_tokens: int = 4000
+        max_tokens: int = 4000,
+        diagnostics_map: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> str:
         writer = io.StringIO()
         writer.write("# Dynamic Architectural Context Compilation\n")
@@ -180,7 +181,7 @@ class ContextCompiler:
 
         focal_info = metadata_map.get(focal_symbol, {})
         if focal_symbol in metadata_map:
-            self._write_node_details(writer, focal_info, force_full=True)
+            self._write_node_details(writer, focal_info, force_full=True, diagnostics_map=diagnostics_map)
         else:
             writer.write(f"_Error: Focal target symbol `{clean_focal}` details not found in the index database._\n")
 
@@ -228,7 +229,7 @@ class ContextCompiler:
                         node_res = "signature"
                         is_degraded = True
 
-                self._write_node_details(writer, node_data, force_full=(node_res == "full"))
+                self._write_node_details(writer, node_data, force_full=(node_res == "full"), diagnostics_map=diagnostics_map)
                 if is_degraded:
                     writer.write(f"> _Progressive Degradation: Degraded to signature resolution to fit within token budget ({max_tokens} tokens)._\n\n")
             else:
@@ -237,7 +238,13 @@ class ContextCompiler:
 
         return writer.getvalue()
 
-    def _write_node_details(self, writer: io.StringIO, node_info: Dict[str, Any], force_full: bool) -> None:
+    def _write_node_details(
+        self,
+        writer: io.StringIO,
+        node_info: Dict[str, Any],
+        force_full: bool,
+        diagnostics_map: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> None:
         filepath = node_info.get("filepath")
         kind = node_info.get("kind", "UnspecifiedKind")
         signature = node_info.get("signature")
@@ -254,7 +261,10 @@ class ContextCompiler:
             writer.write(f"- **Classification**: `{badge}`\n")
 
         # Surface diagnostics if present
-        diags = self.repository.symbols.get_diagnostics_for_symbol(node_info["symbol"])
+        if diagnostics_map is not None:
+            diags = diagnostics_map.get(node_info["symbol"], [])
+        else:
+            diags = self.repository.symbols.get_diagnostics_for_symbol(node_info["symbol"])
         if diags:
             writer.write("- **Compiler Diagnostics**:\n")
             for d in diags:
@@ -307,6 +317,7 @@ class ContextCompiler:
         # Filter out local symbols
         traversed_symbols = [s for s in traversed_symbols if not str(s).startswith("local ")]
         metadata_map = self.repository.symbols.get_symbols_metadata_batch(traversed_symbols)
+        diagnostics_map = self.repository.symbols.get_diagnostics_batch(traversed_symbols)
 
         md_content = self.generate_markdown(
             actual_focal,
@@ -315,7 +326,8 @@ class ContextCompiler:
             resolution,
             direction,
             radius,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            diagnostics_map=diagnostics_map,
         )
 
         

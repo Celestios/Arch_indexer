@@ -15,7 +15,8 @@ class NamingViolationChecker:
 
     def check(self, repository, symbol_classifications: Dict, all_edges: List[Dict],
               config: Dict, filepath_filter: Optional[str],
-              propagation_sources: Dict) -> List[Dict[str, Any]]:
+              propagation_sources: Dict,
+              snapshot: Optional[Any] = None) -> List[Dict[str, Any]]:
         violations = []
         naming_rules = []
         for prefix, prefix_conf in config.items():
@@ -49,7 +50,13 @@ class NamingViolationChecker:
                     if not violated:
                         continue
                     msg = rule.get("message", f"Naming convention violation: '{simple_name}' must match constraints for {classification}")
-                    line_number = find_definition_line(self.repository, sym, filepath)
+                    line_number = None
+                    if snapshot is not None:
+                        def_info = snapshot.definitions_by_symbol.get(sym)
+                        if def_info:
+                            line_number = def_info.get("start_line")
+                    if line_number is None:
+                        line_number = find_definition_line(self.repository, sym, filepath)
                     violation_id = ViolationId.generate(sym, "naming", classification)
                     rule_id = f"naming_{classification}".lower().replace("/", "_").replace(".", "_")
                     vdata = {"violation_id": violation_id, "rule_id": rule_id, "symbol": sym,

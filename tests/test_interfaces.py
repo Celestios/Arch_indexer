@@ -7,8 +7,7 @@ class TestIndexerBackendProtocol:
     """Verify IndexerBackend protocol is satisfied by ScipWrapper."""
 
     def test_scip_wrapper_satisfies_protocol(self):
-        from engines.base import IndexerBackend
-        from engines.scip_wrapper import ScipWrapper
+        from engines.scip.wrapper import ScipWrapper
         assert hasattr(ScipWrapper, 'detect_languages')
         assert hasattr(ScipWrapper, 'run_indexer')
 

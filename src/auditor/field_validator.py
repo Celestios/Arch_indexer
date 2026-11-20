@@ -66,6 +66,3 @@ class FieldValidator:
                 else:
                     self.repository.files.update_file_manual_fields(filepath, updated_fields, justification)
                 db_updated = True
-
-        if db_updated:
-            self.repository.files.get_all_files_metadata()

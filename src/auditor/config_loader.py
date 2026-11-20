@@ -19,6 +19,34 @@ class ConfigLoader:
             self._cached_config = _load_config(project_root)
         return self._cached_config
 
+    def get_applicable_prefix(
+        self,
+        filepath: str,
+        config: Optional[Union[ArchConfig, Dict[str, Any]]] = None,
+    ) -> Optional[str]:
+        """
+        Resolves the most specific directory prefix matching the filepath.
+        Longest matching prefix wins. '.' is used for root-level files.
+        """
+        if config is None:
+            config = self.load_config()
+
+        if isinstance(config, ArchConfig):
+            prefixes = config.prefixes
+        else:
+            prefixes = config
+
+        normalized_path = filepath.replace("\\", "/")
+        matching_prefix = None
+        for prefix in prefixes.keys():
+            if prefix == ".":
+                if matching_prefix is None:
+                    matching_prefix = "."
+            elif normalized_path.startswith(prefix):
+                if matching_prefix is None or len(prefix) > len(matching_prefix):
+                    matching_prefix = prefix
+        return matching_prefix
+
     def get_applicable_config(
         self,
         filepath: str,
@@ -40,13 +68,5 @@ class ConfigLoader:
         else:
             prefixes = config
 
-        normalized_path = filepath.replace("\\", "/")
-        matching_prefix = None
-        for prefix in prefixes.keys():
-            if prefix == ".":
-                if matching_prefix is None:
-                    matching_prefix = "."
-            elif normalized_path.startswith(prefix):
-                if matching_prefix is None or len(prefix) > len(matching_prefix):
-                    matching_prefix = prefix
+        matching_prefix = self.get_applicable_prefix(filepath, prefixes)
         return prefixes.get(matching_prefix) if matching_prefix else None

@@ -1,7 +1,10 @@
-from typing import List
+from typing import List, Optional, TYPE_CHECKING
 import fnmatch
 from db.repository import Repository
 from utils.helpers import find_definition_line
+
+if TYPE_CHECKING:
+    from auditor.snapshot import AuditSnapshot
 
 class PathTracer:
     """
@@ -18,27 +21,39 @@ class PathTracer:
                 sym = sym.split(separator)[-1]
         return sym
 
-    def format_path_trace(self, path: List[str]) -> str:
+    def format_path_trace(self, path: List[str], snapshot: Optional["AuditSnapshot"] = None) -> str:
         """Generates a formatted, line-numbered path trace from source to target."""
         trace_lines = []
         for i, sym in enumerate(path):
-            symbol_info = self.repository.symbols.get_symbol(sym)
+            if snapshot is not None:
+                symbol_info = snapshot.get_symbol(sym)
+            else:
+                symbol_info = self.repository.symbols.get_symbol(sym)
             filepath = symbol_info.get("filepath") if symbol_info else None
             
             line_str = ""
             if filepath:
                 if i < len(path) - 1:
                     next_sym = path[i+1]
-                    occs = self.repository.symbols.get_occurrences_for_symbol(next_sym)
+                    if snapshot is not None:
+                        occs = snapshot.get_occurrences(next_sym)
+                    else:
+                        occs = self.repository.symbols.get_occurrences_for_symbol(next_sym)
                     call_line = None
                     for occ in occs:
-                        if occ["filepath"] == filepath:
-                            call_line = occ["start_line"]
+                        if occ.get("filepath") == filepath:
+                            call_line = occ.get("start_line")
                             break
                     if call_line is not None:
                         line_str = f":L{call_line}"
                 else:
-                    def_line = find_definition_line(self.repository, sym, filepath)
+                    def_line = None
+                    if snapshot is not None:
+                        def_info = snapshot.definitions_by_symbol.get(sym)
+                        if def_info:
+                            def_line = def_info.get("start_line")
+                    if def_line is None:
+                        def_line = find_definition_line(self.repository, sym, filepath)
                     if def_line is not None:
                         line_str = f":L{def_line}"
             

@@ -26,13 +26,16 @@ def test_auditor_returns_empty_when_no_rules(tmp_path):
     db_conn.close()
 
 
+from utils.arch_config import ArchConfig
+
+
 def test_auditor_loads_config(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
     auditor = Auditor(repository, root)
     config = auditor.load_config()
 
-    assert isinstance(config, dict)
+    assert isinstance(config, (dict, ArchConfig))
 
     db_conn.close()
 
