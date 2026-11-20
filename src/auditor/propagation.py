@@ -19,8 +19,6 @@ class MetadataPropagator:
         """
         propagation_fields = {}
         for prefix, prefix_conf in config.items():
-            if not isinstance(prefix_conf, dict):
-                continue
             auto_fields = prefix_conf.get("automatic_fields", {})
             for field_name, field_conf in auto_fields.items():
                 if field_conf.get("handler") == "propagation":
@@ -28,7 +26,7 @@ class MetadataPropagator:
                         "direction": field_conf.get("propagation_direction", "upstream"),
                         "weights": field_conf.get("weights") or {},
                         "barriers": set(field_conf.get("barriers") or []),
-                        "barrier_field": field_conf.get("barrier_field") or field_name,
+                        "barrier_field": field_conf.get("barrier_field"),
                         "values": field_conf.get("values") or [],
                         "default": field_conf.get("default")
                     }

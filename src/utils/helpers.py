@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from utils.violation_id import ViolationId
+from utils.arch_config import ArchConfig
 from engines.registry import LanguageRegistry
 
 IS_WINDOWS = sys.platform == "win32"
@@ -85,16 +86,19 @@ def find_call_site_or_definition_line(repository, source_sym: str, target_sym: s
     return find_definition_line(repository, source_sym, filepath)
 
 
-def load_config(project_root: Path) -> Dict[str, Any]:
-    """Load and parse .arch/config.json."""
+def load_config(project_root: Path) -> ArchConfig:
+    """Load and normalize .arch/config.json into an ArchConfig.
+
+    Returns an empty ArchConfig when the file is missing or cannot be parsed.
+    """
     config_path = config_path_for(project_root)
     if not config_path.exists():
-        return {}
+        return ArchConfig()
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return ArchConfig.from_dict(json.load(f))
     except Exception:
-        return {}
+        return ArchConfig()
 
 
 def demangle_scip_symbol(sym: Optional[str]) -> str:

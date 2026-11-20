@@ -128,7 +128,7 @@ class DependencyViolationChecker:
         barriers = field_conf.get("barriers", [])
         if not barriers:
             return None
-        barrier_field = field_conf.get("barrier_field", field_name)
+        barrier_field = field_conf.get("barrier_field")
 
         incoming = self.repository.edges.get_incoming_edges(target_sym)
         parent_sym = target_data.get("symbol_info", {}).get("parent_symbol")

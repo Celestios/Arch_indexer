@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Dict, List, Any
 
 from utils.helpers import config_path_for
+from utils.arch_config import FieldConfig
 
 
 class ConfigValidator:
@@ -171,8 +172,8 @@ class ConfigValidator:
                 if not isinstance(barriers, list):
                     errors.append(f"Prefix '{prefix}' field '{field_name}' barriers must be a list")
                 else:
-                    # Retrieve the barrier field configurations
-                    barrier_field_name = field_conf.get("barrier_field", "architectural_role")
+                    # Barrier field defaults to the field's own name (normalized in ArchConfig).
+                    barrier_field_name = FieldConfig.from_dict(field_name, field_conf).barrier_field
                     barrier_field_cfg = get_field_cfg(barrier_field_name)
 
                     if not barrier_field_cfg:

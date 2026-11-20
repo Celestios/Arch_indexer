@@ -161,7 +161,7 @@ class ContextCompiler:
         if config:
             writer.write("## 0. Active System Ontology Configuration (Boundary Constraints)\n")
             writer.write("```json\n")
-            writer.write(json.dumps(config, indent=2) + "\n")
+            writer.write(json.dumps(config.to_dict(), indent=2) + "\n")
             writer.write("```\n\n")
 
         # 1. Architectural Context Bounds

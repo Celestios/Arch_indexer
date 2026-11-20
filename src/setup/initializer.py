@@ -186,7 +186,7 @@ Within an automatic field configuration, specify the following parameters:
   * `"downstream"`: Caller properties propagate to callees.
 * `weights`: Map of classification values to integer priorities. Higher weights override lower weights during propagation conflicts. If omitted, priority is determined by the index order inside `values`.
 * `barriers`: List of values that block propagation from passing through a symbol.
-* `barrier_field`: The field name checked against the `barriers` list (defaults to the field itself, or `"architectural_role"`).
+* `barrier_field`: The field name checked against the `barriers` list (defaults to the field's own name).
 
 *Example:*
 ```json

@@ -13,7 +13,7 @@ def load_include_dirs(project_root: Path) -> Optional[Set[str]]:
     config = load_config(project_root)
     if not config:
         return None
-    dirs = [k for k, v in config.items() if isinstance(v, dict) and k not in ("exclude", ".")]
+    dirs = [k for k in config.keys() if k != "."]
     return set(dirs) if dirs else None
 
 
@@ -24,14 +24,7 @@ def load_exclude_patterns(project_root: Optional[Path]) -> List[str]:
     if not project_root:
         return []
     config = load_config(project_root)
-    if not config:
-        return []
-    exclude_val = config.get("exclude", [])
-    if isinstance(exclude_val, list):
-        return [str(p) for p in exclude_val if p]
-    if isinstance(exclude_val, str) and exclude_val:
-        return [exclude_val]
-    return []
+    return list(config.exclude)
 
 
 DEFAULT_EXCLUDED_DIRS = {

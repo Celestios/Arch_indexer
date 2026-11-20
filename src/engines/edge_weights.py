@@ -52,8 +52,6 @@ class EdgeWeightCalculator:
         """Collect all barrier values from config automatic_fields and manual_fields."""
         barriers = set()
         for prefix, prefix_conf in config.items():
-            if not isinstance(prefix_conf, dict):
-                continue
             auto_fields = prefix_conf.get("automatic_fields", {})
             manual_fields = prefix_conf.get("manual_fields", {})
             for field_name, field_conf in {**auto_fields, **manual_fields}.items():
