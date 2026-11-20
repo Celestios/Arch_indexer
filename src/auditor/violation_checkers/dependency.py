@@ -3,6 +3,7 @@ from typing import Dict, List, Any, Optional, TYPE_CHECKING
 from db.repository import Repository
 from auditor.path_tracer import PathTracer
 from auditor.config_loader import ConfigLoader
+from auditor.violation_checkers.base import BaseViolationChecker
 from utils.helpers import matches_filter, find_definition_line, find_call_site_or_definition_line
 from utils.violation_id import ViolationId
 
@@ -10,18 +11,30 @@ if TYPE_CHECKING:
     from auditor.snapshot import AuditSnapshot
 
 
-class DependencyViolationChecker:
+class DependencyViolationChecker(BaseViolationChecker):
     """Checks dependency rules for architectural boundary compliance."""
 
     def __init__(self, repository: Repository, tracer: PathTracer, config_loader: ConfigLoader):
-        self.repository = repository
+        super().__init__(repository)
         self.tracer = tracer
         self.config_loader = config_loader
 
-    def check(self, repository, symbol_classifications: Dict, all_edges: List[Dict],
-              config: Dict, filepath_filter: Optional[str],
-              propagation_sources: Dict,
-              snapshot: Optional["AuditSnapshot"] = None) -> List[Dict[str, Any]]:
+    def check(
+        self,
+        symbol_classifications: Any,
+        all_edges: Any = None,
+        config: Any = None,
+        filepath_filter: Optional[str] = None,
+        propagation_sources: Optional[Dict] = None,
+        snapshot: Optional["AuditSnapshot"] = None
+    ) -> List[Dict[str, Any]]:
+        # Backwards compatibility if repository is passed as first positional arg
+        if not isinstance(symbol_classifications, dict) and hasattr(symbol_classifications, "files"):
+            symbol_classifications, all_edges, config, filepath_filter, propagation_sources = (
+                all_edges, config, filepath_filter, propagation_sources, snapshot
+            )
+            snapshot = None
+
         violations = []
         for edge in all_edges:
             source_sym, target_sym = edge["source"], edge["target"]

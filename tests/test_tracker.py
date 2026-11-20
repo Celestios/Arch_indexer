@@ -4,7 +4,7 @@ from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
 from change_tracker.tracker import ChangeTracker
-from engines.scip_wrapper import ScipWrapper
+from engines.scip.wrapper import ScipWrapper
 
 def setup_workspace(tmp_path):
     initialize_workspace(tmp_path)

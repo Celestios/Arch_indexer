@@ -160,6 +160,36 @@ class EdgesRepository(BaseRepository):
                 weight_updates
             )
 
+    def get_edges_for_symbol(self, symbol: str):
+        """Get all edges where symbol is source or target."""
+        with self.db_conn.session() as conn:
+            return conn.execute(
+                "SELECT source, target, relation FROM edges WHERE source = ? OR target = ?",
+                (symbol, symbol)
+            ).fetchall()
+
+    def delete_edges_by_relation(self, relation: str):
+        """Delete all edges with a specific relation type."""
+        with self.db_conn.session() as conn:
+            conn.execute("DELETE FROM edges WHERE relation = ?", (relation,))
+
+    def get_edges_by_relation(self, relation: str) -> List[Dict[str, Any]]:
+        """Get all edges with a specific relation type."""
+        with self.db_conn.session() as conn:
+            rows = conn.execute(
+                "SELECT source, target, relation, weight FROM edges WHERE relation = ?",
+                (relation,)
+            ).fetchall()
+            return [
+                {
+                    "source": r[0],
+                    "target": r[1],
+                    "relation": r[2],
+                    "weight": r[3] if len(r) > 3 and r[3] is not None else 1.0,
+                }
+                for r in rows
+            ]
+
     def get_dependent_files(self, filepaths: List[str]) -> List[str]:
         """Find all files that call symbols defined in the given files using a single join query."""
         if not filepaths:

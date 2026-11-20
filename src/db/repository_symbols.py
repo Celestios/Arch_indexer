@@ -1,10 +1,107 @@
 from typing import Dict, List, Any, Optional
 from db.connection import DbConnection
-from db.base import BaseRepository, UPSERT_SYMBOL_SQL
+from db.base import BaseRepository, RowDict, UPSERT_SYMBOL_SQL
 
 
 class SymbolsRepository(BaseRepository):
-    """Handles queries and updates to the 'symbols' and 'occurrences' tables."""
+    """Handles queries and updates to the 'symbols' table and delegates occurrence/diagnostic leaf queries."""
+
+    def __init__(self, db_conn: DbConnection, occurrences=None, diagnostics=None, edges=None):
+        super().__init__(db_conn)
+        self.occurrences = occurrences
+        self.diagnostics = diagnostics
+        self.edges = edges
+
+    def _get_occurrences(self):
+        if self.occurrences is not None:
+            return self.occurrences
+        from db.repository_occurrences import OccurrencesRepository
+        self.occurrences = OccurrencesRepository(self.db_conn)
+        return self.occurrences
+
+    def _get_diagnostics(self):
+        if self.diagnostics is not None:
+            return self.diagnostics
+        from db.repository_diagnostics import DiagnosticsRepository
+        self.diagnostics = DiagnosticsRepository(self.db_conn)
+        return self.diagnostics
+
+    def _get_edges(self):
+        if self.edges is not None:
+            return self.edges
+        from db.repository_edges import EdgesRepository
+        self.edges = EdgesRepository(self.db_conn)
+        return self.edges
+
+    @staticmethod
+    def _row_to_symbol_dict(row) -> Optional[Dict[str, Any]]:
+        """Maps a database row tuple to a normalized symbol dict/RowDict."""
+        if not row:
+            return None
+        if isinstance(row, RowDict):
+            return row
+        if isinstance(row, dict):
+            return row
+        if len(row) == 5:
+            order = ["symbol", "filepath", "kind", "signature", "docstring"]
+            data = {
+                "symbol": row[0],
+                "filepath": row[1],
+                "kind": row[2],
+                "signature": row[3],
+                "docstring": row[4],
+            }
+            return RowDict(data, order)
+        elif len(row) == 11:
+            order = [
+                "symbol", "filepath", "kind", "signature", "docstring",
+                "body_hash", "connection_weight", "parent_symbol",
+                "classification", "change_count", "clean_symbol"
+            ]
+            clean_sym = row[10] if row[10] else None
+            if not clean_sym and row[0]:
+                from utils.helpers import demangle_scip_symbol
+                clean_sym = demangle_scip_symbol(row[0])
+            data = {
+                "symbol": row[0],
+                "filepath": row[1],
+                "kind": row[2],
+                "signature": row[3],
+                "docstring": row[4],
+                "body_hash": row[5],
+                "connection_weight": row[6] if row[6] is not None else 0,
+                "parent_symbol": row[7],
+                "classification": row[8] or "{}",
+                "change_count": row[9] if row[9] is not None else 1,
+                "code_block": None,
+                "clean_symbol": clean_sym
+            }
+            return RowDict(data, order)
+        else:
+            order = [
+                "symbol", "filepath", "kind", "signature", "docstring",
+                "body_hash", "connection_weight", "parent_symbol",
+                "classification", "change_count", "code_block", "clean_symbol"
+            ]
+            clean_sym = row[11] if len(row) > 11 and row[11] else (row[10] if len(row) == 11 and row[10] else None)
+            if not clean_sym and row[0]:
+                from utils.helpers import demangle_scip_symbol
+                clean_sym = demangle_scip_symbol(row[0])
+            data = {
+                "symbol": row[0],
+                "filepath": row[1],
+                "kind": row[2],
+                "signature": row[3],
+                "docstring": row[4],
+                "body_hash": row[5] if len(row) > 5 else None,
+                "connection_weight": row[6] if len(row) > 6 and row[6] is not None else 0,
+                "parent_symbol": row[7] if len(row) > 7 else None,
+                "classification": row[8] if len(row) > 8 and row[8] else "{}",
+                "change_count": row[9] if len(row) > 9 and row[9] is not None else 1,
+                "code_block": row[10] if len(row) > 10 else None,
+                "clean_symbol": clean_sym,
+            }
+            return RowDict(data, order)
 
     def upsert_symbol(
         self,
@@ -33,22 +130,7 @@ class SymbolsRepository(BaseRepository):
                 "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count, code_block, clean_symbol FROM symbols WHERE symbol = ? OR clean_symbol = ?",
                 (symbol, symbol)
             ).fetchone()
-            if res:
-                return {
-                    "symbol": res[0],
-                    "filepath": res[1],
-                    "kind": res[2],
-                    "signature": res[3],
-                    "docstring": res[4],
-                    "body_hash": res[5],
-                    "connection_weight": res[6],
-                    "parent_symbol": res[7],
-                    "classification": res[8] or "{}",
-                    "change_count": res[9] if len(res) > 9 and res[9] is not None else 1,
-                    "code_block": res[10] if len(res) > 10 else None,
-                    "clean_symbol": res[11] if len(res) > 11 and res[11] else res[0]
-                }
-        return None
+            return self._row_to_symbol_dict(res)
 
     def get_symbols_by_filepaths(self, filepaths: List[str]) -> Dict[str, Dict[str, Any]]:
         """Get all symbols for a list of filepaths, returned as {symbol: {kind, body_hash, ...}}."""
@@ -77,67 +159,6 @@ class SymbolsRepository(BaseRepository):
                 }
         return result
 
-    def add_occurrence(
-        self,
-        symbol: str,
-        filepath: str,
-        start_line: int,
-        start_col: int,
-        end_line: int,
-        end_col: int,
-        role: int
-    ):
-        """Registers a reference or definition coordinate occurrence of a symbol."""
-        with self.db_conn.session() as conn:
-            conn.execute(
-                """
-                INSERT INTO occurrences (symbol, filepath, start_line, start_col, end_line, end_col, role)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (symbol, filepath, start_line, start_col, end_line, end_col, role)
-            )
-
-    def get_occurrences_for_symbol(self, symbol: str) -> List[Dict[str, Any]]:
-        """Lists all physical coordinates where a symbol occurs/is used."""
-        with self.db_conn.session() as conn:
-            res = conn.execute(
-                "SELECT filepath, start_line, start_col, end_line, end_col, role FROM occurrences WHERE symbol = ?",
-                (symbol,)
-            ).fetchall()
-            return [
-                {
-                    "filepath": r[0],
-                    "start_line": r[1],
-                    "start_col": r[2],
-                    "end_line": r[3],
-                    "end_col": r[4],
-                    "role": r[5]
-                }
-                for r in res
-            ]
-
-    def get_definitions_map(self) -> Dict[str, Dict[str, Any]]:
-        """Returns all definition occurrences as {symbol: {filepath, start_line, ...}} in one query."""
-        with self.db_conn.session() as conn:
-            res = conn.execute(
-                """
-                SELECT symbol, filepath, start_line, start_col, end_line, end_col, role
-                FROM occurrences
-                WHERE (role & 1) = 1
-                """
-            ).fetchall()
-            result = {}
-            for r in res:
-                result[r[0]] = {
-                    "filepath": r[1],
-                    "start_line": r[2],
-                    "start_col": r[3],
-                    "end_line": r[4],
-                    "end_col": r[5],
-                    "role": r[6],
-                }
-            return result
-
     def upsert_symbols_bulk(self, symbols_list: List[Dict[str, Any]], progress_callback=None):
         """Bulk upserts a list of symbols in a single transaction."""
         if not symbols_list:
@@ -160,33 +181,6 @@ class SymbolsRepository(BaseRepository):
         ]
         with self.db_conn.session() as conn:
             conn.executemany(UPSERT_SYMBOL_SQL, data)
-        if progress_callback:
-            progress_callback(len(data), len(data))
-
-    def add_occurrences_bulk(self, occurrences_list: List[Dict[str, Any]], progress_callback=None):
-        """Bulk inserts a list of occurrences in a single transaction."""
-        if not occurrences_list:
-            return
-        data = [
-            (
-                occ["symbol"],
-                occ["filepath"],
-                occ["start_line"],
-                occ["start_col"],
-                occ["end_line"],
-                occ["end_col"],
-                occ["role"]
-            )
-            for occ in occurrences_list
-        ]
-        with self.db_conn.session() as conn:
-            conn.executemany(
-                """
-                INSERT INTO occurrences (symbol, filepath, start_line, start_col, end_line, end_col, role)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                data
-            )
         if progress_callback:
             progress_callback(len(data), len(data))
 
@@ -215,7 +209,6 @@ class SymbolsRepository(BaseRepository):
                 }
                 for r in res
             ]
-
 
     def get_symbols_metadata_batch(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         """Retrieves symbol metadata and definition occurrences in bulk."""
@@ -265,158 +258,9 @@ class SymbolsRepository(BaseRepository):
         with self.db_conn.session() as conn:
             conn.execute("DELETE FROM symbols WHERE filepath = ?", (filepath,))
 
-    def delete_occurrences_for_file(self, filepath: str):
-        """Delete all occurrences in a specific file."""
-        with self.db_conn.session() as conn:
-            conn.execute("DELETE FROM occurrences WHERE filepath = ?", (filepath,))
-
     def delete_symbols_for_files(self, filepaths: List[str]):
         """Delete all symbols defined in multiple files."""
         self._delete_by_filepaths("symbols", filepaths)
-
-    def delete_occurrences_for_files(self, filepaths: List[str]):
-        """Delete all occurrences in multiple files."""
-        self._delete_by_filepaths("occurrences", filepaths)
-
-    def delete_diagnostics_for_files(self, filepaths: List[str]):
-        """Delete all diagnostics in multiple files."""
-        self._delete_by_filepaths("diagnostics", filepaths)
-
-    def delete_diagnostics_for_file(self, filepath: str):
-        """Delete all diagnostics in a specific file."""
-        with self.db_conn.session() as conn:
-            conn.execute("DELETE FROM diagnostics WHERE filepath = ?", (filepath,))
-
-    def add_diagnostics_bulk(self, diagnostics_list: List[Dict[str, Any]], progress_callback=None):
-        """Bulk inserts a list of diagnostics in a single transaction."""
-        if not diagnostics_list:
-            return
-        data = [
-            (
-                d["filepath"],
-                d.get("symbol"),
-                d["line"],
-                d["col"],
-                d["severity"],
-                d.get("code"),
-                d["message"],
-                d.get("tags")
-            )
-            for d in diagnostics_list
-        ]
-        with self.db_conn.session() as conn:
-            conn.executemany(
-                """
-                INSERT INTO diagnostics (filepath, symbol, line, col, severity, code, message, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                data
-            )
-        if progress_callback:
-            progress_callback(len(data), len(data))
-
-    def get_diagnostics_for_file(self, filepath: str) -> List[Dict[str, Any]]:
-        """Get all diagnostics recorded for a specific file."""
-        normalized = filepath.replace("\\", "/")
-        with self.db_conn.session() as conn:
-            res = conn.execute(
-                """
-                SELECT filepath, symbol, line, col, severity, code, message, tags
-                FROM diagnostics
-                WHERE replace(filepath, '\\', '/') = ? OR filepath = ?
-                ORDER BY line, col
-                """,
-                (normalized, filepath)
-            ).fetchall()
-            return [
-                {
-                    "filepath": r[0],
-                    "symbol": r[1],
-                    "line": r[2],
-                    "col": r[3],
-                    "severity": r[4],
-                    "code": r[5],
-                    "message": r[6],
-                    "tags": r[7]
-                }
-                for r in res
-            ]
-
-    def get_diagnostics_for_symbol(self, symbol: str) -> List[Dict[str, Any]]:
-        """Get all diagnostics recorded for a specific symbol."""
-        with self.db_conn.session() as conn:
-            res = conn.execute(
-                """
-                SELECT filepath, symbol, line, col, severity, code, message, tags
-                FROM diagnostics
-                WHERE symbol = ?
-                ORDER BY line, col
-                """,
-                (symbol,)
-            ).fetchall()
-            return [
-                {
-                    "filepath": r[0],
-                    "symbol": r[1],
-                    "line": r[2],
-                    "col": r[3],
-                    "severity": r[4],
-                    "code": r[5],
-                    "message": r[6],
-                    "tags": r[7]
-                }
-                for r in res
-            ]
-
-    def get_diagnostics_batch(self, symbols: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-        """Get all diagnostics recorded for a batch of symbols, returned as {symbol: [diag, ...]}."""
-        if not symbols:
-            return {}
-        result: Dict[str, List[Dict[str, Any]]] = {sym: [] for sym in symbols}
-        unique_symbols = list(set(symbols))
-        chunk_size = 500
-        with self.db_conn.session() as conn:
-            for i in range(0, len(unique_symbols), chunk_size):
-                chunk = unique_symbols[i:i + chunk_size]
-                placeholders = ",".join("?" for _ in chunk)
-                res = conn.execute(
-                    f"""
-                    SELECT filepath, symbol, line, col, severity, code, message, tags
-                    FROM diagnostics
-                    WHERE symbol IN ({placeholders})
-                    ORDER BY line, col
-                    """,
-                    chunk
-                ).fetchall()
-                for r in res:
-                    sym = r[1]
-                    diag = {
-                        "filepath": r[0],
-                        "symbol": sym,
-                        "line": r[2],
-                        "col": r[3],
-                        "severity": r[4],
-                        "code": r[5],
-                        "message": r[6],
-                        "tags": r[7]
-                    }
-                    if sym in result:
-                        result[sym].append(diag)
-                    else:
-                        result[sym] = [diag]
-        return result
-
-    def delete_orphaned_occurrences(self) -> int:
-        """Delete occurrences where the referenced symbol no longer exists in the symbols table.
-        Returns the number of orphaned occurrences deleted."""
-        with self.db_conn.session() as conn:
-            res = conn.execute(
-                """
-                DELETE FROM occurrences
-                WHERE symbol NOT IN (SELECT symbol FROM symbols)
-                """
-            )
-            return res.rowcount if res.rowcount else 0
 
     def recalculate_connection_weights(self):
         """Recalculates connection weights for all symbols in the database."""
@@ -445,27 +289,30 @@ class SymbolsRepository(BaseRepository):
         """Search symbols by keyword in symbol or clean_symbol."""
         q = f"%{query.lower()}%"
         with self.db_conn.session() as conn:
-            return conn.execute(
+            rows = conn.execute(
                 "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE LOWER(symbol) LIKE ? OR LOWER(COALESCE(clean_symbol, '')) LIKE ? LIMIT ?",
                 (q, q, limit)
             ).fetchall()
+            return [self._row_to_symbol_dict(r) for r in rows]
 
     def search_symbols_like(self, query: str, limit: int = 10):
         """Search symbols by partial name match in symbol or clean_symbol."""
         q = f"%{query}%"
         with self.db_conn.session() as conn:
-            return conn.execute(
+            rows = conn.execute(
                 "SELECT symbol, filepath, kind, signature, docstring FROM symbols WHERE symbol LIKE ? OR clean_symbol LIKE ? LIMIT ?",
                 (q, q, limit)
             ).fetchall()
+            return [self._row_to_symbol_dict(r) for r in rows]
 
     def get_symbol_exact(self, symbol: str):
         """Get exact symbol match (by symbol or clean_symbol)."""
         with self.db_conn.session() as conn:
-            return conn.execute(
+            row = conn.execute(
                 "SELECT symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count, clean_symbol FROM symbols WHERE symbol = ? OR clean_symbol = ?",
                 (symbol, symbol)
             ).fetchone()
+            return self._row_to_symbol_dict(row)
 
     def update_symbols_classification_bulk(self, classifications: Dict[str, Dict[str, Any]]):
         """Bulk updates computed classification fields for symbols."""
@@ -478,27 +325,6 @@ class SymbolsRepository(BaseRepository):
         ]
         with self.db_conn.session() as conn:
             conn.executemany("UPDATE symbols SET classification = ? WHERE symbol = ?", data)
-
-    def get_occurrences_by_filepath(self, filepath: str):
-        """Get all occurrences for a file."""
-        normalized = filepath.replace("\\", "/")
-        with self.db_conn.session() as conn:
-            return conn.execute(
-                """
-                SELECT symbol, start_line, end_line, role
-                FROM occurrences
-                WHERE replace(filepath, '\\', '/') = ? OR filepath = ?
-                """,
-                (normalized, filepath)
-            ).fetchall()
-
-    def get_edges_for_symbol(self, symbol: str):
-        """Get all edges where symbol is source or target."""
-        with self.db_conn.session() as conn:
-            return conn.execute(
-                "SELECT source, target, relation FROM edges WHERE source = ? OR target = ?",
-                (symbol, symbol)
-            ).fetchall()
 
     def get_symbols_by_filepath_exact(self, filepath: str):
         """Get all symbols defined in a file by exact filepath."""
@@ -532,3 +358,85 @@ class SymbolsRepository(BaseRepository):
                 for r in res
             ]
 
+    # --- Delegated Occurrence Methods (Backwards Compatibility) ---
+
+    def add_occurrence(
+        self,
+        symbol: str,
+        filepath: str,
+        start_line: int,
+        start_col: int,
+        end_line: int,
+        end_col: int,
+        role: int
+    ):
+        """Registers a reference or definition coordinate occurrence of a symbol."""
+        self._get_occurrences().add_occurrence(symbol, filepath, start_line, start_col, end_line, end_col, role)
+
+    def add_occurrences_bulk(self, occurrences_list: List[Dict[str, Any]], progress_callback=None):
+        """Bulk inserts a list of occurrences in a single transaction."""
+        self._get_occurrences().add_occurrences_bulk(occurrences_list, progress_callback=progress_callback)
+
+    def upsert_occurrences_bulk(self, occurrences_list: List[Dict[str, Any]], progress_callback=None):
+        """Alias for add_occurrences_bulk."""
+        self._get_occurrences().upsert_occurrences_bulk(occurrences_list, progress_callback=progress_callback)
+
+    def get_occurrences_for_symbol(self, symbol: str) -> List[Dict[str, Any]]:
+        """Lists all physical coordinates where a symbol occurs/is used."""
+        return self._get_occurrences().get_occurrences_for_symbol(symbol)
+
+    def get_definitions_map(self) -> Dict[str, Dict[str, Any]]:
+        """Returns all definition occurrences as {symbol: {filepath, start_line, ...}} in one query."""
+        return self._get_occurrences().get_definitions_map()
+
+    def get_occurrences_by_filepath(self, filepath: str):
+        """Get all occurrences for a file."""
+        return self._get_occurrences().get_occurrences_by_filepath(filepath)
+
+    def delete_occurrences_for_file(self, filepath: str):
+        """Delete all occurrences in a specific file."""
+        self._get_occurrences().delete_occurrences_for_file(filepath)
+
+    def delete_occurrences_for_files(self, filepaths: List[str]):
+        """Delete all occurrences in multiple files."""
+        self._get_occurrences().delete_occurrences_for_files(filepaths)
+
+    def delete_orphaned_occurrences(self) -> int:
+        """Delete occurrences where the referenced symbol no longer exists in the symbols table."""
+        return self._get_occurrences().delete_orphaned_occurrences()
+
+    # --- Delegated Diagnostic Methods (Backwards Compatibility) ---
+
+    def add_diagnostics_bulk(self, diagnostics_list: List[Dict[str, Any]], progress_callback=None):
+        """Bulk inserts a list of diagnostics in a single transaction."""
+        self._get_diagnostics().add_diagnostics_bulk(diagnostics_list, progress_callback=progress_callback)
+
+    def upsert_diagnostics_bulk(self, diagnostics_list: List[Dict[str, Any]], progress_callback=None):
+        """Alias for add_diagnostics_bulk."""
+        self._get_diagnostics().upsert_diagnostics_bulk(diagnostics_list, progress_callback=progress_callback)
+
+    def get_diagnostics_for_file(self, filepath: str) -> List[Dict[str, Any]]:
+        """Get all diagnostics recorded for a specific file."""
+        return self._get_diagnostics().get_diagnostics_for_file(filepath)
+
+    def get_diagnostics_for_symbol(self, symbol: str) -> List[Dict[str, Any]]:
+        """Get all diagnostics recorded for a specific symbol."""
+        return self._get_diagnostics().get_diagnostics_for_symbol(symbol)
+
+    def get_diagnostics_batch(self, symbols: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """Get all diagnostics recorded for a batch of symbols."""
+        return self._get_diagnostics().get_diagnostics_batch(symbols)
+
+    def delete_diagnostics_for_file(self, filepath: str):
+        """Delete all diagnostics in a specific file."""
+        self._get_diagnostics().delete_diagnostics_for_file(filepath)
+
+    def delete_diagnostics_for_files(self, filepaths: List[str]):
+        """Delete all diagnostics in multiple files."""
+        self._get_diagnostics().delete_diagnostics_for_files(filepaths)
+
+    # --- Delegated Edge Methods (Backwards Compatibility) ---
+
+    def get_edges_for_symbol(self, symbol: str):
+        """Get all edges where symbol is source or target."""
+        return self._get_edges().get_edges_for_symbol(symbol)

@@ -121,8 +121,7 @@ class FfiLinker:
         ]
 
     def _clear_old_ffi_edges(self):
-        with self.repository.db_conn.session() as conn:
-            conn.execute("DELETE FROM edges WHERE relation = 'FFI_Binds'")
+        self.repository.edges.delete_edges_by_relation("FFI_Binds")
 
     def link_scip_bridges(self) -> int:
         """

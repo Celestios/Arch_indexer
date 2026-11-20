@@ -1,21 +1,41 @@
 from typing import Dict, List, Any, Optional
-
+from db.repository import Repository
+from auditor.violation_checkers.base import BaseViolationChecker
 from utils.helpers import matches_filter
 from utils.violation_id import ViolationId
 
 
-class PendingAuditChecker:
+class PendingAuditChecker(BaseViolationChecker):
     """Checks pending audit files for architectural boundary compliance."""
 
-    def check(self, repository, symbol_classifications: Dict, all_edges: List[Dict],
-              config: Dict, filepath_filter: Optional[str],
-              propagation_sources: Dict,
-              snapshot: Optional[Any] = None) -> List[Dict[str, Any]]:
+    def __init__(self, repository: Optional[Repository] = None):
+        super().__init__(repository)
+
+    def check(
+        self,
+        symbol_classifications: Any,
+        all_edges: Any = None,
+        config: Any = None,
+        filepath_filter: Optional[str] = None,
+        propagation_sources: Optional[Dict] = None,
+        snapshot: Optional[Any] = None
+    ) -> List[Dict[str, Any]]:
+        repo = self.repository
+        if not isinstance(symbol_classifications, dict) and hasattr(symbol_classifications, "files"):
+            repo = symbol_classifications
+            symbol_classifications, all_edges, config, filepath_filter, propagation_sources = (
+                all_edges, config, filepath_filter, propagation_sources, snapshot
+            )
+            snapshot = None
+
         violations = []
         if snapshot is not None and snapshot.all_files:
             file_metadata = snapshot.all_files
+        elif repo is not None:
+            file_metadata = repo.files.get_all_files_metadata()
         else:
-            file_metadata = repository.files.get_all_files_metadata()
+            file_metadata = {}
+
         for f_path, meta in file_metadata.items():
             if not meta.get("pending_audit"):
                 continue

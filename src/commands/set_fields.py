@@ -31,10 +31,14 @@ def cmd_set_fields(args):
         file_info = repository.files.get_file(filepath)
         current_fields = {}
         if file_info.get("manual_fields"):
-            try:
-                current_fields = json.loads(file_info["manual_fields"])
-            except Exception:
-                pass
+            mf = file_info["manual_fields"]
+            if isinstance(mf, dict):
+                current_fields = dict(mf)
+            else:
+                try:
+                    current_fields = json.loads(mf)
+                except Exception:
+                    pass
 
         for k, v in fields.items():
             if v is None:

@@ -1,11 +1,58 @@
 import json
 from typing import Dict, List, Any, Optional
 from db.connection import DbConnection
-from db.base import BaseRepository, UPSERT_FILE_SQL
+from db.base import BaseRepository, RowDict, UPSERT_FILE_SQL
+
+FILE_FIELDS = [
+    "filepath", "sha256", "language", "last_indexed",
+    "status", "manual_status", "pending_audit", "manual_fields", "justification"
+]
 
 
 class FilesRepository(BaseRepository):
     """Handles queries and updates to the 'files' table."""
+
+    @staticmethod
+    def _row_to_file_dict(row) -> Optional[Dict[str, Any]]:
+        """Maps a database row tuple to a normalized file dict with parsed manual_fields."""
+        if not row:
+            return None
+        if isinstance(row, RowDict):
+            return row
+        if isinstance(row, dict):
+            manual_fields = row.get("manual_fields")
+            if isinstance(manual_fields, str):
+                try:
+                    manual_fields = json.loads(manual_fields) if manual_fields else {}
+                except Exception:
+                    manual_fields = {}
+            elif not isinstance(manual_fields, dict):
+                manual_fields = {}
+            row_copy = dict(row)
+            row_copy["manual_fields"] = manual_fields
+            return RowDict(row_copy, FILE_FIELDS)
+
+        manual_fields = row[7] if len(row) > 7 else {}
+        if isinstance(manual_fields, str):
+            try:
+                manual_fields = json.loads(manual_fields) if manual_fields else {}
+            except Exception:
+                manual_fields = {}
+        elif not isinstance(manual_fields, dict):
+            manual_fields = {}
+
+        data = {
+            "filepath": row[0],
+            "sha256": row[1] if len(row) > 1 else "",
+            "language": row[2] if len(row) > 2 else "",
+            "last_indexed": row[3] if len(row) > 3 else None,
+            "status": row[4] if len(row) > 4 else "UNAUDITED",
+            "manual_status": row[5] if len(row) > 5 else "UNAUDITED",
+            "pending_audit": bool(row[6]) if len(row) > 6 and row[6] is not None else False,
+            "manual_fields": manual_fields,
+            "justification": row[8] if len(row) > 8 else None,
+        }
+        return RowDict(data, FILE_FIELDS)
 
     def upsert_file(self, filepath: str, sha256: str, language: str):
         """Registers or updates a file's hashing and index metadata. Sets pending_audit if changed."""
@@ -13,13 +60,8 @@ class FilesRepository(BaseRepository):
             conn.execute(UPSERT_FILE_SQL, (filepath, sha256, language))
 
     def delete_file(self, filepath: str):
-        """
-        Deletes a file record and cleans up associated symbols, occurrences, and edges.
-        Delegates cross-table cleanup to CascadeCleanupService.
-        """
-        from db.cascade import CascadeCleanupService
-        cascade = CascadeCleanupService(self._get_repository())
-        cascade.delete_file(filepath)
+        """Deletes only the file record (single-table leaf). Cross-table cascade is handled by Repository.delete_file."""
+        self.delete_file_record(filepath)
 
     def delete_file_record(self, filepath: str):
         """Deletes only the file record (no cross-table cleanup)."""
@@ -30,11 +72,6 @@ class FilesRepository(BaseRepository):
         """Deletes only file records for multiple files (no cross-table cleanup)."""
         self._delete_by_filepaths("files", filepaths)
 
-    def _get_repository(self):
-        """Get the parent Repository for cascade operations."""
-        from db.repository import Repository
-        return Repository(self.db_conn)
-
     def get_file(self, filepath: str) -> Optional[Dict[str, Any]]:
         """Retrieves indexing metadata for a specific file."""
         with self.db_conn.session() as conn:
@@ -42,19 +79,7 @@ class FilesRepository(BaseRepository):
                 "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE filepath = ?",
                 (filepath,)
             ).fetchone()
-            if res:
-                return {
-                    "filepath": res[0],
-                    "sha256": res[1],
-                    "language": res[2],
-                    "last_indexed": res[3],
-                    "status": res[4],
-                    "manual_status": res[5],
-                    "pending_audit": bool(res[6]),
-                    "manual_fields": res[7],
-                    "justification": res[8]
-                }
-        return None
+            return self._row_to_file_dict(res)
 
     def upsert_files_bulk(self, files_list: List[Dict[str, Any]]):
         """Bulk upserts a list of files in a single transaction. Sets pending_audit on change."""
@@ -148,12 +173,10 @@ class FilesRepository(BaseRepository):
             return result[0] if result else 0
 
     def clean_files_symbols_and_relations(self, filepaths: List[str]):
-        """Cleans up occurrences, edges, and symbols for the given filepaths before re-ingesting."""
+        """Deletes file records for given filepaths (single-table leaf). Cross-table cascade is handled by Repository.delete_files_bulk."""
         if not filepaths:
             return
-        from db.cascade import CascadeCleanupService
-        cascade = CascadeCleanupService(self._get_repository())
-        cascade.delete_files_bulk(filepaths)
+        self.delete_files_records(filepaths)
 
     def update_file_statuses(self, statuses):
         """Bulk update file compliance statuses."""
@@ -177,16 +200,22 @@ class FilesRepository(BaseRepository):
     def search_files_keyword(self, query: str, limit: int = 5):
         """Search files by keyword in filepath."""
         with self.db_conn.session() as conn:
-            return conn.execute(
-                "SELECT filepath, language, status FROM files WHERE LOWER(filepath) LIKE ? LIMIT ?",
+            rows = conn.execute(
+                """
+                SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification
+                FROM files
+                WHERE LOWER(filepath) LIKE ?
+                LIMIT ?
+                """,
                 (f"%{query.lower()}%", limit)
             ).fetchall()
+            return [self._row_to_file_dict(r) for r in rows]
 
     def get_file_exact(self, filepath: str):
         """Get exact file match by filepath."""
         normalized = filepath.replace("\\", "/")
         with self.db_conn.session() as conn:
-            return conn.execute(
+            res = conn.execute(
                 """
                 SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification
                 FROM files
@@ -194,12 +223,13 @@ class FilesRepository(BaseRepository):
                 """,
                 (filepath, normalized)
             ).fetchone()
+            return self._row_to_file_dict(res)
 
     def search_files_like(self, query: str, limit: int = 10):
         """Search files by partial filepath match."""
         normalized = query.replace("\\", "/")
         with self.db_conn.session() as conn:
-            return conn.execute(
+            rows = conn.execute(
                 """
                 SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification
                 FROM files
@@ -208,3 +238,4 @@ class FilesRepository(BaseRepository):
                 """,
                 (f"%{normalized}%", normalized, limit)
             ).fetchall()
+            return [self._row_to_file_dict(r) for r in rows]

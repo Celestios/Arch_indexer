@@ -11,8 +11,14 @@ class CascadeCleanupService:
     def delete_file(self, filepath: str):
         """Delete a file and all its associated data across tables."""
         self.repository.edges.delete_edges_for_file(filepath)
-        self.repository.symbols.delete_occurrences_for_file(filepath)
-        self.repository.symbols.delete_diagnostics_for_file(filepath)
+        if hasattr(self.repository, "occurrences"):
+            self.repository.occurrences.delete_occurrences_for_file(filepath)
+        else:
+            self.repository.symbols.delete_occurrences_for_file(filepath)
+        if hasattr(self.repository, "diagnostics"):
+            self.repository.diagnostics.delete_diagnostics_for_file(filepath)
+        else:
+            self.repository.symbols.delete_diagnostics_for_file(filepath)
         self.repository.symbols.delete_symbols_for_file(filepath)
         self.repository.files.delete_file_record(filepath)
 
@@ -21,7 +27,13 @@ class CascadeCleanupService:
         if not filepaths:
             return
         self.repository.edges.delete_edges_for_files(filepaths)
-        self.repository.symbols.delete_occurrences_for_files(filepaths)
-        self.repository.symbols.delete_diagnostics_for_files(filepaths)
+        if hasattr(self.repository, "occurrences"):
+            self.repository.occurrences.delete_occurrences_for_files(filepaths)
+        else:
+            self.repository.symbols.delete_occurrences_for_files(filepaths)
+        if hasattr(self.repository, "diagnostics"):
+            self.repository.diagnostics.delete_diagnostics_for_files(filepaths)
+        else:
+            self.repository.symbols.delete_diagnostics_for_files(filepaths)
         self.repository.symbols.delete_symbols_for_files(filepaths)
         self.repository.files.delete_files_records(filepaths)

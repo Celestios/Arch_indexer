@@ -468,7 +468,7 @@ def test_change_triggered_audit_flags_reset_on_change(tmp_path):
     # 2. stability remains experimental
     # 3. pending_audit violation generated
     file_info = repository.files.get_file('lib/ui/widget.dart')
-    m_fields = json.loads(file_info['manual_fields'])
+    m_fields = file_info['manual_fields'] if isinstance(file_info['manual_fields'], dict) else json.loads(file_info['manual_fields'])
     assert m_fields['ai_summary'] == 'No summary yet'
     assert m_fields['stability'] == 'experimental'
     assert file_info['pending_audit'] is True
@@ -511,7 +511,7 @@ def test_change_triggered_audit_flags_invalid_value(tmp_path):
     violations = auditor.run_audit()
 
     file_info = repository.files.get_file('lib/ui/widget.dart')
-    m_fields = json.loads(file_info['manual_fields'])
+    m_fields = file_info['manual_fields'] if isinstance(file_info['manual_fields'], dict) else json.loads(file_info['manual_fields'])
     assert m_fields['pattern'] == 'None'
     assert file_info['pending_audit'] is True
 

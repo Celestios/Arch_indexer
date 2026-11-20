@@ -38,7 +38,7 @@ class Auditor:
         self.checkers = [
             DependencyViolationChecker(repository, self.tracer, self.config_loader),
             NamingViolationChecker(repository, self.tracer),
-            PendingAuditChecker(),
+            PendingAuditChecker(repository),
         ]
 
     def load_config(self) -> Dict[str, Any]:
@@ -76,8 +76,9 @@ class Auditor:
         violations = []
         for checker in self.checkers:
             violations.extend(checker.check(
-                self.repository, symbol_classifications, all_edges,
-                config, filepath_filter, propagation_sources,
+                symbol_classifications, all_edges,
+                config, filepath_filter=filepath_filter,
+                propagation_sources=propagation_sources,
                 snapshot=snapshot
             ))
 
