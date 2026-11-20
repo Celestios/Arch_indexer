@@ -106,20 +106,7 @@ class IndexIngester:
             existing_symbols_count = 0
             langs_tuple = tuple(languages_in_index)
             if langs_tuple:
-                with repository.db_conn.session() as conn:
-                    if len(langs_tuple) == 1:
-                        res = conn.execute(
-                            "SELECT COUNT(*) FROM symbols WHERE filepath IN (SELECT filepath FROM files WHERE language = ?)",
-                            (langs_tuple[0],)
-                        ).fetchone()
-                    else:
-                        placeholders = ",".join("?" for _ in langs_tuple)
-                        res = conn.execute(
-                            f"SELECT COUNT(*) FROM symbols WHERE filepath IN (SELECT filepath FROM files WHERE language IN ({placeholders}))",
-                            langs_tuple
-                        ).fetchone()
-                    if res:
-                        existing_symbols_count = res[0]
+                existing_symbols_count = repository.analytics.count_symbols_by_languages(list(langs_tuple))
 
             if not force and len(deleted_files) == 0 and existing_symbols_count > 0:
                 is_suspicious_shrink = (
@@ -195,16 +182,12 @@ class IndexIngester:
                     clean_to_existing_by_fp[fp][csym] = sid
 
             # Query existing definition occurrences before they are cleared to match by start_line
-            placeholders = ",".join("?" for _ in changed_set)
-            with repository.db_conn.session() as conn:
-                occ_rows = conn.execute(
-                    f"SELECT symbol, replace(filepath, '\\', '/'), start_line FROM occurrences WHERE replace(filepath, '\\', '/') IN ({placeholders}) AND (role & 1) != 0",
-                    list(changed_set)
-                ).fetchall()
-                for sid, fp, s_line in occ_rows:
-                    if sid in existing_symbols:
-                        line_to_existing_by_fp[fp][s_line] = sid
-                        occs_by_fp[fp].append((sid, s_line))
+            occ_rows = repository.graph.get_definition_occurrences_for_files(list(changed_set))
+            for r in occ_rows:
+                sid, fp, s_line = r["symbol"], r["filepath"], r["start_line"]
+                if sid in existing_symbols:
+                    line_to_existing_by_fp[fp][s_line] = sid
+                    occs_by_fp[fp].append((sid, s_line))
 
         # Map SCIP symbol definition lines from parsed occurrences
         scip_def_lines = {}
@@ -363,19 +346,11 @@ class IndexIngester:
                     and (sym.get("filepath"), sym.get("clean_symbol") or sym_id) not in upgraded_clean
                 ]
                 if removed_symbols:
-                    with repository.db_conn.session() as conn:
-                        conn.execute(
-                            "DELETE FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))",
-                            (removed_symbols,)
-                        )
+                    repository.graph.delete_symbols_bulk(removed_symbols)
 
         # Delete any temporary duplicate Tree-sitter rows superseded by canonical SCIP IDs
         if superseded_ts_symbols:
-            with repository.db_conn.session() as conn:
-                conn.execute(
-                    "DELETE FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))",
-                    (list(superseded_ts_symbols),)
-                )
+            repository.graph.delete_symbols_bulk(list(superseded_ts_symbols))
 
     @classmethod
     def _write_index_batches(

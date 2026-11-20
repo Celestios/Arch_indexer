@@ -95,3 +95,29 @@ class TestDbConnection:
             assert db_path.exists()
         finally:
             conn.close()
+
+    def test_transaction_commit(self, tmp_path):
+        import pytest
+        db_path = tmp_path / "tx_commit.db"
+        conn = DbConnection(db_path)
+        try:
+            with conn.transaction() as c:
+                c.execute("INSERT INTO system_metadata (key, value) VALUES ('k1', 'v1')")
+            val = conn.get_connection().execute("SELECT value FROM system_metadata WHERE key = 'k1'").fetchone()[0]
+            assert val == "v1"
+        finally:
+            conn.close()
+
+    def test_transaction_rollback(self, tmp_path):
+        import pytest
+        db_path = tmp_path / "tx_rollback.db"
+        conn = DbConnection(db_path)
+        try:
+            with pytest.raises(RuntimeError):
+                with conn.transaction() as c:
+                    c.execute("INSERT INTO system_metadata (key, value) VALUES ('k2', 'v2')")
+                    raise RuntimeError("Forced abort")
+            row = conn.get_connection().execute("SELECT value FROM system_metadata WHERE key = 'k2'").fetchone()
+            assert row is None
+        finally:
+            conn.close()

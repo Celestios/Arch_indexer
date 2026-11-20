@@ -27,7 +27,11 @@ CREATE TABLE IF NOT EXISTS symbols (
     classification VARCHAR DEFAULT '{}', -- Architectural metadata fields (layer, tier, etc.)
     code_block TEXT, -- Defining code block for the class, method, function, or symbol
     change_count INTEGER DEFAULT 1,
-    last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    start_line INTEGER,
+    start_col INTEGER,
+    end_line INTEGER,
+    end_col INTEGER
 );
 
 -- 3. Track physical locations where symbols are referenced/defined
@@ -47,6 +51,7 @@ CREATE TABLE IF NOT EXISTS edges (
     target VARCHAR,
     relation VARCHAR NOT NULL, -- e.g., 'Calls', 'Inherits', 'Implements'
     weight FLOAT NOT NULL DEFAULT 1.0,
+    call_line INTEGER,
     PRIMARY KEY (source, target, relation)
 );
 

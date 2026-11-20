@@ -1,62 +1,68 @@
 """
 Database Reader Module.
-Focused strictly on DuckDB connection lifecycle and SQL queries.
+Focused strictly on DuckDB connection lifecycle and query delegation to domain stores.
 Delegates SCIP and signature parsing to `ScipParser`.
 """
 
 import os
+from pathlib import Path
 from typing import Dict, List, Any, Optional
 import duckdb
+
+from db.connection import DbConnection
+from db.repository import Repository
 from .scip_parser import ScipParser
 
 
 class DatabaseReader:
     """
-    Reads workspace intelligence directly from the DuckDB database.
+    Reads workspace intelligence from DuckDB via repository stores and DbConnection.
     """
 
-    def __init__(self, db_path: str = ".arch/arch.db"):
-        if not os.path.exists(db_path):
-            candidates = [
-                db_path,
-                os.path.join(".arch", "arch.db"),
-                os.path.join("..", ".arch", "arch.db"),
-                "arch.db",
-            ]
-            found = None
-            for cand in candidates:
-                if os.path.exists(cand):
-                    found = cand
-                    break
-            if not found:
-                raise FileNotFoundError(
-                    f"Database not found at '{db_path}'. Checked candidates: {candidates}"
-                )
-            self.db_path = found
+    def __init__(self, db_path: str = ".arch/arch.db", repository: Optional[Repository] = None, db_conn: Optional[DbConnection] = None):
+        if repository is not None:
+            self.repository = repository
+            self.db_conn = repository.db_conn
+            self.db_path = str(self.db_conn.db_path)
+            self._own_conn = False
+        elif db_conn is not None:
+            self.db_conn = db_conn
+            self.db_path = str(self.db_conn.db_path)
+            self.repository = Repository(self.db_conn)
+            self._own_conn = False
         else:
-            self.db_path = db_path
+            if not os.path.exists(db_path):
+                candidates = [
+                    db_path,
+                    os.path.join(".arch", "arch.db"),
+                    os.path.join("..", ".arch", "arch.db"),
+                    "arch.db",
+                ]
+                found = None
+                for cand in candidates:
+                    if os.path.exists(cand):
+                        found = cand
+                        break
+                if not found:
+                    raise FileNotFoundError(
+                        f"Database not found at '{db_path}'. Checked candidates: {candidates}"
+                    )
+                self.db_path = found
+            else:
+                self.db_path = db_path
 
-        self._conn: Optional[duckdb.DuckDBPyConnection] = None
+            self.db_conn = DbConnection(Path(self.db_path))
+            self.repository = Repository(self.db_conn)
+            self._own_conn = True
 
     def connect(self) -> duckdb.DuckDBPyConnection:
-        if self._conn is None:
-            try:
-                self._conn = duckdb.connect(self.db_path, read_only=True)
-            except Exception as e:
-                if "different configuration" in str(e):
-                    self._conn = duckdb.connect(self.db_path)
-                elif "Failure while replaying WAL file" in str(e):
-                    from db.connection import DbConnection
-                    db_helper = DbConnection(Path(self.db_path))
-                    self._conn = db_helper.get_connection()
-                else:
-                    raise
-        return self._conn
+        """Returns the active DuckDB connection from DbConnection."""
+        return self.db_conn.get_connection()
 
     def close(self):
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        """Closes the connection if owned by this instance."""
+        if getattr(self, "_own_conn", False) and self.db_conn is not None:
+            self.db_conn.close()
 
     def __enter__(self):
         self.connect()
@@ -70,62 +76,37 @@ class DatabaseReader:
     parse_scip_symbol = staticmethod(ScipParser.parse_scip_symbol)
 
     def fetch_files(self) -> List[Dict[str, Any]]:
-        conn = self.connect()
-        rows = conn.execute("""
-            SELECT filepath, language, status, sha256
-            FROM files
-            ORDER BY filepath
-        """).fetchall()
-
+        """Fetches all tracked files using the workspace store."""
+        raw_files = self.repository.workspace.get_all_files()
         files = []
-        for row in rows:
-            filepath = row[0].replace("\\", "/")
+        for f in raw_files:
+            fp = f["filepath"]
             files.append({
-                "filepath": filepath,
-                "language": row[1] or "python",
-                "status": row[2] or "COMPLIANT",
-                "sha256": row[3],
-                "filename": os.path.basename(filepath),
-                "directory": os.path.dirname(filepath) or ".",
+                "filepath": fp,
+                "language": f.get("language") or "python",
+                "status": f.get("status") or "COMPLIANT",
+                "sha256": f.get("sha256"),
+                "filename": os.path.basename(fp),
+                "directory": os.path.dirname(fp) or ".",
             })
         return files
 
     def fetch_symbols(self) -> List[Dict[str, Any]]:
-        conn = self.connect()
-        known_files = {
-            r[0].replace("\\", "/")
-            for r in conn.execute("SELECT filepath FROM files").fetchall()
-            if r[0]
-        }
-
-        # Check if code_block and clean_symbol columns exist in symbols table
-        cols = [c[1] for c in conn.execute("PRAGMA table_info('symbols')").fetchall()]
-        has_code_col = "code_block" in cols
-        has_clean_col = "clean_symbol" in cols
-
-        col_names = ["symbol", "filepath", "kind", "signature", "docstring", "connection_weight"]
-        if has_code_col:
-            col_names.append("code_block")
-        if has_clean_col:
-            col_names.append("clean_symbol")
-
-        query = f"SELECT {', '.join(col_names)} FROM symbols"
-        rows = conn.execute(query).fetchall()
-
-        code_idx = col_names.index("code_block") if has_code_col else -1
-        clean_idx = col_names.index("clean_symbol") if has_clean_col else -1
+        """Fetches all symbols using the graph store and parses them with ScipParser."""
+        raw_files = self.repository.workspace.get_all_files()
+        known_files = {f["filepath"] for f in raw_files if f.get("filepath")}
+        raw_symbols = self.repository.graph.get_all_symbols()
 
         symbols = []
-        for row in rows:
-            raw_sym = row[0]
-            raw_path = row[1]
-            filepath = raw_path.replace("\\", "/") if raw_path else None
-            kind = row[2] or "Symbol"
-            signature = row[3]
-            docstring = row[4]
-            conn_weight = row[5] or 0
-            code_block = row[code_idx] if code_idx != -1 and len(row) > code_idx else None
-            clean_sym = row[clean_idx] if clean_idx != -1 and len(row) > clean_idx else None
+        for sym in raw_symbols:
+            raw_sym = sym["symbol"]
+            filepath = sym.get("filepath")
+            kind = sym.get("kind") or "Symbol"
+            signature = sym.get("signature")
+            docstring = sym.get("docstring")
+            conn_weight = sym.get("connection_weight") or 0
+            code_block = sym.get("code_block")
+            clean_sym = sym.get("clean_symbol")
 
             parsed = ScipParser.parse_scip_symbol(raw_sym, filepath=filepath, known_files=known_files, clean_symbol=clean_sym)
             ports = ScipParser.parse_signature_ports(docstring, signature)
@@ -149,43 +130,20 @@ class DatabaseReader:
         return symbols
 
     def fetch_symbol_definitions(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Fetches definition line numbers and locations for symbols from occurrences where (role & 1) != 0.
-        Returns a dictionary mapping symbol -> {filepath, start_line, start_col, end_line, end_col}.
-        """
-        conn = self.connect()
-        rows = conn.execute("""
-            SELECT symbol, filepath, start_line, start_col, end_line, end_col
-            FROM occurrences
-            WHERE (role & 1) != 0
-        """).fetchall()
-
-        defs: Dict[str, Dict[str, Any]] = {}
-        for r in rows:
-            sym = r[0]
-            raw_path = r[1]
-            fp = raw_path.replace("\\", "/") if raw_path else None
-            if sym not in defs:
-                defs[sym] = {
-                    "symbol": sym,
-                    "filepath": fp,
-                    "start_line": int(r[2]),
-                    "start_col": int(r[3]),
-                    "end_line": int(r[4]),
-                    "end_col": int(r[5]),
-                }
-        return defs
+        """Fetches definition line numbers and locations for symbols from occurrences."""
+        return self.repository.graph.get_definitions_map()
 
     def fetch_edges(self) -> List[Dict[str, Any]]:
-        conn = self.connect()
-        query = """
-            SELECT e.source, e.target, e.relation, e.weight,
-                   o.start_line, o.start_col
-            FROM edges e
-            LEFT JOIN symbols s ON e.source = s.symbol
-            LEFT JOIN occurrences o ON e.target = o.symbol AND s.filepath = o.filepath
-        """
-        rows = conn.execute(query).fetchall()
+        """Fetches edges with call line locations joined from occurrences/call_line."""
+        with self.db_conn.session() as conn:
+            query = """
+                SELECT e.source, e.target, e.relation, e.weight,
+                       COALESCE(e.call_line, o.start_line) AS line, o.start_col AS col
+                FROM edges e
+                LEFT JOIN symbols s ON e.source = s.symbol
+                LEFT JOIN occurrences o ON e.target = o.symbol AND s.filepath = o.filepath
+            """
+            rows = conn.execute(query).fetchall()
 
         edges = []
         for row in rows:
@@ -206,28 +164,27 @@ class DatabaseReader:
         filepath_filter: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        conn = self.connect()
-        query = """
-            SELECT symbol, filepath, start_line, start_col, end_line, end_col, role
-            FROM occurrences
-        """
-        params = []
-        if filepath_filter:
-            query += " WHERE filepath LIKE ? OR filepath LIKE ?"
-            p1 = f"%{filepath_filter}%"
-            p2 = f"%{filepath_filter.replace('/', chr(92))}%"
-            params.extend([p1, p2])
+        """Fetches occurrences matching optional filepath filter."""
+        with self.db_conn.session() as conn:
+            query = """
+                SELECT symbol, filepath, start_line, start_col, end_line, end_col, role
+                FROM occurrences
+            """
+            params = []
+            if filepath_filter:
+                query += " WHERE filepath LIKE ?"
+                norm_f = filepath_filter.replace("\\", "/")
+                params.append(f"%{norm_f}%")
 
-        query += " ORDER BY filepath, start_line, start_col"
-        if limit:
-            query += f" LIMIT {int(limit)}"
+            query += " ORDER BY filepath, start_line, start_col"
+            if limit:
+                query += f" LIMIT {int(limit)}"
 
-        rows = conn.execute(query, params).fetchall()
+            rows = conn.execute(query, params).fetchall()
 
         occurrences = []
         for row in rows:
-            raw_path = row[1]
-            filepath = raw_path.replace("\\", "/") if raw_path else "unknown"
+            filepath = row[1] if row[1] else "unknown"
             role = int(row[6])
             occurrences.append({
                 "symbol": row[0],
@@ -245,19 +202,5 @@ class DatabaseReader:
         return occurrences
 
     def get_summary_stats(self) -> Dict[str, Any]:
-        conn = self.connect()
-        files_count = conn.execute("SELECT count(*) FROM files").fetchone()[0]
-        symbols_count = conn.execute("SELECT count(*) FROM symbols").fetchone()[0]
-        edges_count = conn.execute("SELECT count(*) FROM edges").fetchone()[0]
-        occ_count = conn.execute("SELECT count(*) FROM occurrences").fetchone()[0]
-        def_count = conn.execute("SELECT count(*) FROM occurrences WHERE (role & 1) != 0").fetchone()[0]
-        ref_count = conn.execute("SELECT count(*) FROM occurrences WHERE (role & 8) != 0").fetchone()[0]
-
-        return {
-            "files_count": files_count,
-            "symbols_count": symbols_count,
-            "edges_count": edges_count,
-            "occurrences_count": occ_count,
-            "definitions_count": def_count,
-            "references_count": ref_count,
-        }
+        """Returns workspace summary statistics from the analytics store."""
+        return self.repository.analytics.get_graph_snapshot_data()

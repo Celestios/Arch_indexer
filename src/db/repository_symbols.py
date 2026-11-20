@@ -57,6 +57,10 @@ class SymbolsRepository(BaseRepository):
             "change_count": row[9] if len(row) > 9 and row[9] is not None else 1,
             "code_block": row[10] if len(row) > 10 else None,
             "clean_symbol": clean_sym,
+            "start_line": row[12] if len(row) > 12 else None,
+            "start_col": row[13] if len(row) > 13 else None,
+            "end_line": row[14] if len(row) > 14 else None,
+            "end_col": row[15] if len(row) > 15 else None,
         }
 
     def upsert_symbol(
@@ -64,20 +68,43 @@ class SymbolsRepository(BaseRepository):
         symbol: str,
         filepath: Optional[str],
         kind: str,
-        signature: Optional[str],
-        docstring: Optional[str],
-        body_hash: Optional[str],
+        signature: Optional[str] = None,
+        docstring: Optional[str] = None,
+        body_hash: Optional[str] = None,
         connection_weight: int = 0,
         parent_symbol: Optional[str] = None,
         code_block: Optional[str] = None,
         clean_symbol: Optional[str] = None,
+        start_line: Optional[int] = None,
+        start_col: Optional[int] = None,
+        end_line: Optional[int] = None,
+        end_col: Optional[int] = None,
     ):
         """Inserts or replaces a code symbol declaration in the database."""
         if clean_symbol is None and symbol:
             from utils.helpers import demangle_scip_symbol
             clean_symbol = demangle_scip_symbol(symbol)
+        norm_fp = filepath.replace("\\", "/") if filepath else None
         with self.db_conn.session() as conn:
-            conn.execute(UPSERT_SYMBOL_SQL, (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, code_block))
+            conn.execute(
+                UPSERT_SYMBOL_SQL,
+                (
+                    symbol,
+                    clean_symbol,
+                    norm_fp,
+                    kind,
+                    signature,
+                    docstring,
+                    body_hash,
+                    connection_weight,
+                    parent_symbol,
+                    code_block,
+                    start_line,
+                    start_col,
+                    end_line,
+                    end_col,
+                ),
+            )
 
     def get_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Retrieves details of a registered symbol declaration."""
@@ -124,14 +151,18 @@ class SymbolsRepository(BaseRepository):
             (
                 sym["symbol"],
                 sym.get("clean_symbol") or demangle_scip_symbol(sym["symbol"]),
-                sym["filepath"],
+                sym["filepath"].replace("\\", "/") if sym.get("filepath") else None,
                 sym["kind"],
-                sym["signature"],
-                sym["docstring"],
-                sym["body_hash"],
+                sym.get("signature"),
+                sym.get("docstring"),
+                sym.get("body_hash"),
                 sym.get("connection_weight", 0),
                 sym.get("parent_symbol"),
                 sym.get("code_block"),
+                sym.get("start_line"),
+                sym.get("start_col"),
+                sym.get("end_line"),
+                sym.get("end_col"),
             )
             for sym in symbols_list
         ]

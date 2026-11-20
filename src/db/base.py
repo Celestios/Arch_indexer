@@ -1,27 +1,58 @@
-from typing import List, Any, Optional, Tuple
+from typing import List, Any, Optional, Tuple, Dict
 from db.connection import DbConnection
 
 
 class BaseRepository:
-    """Shared base class for all repository implementations. Eliminates DRY violations."""
+    """Shared base class for all repository and store implementations. Eliminates DRY violations."""
 
     def __init__(self, db_conn: DbConnection):
-        self.db_conn = db_conn
+        self._db_conn = db_conn
+
+    @property
+    def db_conn(self) -> DbConnection:
+        """Backward compatibility property for callers accessing .db_conn."""
+        return self._db_conn
+
+    def _fetch_one(self, sql: str, params: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+        with self._db_conn.session() as conn:
+            cursor = conn.execute(sql, params or ())
+            if not cursor.description:
+                return None
+            cols = [c[0] for c in cursor.description]
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return dict(zip(cols, row))
+
+    def _fetch_all(self, sql: str, params: Optional[Any] = None) -> List[Dict[str, Any]]:
+        with self._db_conn.session() as conn:
+            cursor = conn.execute(sql, params or ())
+            if not cursor.description:
+                return []
+            cols = [c[0] for c in cursor.description]
+            rows = cursor.fetchall()
+            return [dict(zip(cols, r)) for r in rows]
+
+    def _execute(self, sql: str, params: Optional[Any] = None) -> Any:
+        with self._db_conn.session() as conn:
+            return conn.execute(sql, params or ())
+
+    def _executemany(self, sql: str, seq_of_params: List[Any]) -> Any:
+        with self._db_conn.session() as conn:
+            return conn.executemany(sql, seq_of_params)
 
     def _query(self, sql: str, params: Optional[Tuple] = None) -> List[Any]:
-        with self.db_conn.session() as conn:
+        """Backward compatible tuple-based fetchall query."""
+        with self._db_conn.session() as conn:
             return conn.execute(sql, params or ()).fetchall()
-
-    def _execute(self, sql: str, params: Optional[Tuple] = None) -> Any:
-        with self.db_conn.session() as conn:
-            return conn.execute(sql, params or ())
 
     def _delete_by_filepaths(self, table: str, filepaths: List[str]):
         if not filepaths:
             return
+        fps = [fp.replace("\\", "/") for fp in filepaths]
         self._execute(
             f"DELETE FROM {table} WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
-            (filepaths,)
+            (fps,)
         )
 
 
@@ -37,8 +68,8 @@ ON CONFLICT (filepath) DO UPDATE SET
 """
 
 UPSERT_SYMBOL_SQL = """
-INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, code_block)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, code_block, start_line, start_col, end_line, end_col)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (symbol) DO UPDATE SET
     clean_symbol = COALESCE(NULLIF(excluded.clean_symbol, ''), symbols.clean_symbol),
     filepath = COALESCE(excluded.filepath, symbols.filepath),
@@ -59,7 +90,19 @@ ON CONFLICT (symbol) DO UPDATE SET
     body_hash = COALESCE(excluded.body_hash, symbols.body_hash),
     connection_weight = excluded.connection_weight,
     parent_symbol = COALESCE(excluded.parent_symbol, symbols.parent_symbol),
-    code_block = COALESCE(excluded.code_block, symbols.code_block)
+    code_block = COALESCE(excluded.code_block, symbols.code_block),
+    start_line = COALESCE(excluded.start_line, symbols.start_line),
+    start_col = COALESCE(excluded.start_col, symbols.start_col),
+    end_line = COALESCE(excluded.end_line, symbols.end_line),
+    end_col = COALESCE(excluded.end_col, symbols.end_col)
+"""
+
+UPSERT_EDGE_SQL = """
+INSERT INTO edges (source, target, relation, weight, call_line)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (source, target, relation) DO UPDATE SET
+    weight = excluded.weight,
+    call_line = COALESCE(excluded.call_line, edges.call_line)
 """
 
 UPSERT_VIOLATION_SQL = """

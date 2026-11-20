@@ -107,13 +107,7 @@ class FfiLinker:
             symbols_needed.add(m.source_symbol)
             symbols_needed.add(m.target_symbol)
 
-        with self.repository.db_conn.session() as conn:
-            placeholders = ",".join(["?" for _ in symbols_needed])
-            res = conn.execute(
-                f"SELECT symbol FROM symbols WHERE symbol IN ({placeholders})",
-                list(symbols_needed)
-            ).fetchall()
-            existing_symbols = {r[0] for r in res}
+        existing_symbols = self.repository.graph.get_existing_symbols(symbols_needed)
 
         return [
             m for m in matches
@@ -132,113 +126,109 @@ class FfiLinker:
         - Normalizes callable and class/struct names (camelCase <-> snake_case, newInstance <-> new).
         - Retains backward compatibility for legacy flutter_rust_bridge SCIP naming patterns.
         """
-        with self.repository.db_conn.session() as conn:
-            cols = [c[1] for c in conn.execute("PRAGMA table_info('symbols')").fetchall()]
-            has_clean = "clean_symbol" in cols
-            query = "SELECT symbol, filepath, kind" + (", clean_symbol" if has_clean else "") + " FROM symbols"
-            rows = conn.execute(query).fetchall()
-            if not rows:
-                return 0
+        rows = self.repository.graph.get_all_symbols_summary()
+        if not rows:
+            return 0
 
-            CLIENT_EXTS = {".dart", ".ts", ".tsx", ".js", ".jsx", ".py"}
-            NATIVE_EXTS = {".rs", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp"}
+        CLIENT_EXTS = {".dart", ".ts", ".tsx", ".js", ".jsx", ".py"}
+        NATIVE_EXTS = {".rs", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp"}
 
-            client_symbols = []
-            native_symbols = []
-            legacy_dart = []
-            legacy_rust = []
+        client_symbols = []
+        native_symbols = []
+        legacy_dart = []
+        legacy_rust = []
 
-            for r in rows:
-                sym = r[0]
-                fp = r[1] or ""
-                kind = r[2] or ""
-                clean = r[3] if has_clean and len(r) > 3 and r[3] else sym
+        for r in rows:
+            sym = r["symbol"]
+            fp = r.get("filepath") or ""
+            kind = r.get("kind") or ""
+            clean = r.get("clean_symbol") or sym
 
-                # Check for legacy flutter_rust_bridge patterns
-                if "crateBridgeApi" in sym and (sym.endswith("().") or sym.endswith("()")):
-                    legacy_dart.append(sym)
-                elif "wire__crate__" in sym and (sym.endswith("().") or sym.endswith("()")):
-                    legacy_rust.append(sym)
+            # Check for legacy flutter_rust_bridge patterns
+            if "crateBridgeApi" in sym and (sym.endswith("().") or sym.endswith("()")):
+                legacy_dart.append(sym)
+            elif "wire__crate__" in sym and (sym.endswith("().") or sym.endswith("()")):
+                legacy_rust.append(sym)
 
-                # Skip auto-generated boilerplate files for direct linking
-                if is_boilerplate(fp):
-                    continue
+            # Skip auto-generated boilerplate files for direct linking
+            if is_boilerplate(fp):
+                continue
 
-                is_callable = kind in ("Method", "Function", "Constructor", "StaticMethod") or sym.endswith("()") or sym.endswith("().")
-                if not is_callable:
-                    continue
+            is_callable = kind in ("Method", "Function", "Constructor", "StaticMethod") or sym.endswith("()") or sym.endswith("().")
+            if not is_callable:
+                continue
 
-                fp_lower = fp.lower().replace("\\", "/")
-                ext = Path(fp_lower).suffix
+            fp_lower = fp.lower().replace("\\", "/")
+            ext = Path(fp_lower).suffix
 
-                if ext in CLIENT_EXTS:
-                    client_symbols.append((sym, clean, fp, kind))
-                elif ext in NATIVE_EXTS:
-                    native_symbols.append((sym, clean, fp, kind))
+            if ext in CLIENT_EXTS:
+                client_symbols.append((sym, clean, fp, kind))
+            elif ext in NATIVE_EXTS:
+                native_symbols.append((sym, clean, fp, kind))
 
-            edges_to_insert = []
-            seen_edges = set()
+        edges_to_insert = []
+        seen_edges = set()
 
-            # 1. Direct API Linking: Match class/struct names and callable names
-            native_map: Dict[Tuple[str, str], List[Tuple[str, str, str, str]]] = {}
-            for n_sym, n_clean, n_fp, n_kind in native_symbols:
-                key = parse_callable_parts(n_clean, n_sym)
-                native_map.setdefault(key, []).append((n_sym, n_clean, n_fp, n_kind))
+        # 1. Direct API Linking: Match class/struct names and callable names
+        native_map: Dict[Tuple[str, str], List[Tuple[str, str, str, str]]] = {}
+        for n_sym, n_clean, n_fp, n_kind in native_symbols:
+            key = parse_callable_parts(n_clean, n_sym)
+            native_map.setdefault(key, []).append((n_sym, n_clean, n_fp, n_kind))
 
-            for c_sym, c_clean, c_fp, c_kind in client_symbols:
-                key = parse_callable_parts(c_clean, c_sym)
-                cls_name, fn_name = key
-                if not fn_name:
-                    continue
+        for c_sym, c_clean, c_fp, c_kind in client_symbols:
+            key = parse_callable_parts(c_clean, c_sym)
+            cls_name, fn_name = key
+            if not fn_name:
+                continue
 
-                matched_natives = native_map.get(key, [])
-                if not matched_natives and cls_name:
-                    matched_natives = native_map.get(("", fn_name), [])
+            matched_natives = native_map.get(key, [])
+            if not matched_natives and cls_name:
+                matched_natives = native_map.get(("", fn_name), [])
 
-                for n_sym, n_clean, n_fp, n_kind in matched_natives:
-                    edge_key = (c_sym, n_sym)
+            for n_sym, n_clean, n_fp, n_kind in matched_natives:
+                edge_key = (c_sym, n_sym)
+                if edge_key not in seen_edges:
+                    seen_edges.add(edge_key)
+                    edges_to_insert.append({
+                        "source": c_sym,
+                        "target": n_sym,
+                        "relation": "FFI_Binds",
+                        "weight": 1.0
+                    })
+
+        # 2. Legacy fallback for generated bridges
+        if legacy_dart and legacy_rust:
+            def clean_dart(s):
+                name = s.split('#')[-1].replace("().", "").replace("()", "")
+                return name.lower().replace("_", "")
+
+            def clean_rust(s):
+                name = s.split('/')[-1].replace("().", "").replace("()", "")
+                if name.startswith("wire__"):
+                    name = name[len("wire__"):]
+                if name.endswith("_impl"):
+                    name = name[:-len("_impl")]
+                return name.lower().replace("_", "")
+
+            dart_mapped = {clean_dart(d): d for d in legacy_dart}
+            rust_mapped = {clean_rust(r): r for r in legacy_rust}
+
+            for k, d_sym in dart_mapped.items():
+                if k in rust_mapped:
+                    r_sym = rust_mapped[k]
+                    edge_key = (d_sym, r_sym)
                     if edge_key not in seen_edges:
                         seen_edges.add(edge_key)
                         edges_to_insert.append({
-                            "source": c_sym,
-                            "target": n_sym,
+                            "source": d_sym,
+                            "target": r_sym,
                             "relation": "FFI_Binds",
                             "weight": 1.0
                         })
 
-            # 2. Legacy fallback for generated bridges
-            if legacy_dart and legacy_rust:
-                def clean_dart(s):
-                    name = s.split('#')[-1].replace("().", "").replace("()", "")
-                    return name.lower().replace("_", "")
+        if edges_to_insert:
+            self.repository.edges.add_edges_bulk(edges_to_insert)
+            print(f"[Bridge Link] Created {len(edges_to_insert)} cross-language bridge edges.")
+            return len(edges_to_insert)
 
-                def clean_rust(s):
-                    name = s.split('/')[-1].replace("().", "").replace("()", "")
-                    if name.startswith("wire__"):
-                        name = name[len("wire__"):]
-                    if name.endswith("_impl"):
-                        name = name[:-len("_impl")]
-                    return name.lower().replace("_", "")
-
-                dart_mapped = {clean_dart(d): d for d in legacy_dart}
-                rust_mapped = {clean_rust(r): r for r in legacy_rust}
-
-                for k, d_sym in dart_mapped.items():
-                    if k in rust_mapped:
-                        r_sym = rust_mapped[k]
-                        edge_key = (d_sym, r_sym)
-                        if edge_key not in seen_edges:
-                            seen_edges.add(edge_key)
-                            edges_to_insert.append({
-                                "source": d_sym,
-                                "target": r_sym,
-                                "relation": "FFI_Binds",
-                                "weight": 1.0
-                            })
-
-            if edges_to_insert:
-                self.repository.edges.add_edges_bulk(edges_to_insert)
-                print(f"[Bridge Link] Created {len(edges_to_insert)} cross-language bridge edges.")
-                return len(edges_to_insert)
-
-            return 0
+        return 0

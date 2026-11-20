@@ -60,6 +60,22 @@ class DbConnection:
         finally:
             pass
 
+    @contextmanager
+    def transaction(self):
+        """
+        Context manager for handling an atomic database transaction.
+        Enforces atomic BEGIN TRANSACTION, COMMIT, and ROLLBACK on error.
+        Yields the cached connection.
+        """
+        conn = self.get_connection()
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            yield conn
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
     def close(self):
         """Closes the cached connection if open."""
         if self._conn:
@@ -151,6 +167,11 @@ class DbConnection:
             conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS change_count INTEGER DEFAULT 1;")
             conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
             conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS clean_symbol VARCHAR;")
+            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS start_line INTEGER;")
+            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS start_col INTEGER;")
+            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS end_line INTEGER;")
+            conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS end_col INTEGER;")
+            conn.execute("ALTER TABLE edges ADD COLUMN IF NOT EXISTS call_line INTEGER;")
             try:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_symbols_clean_symbol ON symbols(clean_symbol);")
             except Exception:
@@ -161,5 +182,13 @@ class DbConnection:
                 from utils.helpers import demangle_scip_symbol
                 updates = [(demangle_scip_symbol(s[0]), s[0]) for s in null_syms]
                 conn.executemany("UPDATE symbols SET clean_symbol = ? WHERE symbol = ?", updates)
+
+            # One-time POSIX normalization update
+            conn.execute(r"UPDATE files SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
+            conn.execute(r"UPDATE symbols SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
+            conn.execute(r"UPDATE occurrences SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
+            conn.execute(r"UPDATE diagnostics SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
+            conn.execute(r"UPDATE compliance_violations SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
+            conn.execute(r"UPDATE file_co_changes SET filepath_a = replace(filepath_a, '\', '/'), filepath_b = replace(filepath_b, '\', '/') WHERE filepath_a LIKE '%\%' OR filepath_b LIKE '%\%'")
         except Exception as e:
             print(f"Warning during schema migration: {e}", file=sys.stderr)

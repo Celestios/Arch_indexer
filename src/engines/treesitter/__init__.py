@@ -114,14 +114,10 @@ class TreesitterEngine:
         # Also get existing definition occurrences for this file to reconcile by line
         line_to_existing: Dict[int, str] = {}
         occ_list: List[tuple] = []
-        with repository.db_conn.session() as conn:
-            occ_rows = conn.execute(
-                "SELECT symbol, start_line FROM occurrences WHERE (replace(filepath, '\\', '/') = ? OR filepath = ?) AND (role & 1) != 0",
-                (norm_fp, norm_fp)
-            ).fetchall()
-            for r in occ_rows:
-                line_to_existing[r[1]] = r[0]
-                occ_list.append((r[0], r[1]))
+        occ_rows = repository.graph.get_definition_occurrences_for_file(norm_fp)
+        for r in occ_rows:
+            line_to_existing[r["start_line"]] = r["symbol"]
+            occ_list.append((r["symbol"], r["start_line"]))
 
         # 3. Upsert symbols
         symbols_to_upsert = []
@@ -171,21 +167,13 @@ class TreesitterEngine:
 
         # Remove any superseded duplicate Tree-sitter rows
         if superseded_treesitter_symbols:
-            with repository.db_conn.session() as conn:
-                conn.execute(
-                    "DELETE FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))",
-                    (superseded_treesitter_symbols,)
-                )
+            repository.graph.delete_symbols_bulk(superseded_treesitter_symbols)
 
         # Upsert symbols
         repository.symbols.upsert_symbols_bulk(symbols_to_upsert)
 
         # Replace definition occurrences for this file
-        with repository.db_conn.session() as conn:
-            conn.execute(
-                "DELETE FROM occurrences WHERE (replace(filepath, '\\', '/') = ? OR filepath = ?) AND role = 1",
-                (norm_fp, norm_fp)
-            )
+        repository.graph.delete_occurrences_by_role(norm_fp, 1)
         repository.symbols.add_occurrences_bulk(occurrences_to_insert)
 
         return declarations
