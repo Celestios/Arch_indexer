@@ -1,6 +1,4 @@
-from typing import Optional, List, Union
-
-from utils.helpers import resolve_filepath
+from typing import List, Union
 
 
 def validate_filepaths(filepaths: Union[List[str], str]) -> List[str]:
@@ -8,13 +6,12 @@ def validate_filepaths(filepaths: Union[List[str], str]) -> List[str]:
     if isinstance(filepaths, str):
         if "," in filepaths:
             return [p.strip() for p in filepaths.split(",") if p.strip()]
-        else:
-            return [filepaths.strip()]
+        return [filepaths.strip()]
     return list(filepaths)
 
 
 def validate_direction(direction: str) -> tuple[bool, str]:
-    """Validate compile_context direction parameter. Returns (is_valid, error_message)."""
+    """Validate compile_context direction parameter. Returns (is_valid, value_or_error)."""
     direction = direction.lower()
     if direction not in ("upstream", "downstream", "both"):
         return False, f"Invalid direction: '{direction}'. Allowed: upstream, downstream, both."
@@ -22,7 +19,7 @@ def validate_direction(direction: str) -> tuple[bool, str]:
 
 
 def validate_resolution(resolution: str) -> tuple[bool, str]:
-    """Validate compile_context resolution parameter. Returns (is_valid, error_message)."""
+    """Validate compile_context resolution parameter. Returns (is_valid, value_or_error)."""
     resolution = resolution.lower()
     if resolution not in ("full", "signature"):
         return False, f"Invalid resolution: '{resolution}'. Allowed: full, signature."

@@ -20,7 +20,7 @@ def _parse_manual_fields(raw: Any) -> Dict[str, Any]:
 class WorkspaceStore(BaseRepository):
     """
     Domain store owning workspace files, system metadata, and file co-changes.
-    Enforces POSIX path normalization on ingress and utilizes clean, indexed queries.
+    Enforces POSIX path normalization on ingress.
     """
 
     @staticmethod
@@ -28,7 +28,7 @@ class WorkspaceStore(BaseRepository):
         if not row:
             return None
         res = dict(row)
-        if "filepath" in res and res["filepath"]:
+        if res.get("filepath"):
             res["filepath"] = normalize_path(res["filepath"])
         res["manual_fields"] = _parse_manual_fields(res.get("manual_fields"))
         if "pending_audit" in res:
@@ -42,16 +42,40 @@ class WorkspaceStore(BaseRepository):
         norm_fp = normalize_path(filepath)
         row = self._fetch_one(
             "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE filepath = ?",
-            (norm_fp,)
+            (norm_fp,),
         )
         return self._format_file_dict(row)
 
-    def upsert_file(self, filepath: str, sha256: str, language: str):
-        """Registers or updates a file's hashing and index metadata. Sets pending_audit if changed."""
-        norm_fp = normalize_path(filepath)
-        self._execute(UPSERT_FILE_SQL, (norm_fp, sha256, language))
+    def get_all_files(self) -> List[Dict[str, Any]]:
+        """Returns all tracked files with metadata."""
+        rows = self._fetch_all(
+            "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files ORDER BY filepath"
+        )
+        return [self._format_file_dict(r) for r in rows if r]
 
-    def upsert_files_bulk(self, files_list: List[Dict[str, Any]]):
+    def get_all_files_metadata(self) -> Dict[str, Dict[str, Any]]:
+        """Returns dictionary of filepath -> file metadata for all files."""
+        return {f["filepath"]: f for f in self.get_all_files() if f}
+
+    def get_files_pending_audit_count(self) -> int:
+        """Returns the count of files pending audit."""
+        row = self._fetch_one("SELECT COUNT(*) AS cnt FROM files WHERE pending_audit = TRUE")
+        return row["cnt"] if row else 0
+
+    def search_files(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Case-insensitive substring search in filepath."""
+        q = f"%{query}%"
+        rows = self._fetch_all(
+            "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE LOWER(filepath) LIKE LOWER(?) LIMIT ?",
+            (q, limit),
+        )
+        return [self._format_file_dict(r) for r in rows if r]
+
+    def upsert_file(self, filepath: str, sha256: str, language: str):
+        """Registers or updates a file's hash and index metadata."""
+        self._execute(UPSERT_FILE_SQL, (normalize_path(filepath), sha256, language))
+
+    def upsert_files(self, files_list: List[Dict[str, Any]]):
         """Bulk registers or updates files."""
         if not files_list:
             return
@@ -61,70 +85,41 @@ class WorkspaceStore(BaseRepository):
         ]
         self._executemany(UPSERT_FILE_SQL, data)
 
-    def get_all_files(self) -> List[Dict[str, Any]]:
-        """Returns all tracked files with basic metadata."""
-        rows = self._fetch_all(
-            "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files ORDER BY filepath"
-        )
-        return [self._format_file_dict(r) for r in rows if r]
-
-    def get_all_files_metadata(self) -> Dict[str, Dict[str, Any]]:
-        """Returns dictionary of filepath -> file metadata for all files."""
-        files = self.get_all_files()
-        return {f["filepath"]: f for f in files if f}
-
-    def get_files_pending_audit_count(self) -> int:
-        """Returns the count of files pending audit."""
-        row = self._fetch_one("SELECT COUNT(*) AS cnt FROM files WHERE pending_audit = TRUE")
-        return row["cnt"] if row else 0
-
     def update_file_statuses(self, statuses: Dict[str, str]):
-        """Batch update of file statuses."""
+        """Batch update of file compliance statuses."""
         if not statuses:
             return
         data = [(status, normalize_path(fp)) for fp, status in statuses.items()]
         self._executemany("UPDATE files SET status = ? WHERE filepath = ?", data)
 
     def update_file_manual_status(self, filepath: str, status: str, justification: Optional[str] = None):
-        """Sets a human-reviewed override status for a file and clears pending audit flag."""
-        norm_fp = normalize_path(filepath)
+        """Sets a manual override status for a file and clears its pending audit flag."""
         self._execute(
             "UPDATE files SET manual_status = ?, pending_audit = FALSE, justification = ? WHERE filepath = ?",
-            (status, justification, norm_fp)
+            (status, justification, normalize_path(filepath)),
         )
 
-    def set_manual_fields(self, filepath: str, manual_fields: dict, justification: Optional[str] = None):
-        """Sets or replaces manual metadata fields for a specific file."""
-        norm_fp = normalize_path(filepath)
+    def update_manual_fields(self, filepath: str, manual_fields: dict, justification: Optional[str] = None):
+        """Replaces manual metadata fields for a specific file."""
         fields_json = json.dumps(manual_fields or {})
         self._execute(
             "UPDATE files SET manual_fields = ?, justification = ? WHERE filepath = ?",
-            (fields_json, justification, norm_fp)
+            (fields_json, justification, normalize_path(filepath)),
         )
 
-    def clear_all_pending_audits(self, justification: str):
+    def update_clear_pending_audits(self, justification: str):
         """Marks all files as audited with a justification."""
         self._execute(
             "UPDATE files SET pending_audit = FALSE, justification = ?",
-            (justification,)
+            (justification,),
         )
 
-    def mark_file_for_audit(self, filepath: str, justification: str):
-        """Explicitly sets a file's pending_audit flag."""
-        norm_fp = normalize_path(filepath)
+    def update_mark_file_pending(self, filepath: str, justification: str):
+        """Explicitly flags a file as pending audit."""
         self._execute(
             "UPDATE files SET pending_audit = TRUE, justification = ? WHERE filepath = ?",
-            (justification, norm_fp)
+            (justification, normalize_path(filepath)),
         )
-
-    def search_files(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search files by case-insensitive keyword substring in filepath."""
-        q = f"%{query}%"
-        rows = self._fetch_all(
-            "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE LOWER(filepath) LIKE LOWER(?) LIMIT ?",
-            (q, limit)
-        )
-        return [self._format_file_dict(r) for r in rows if r]
 
     # ------------------ System Metadata Domain ------------------
 
@@ -133,22 +128,18 @@ class WorkspaceStore(BaseRepository):
         row = self._fetch_one("SELECT value FROM system_metadata WHERE key = ?", (key,))
         return row["value"] if row else None
 
-    def set_metadata(self, key: str, value: str):
-        """Sets system metadata key-value pair."""
+    def upsert_metadata(self, key: str, value: str):
+        """Upserts a system metadata key-value pair."""
         self._execute(
             """INSERT INTO system_metadata (key, value) VALUES (?, ?)
                ON CONFLICT (key) DO UPDATE SET value = excluded.value""",
-            (key, value)
+            (key, value),
         )
 
     # ------------------ Co-changes Coupling Domain ------------------
 
-    def clear_co_changes(self):
-        """Clears all records from file_co_changes."""
-        self._execute("DELETE FROM file_co_changes")
-
-    def record_co_changes(self, records: List[Any]):
-        """Upserts a batch of CoChangeRecord tuples/objects into file_co_changes."""
+    def upsert_co_changes(self, records: List[Any]):
+        """Upserts a batch of co-change records into file_co_changes."""
         if not records:
             return
         data = []
@@ -169,7 +160,7 @@ class WorkspaceStore(BaseRepository):
                ON CONFLICT (filepath_a, filepath_b) DO UPDATE SET
                    co_change_count = excluded.co_change_count,
                    frequency = excluded.frequency""",
-            data
+            data,
         )
 
     def get_co_changes(
@@ -177,9 +168,9 @@ class WorkspaceStore(BaseRepository):
         filepath: str,
         min_count: int = 1,
         min_frequency: float = 0.0,
-        limit: Optional[int] = None
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Returns files that frequently change together with the given filepath."""
+        """Returns files that historically change together with the given filepath."""
         norm_fp = normalize_path(filepath)
         query = """SELECT filepath_b, co_change_count, frequency
                    FROM file_co_changes
@@ -189,11 +180,15 @@ class WorkspaceStore(BaseRepository):
         if limit:
             query += f" LIMIT {int(limit)}"
         rows = self._fetch_all(query, params)
-        res = []
-        for r in rows:
-            res.append({
+        return [
+            {
                 "filepath": normalize_path(r["filepath_b"]),
                 "co_change_count": r["co_change_count"],
                 "frequency": round(float(r["frequency"]), 2),
-            })
-        return res
+            }
+            for r in rows
+        ]
+
+    def delete_co_changes(self):
+        """Deletes all records from file_co_changes."""
+        self._execute("DELETE FROM file_co_changes")

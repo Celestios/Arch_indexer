@@ -1,5 +1,6 @@
 from pathlib import Path
 from unittest.mock import patch
+from utils.arch_config import ArchConfig
 from utils.exclusions import (
     load_include_dirs,
     load_exclude_patterns,
@@ -13,7 +14,7 @@ from utils.exclusions import (
 class TestLoadIncludeDirs:
     @patch("utils.exclusions.load_config")
     def test_empty_config_returns_none(self, mock_load):
-        mock_load.return_value = {}
+        mock_load.return_value = None
         result = load_include_dirs(Path("/project"))
         assert result is None
 
@@ -25,19 +26,19 @@ class TestLoadIncludeDirs:
 
     @patch("utils.exclusions.load_config")
     def test_returns_dict_keys_as_set(self, mock_load):
-        mock_load.return_value = {"src/": {}, "lib/": {}}
+        mock_load.return_value = ArchConfig.from_dict({"src/": {}, "lib/": {}})
         result = load_include_dirs(Path("/project"))
         assert result == {"src/", "lib/"}
 
     @patch("utils.exclusions.load_config")
     def test_non_dict_values_excluded(self, mock_load):
-        mock_load.return_value = {"src/": {}, "version": "1.0"}
+        mock_load.return_value = ArchConfig.from_dict({"src/": {}, "version": "1.0"})
         result = load_include_dirs(Path("/project"))
         assert result == {"src/"}
 
     @patch("utils.exclusions.load_config")
     def test_single_prefix(self, mock_load):
-        mock_load.return_value = {"my_code/": {"auto": True}}
+        mock_load.return_value = ArchConfig.from_dict({"my_code/": {"auto": True}})
         result = load_include_dirs(Path("/project"))
         assert result == {"my_code/"}
 
@@ -96,19 +97,19 @@ class TestFilterPaths:
 class TestLoadExcludePatterns:
     @patch("utils.exclusions.load_config")
     def test_load_exclude_patterns_list(self, mock_load):
-        mock_load.return_value = {"exclude": ["lib/src/**", "**/tests/**"]}
+        mock_load.return_value = ArchConfig.from_dict({"exclude": ["lib/src/**", "**/tests/**"]})
         patterns = load_exclude_patterns(Path("/project"))
         assert patterns == ["lib/src/**", "**/tests/**"]
 
     @patch("utils.exclusions.load_config")
     def test_load_exclude_patterns_string(self, mock_load):
-        mock_load.return_value = {"exclude": "lib/src/**"}
+        mock_load.return_value = ArchConfig.from_dict({"exclude": "lib/src/**"})
         patterns = load_exclude_patterns(Path("/project"))
         assert patterns == ["lib/src/**"]
 
     @patch("utils.exclusions.load_config")
     def test_load_exclude_patterns_empty(self, mock_load):
-        mock_load.return_value = {}
+        mock_load.return_value = ArchConfig.from_dict({})
         patterns = load_exclude_patterns(Path("/project"))
         assert patterns == []
 

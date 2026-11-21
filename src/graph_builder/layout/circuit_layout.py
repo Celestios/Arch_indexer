@@ -9,7 +9,7 @@ import math
 import os
 from typing import Dict, List, Any, Optional, Tuple
 from ..config import CircuitConfig
-from .zone_classifier import TopologicalZoneClassifier
+from .zone_classifier import build_directory_funnel
 from .package_sizer import PackageSizer
 from ..routing.channel_router import OrthogonalChannelRouter
 
@@ -247,7 +247,7 @@ class CircuitLayoutEngine:
                         pkg_traffic[tf] = (out_t, in_t + 1)
 
         # 1. Build Recursive Directory Funnel Tree
-        funnel = TopologicalZoneClassifier.build_directory_funnel(
+        funnel = build_directory_funnel(
             packages_dict,
             nodes,
             links,
@@ -678,3 +678,4 @@ class CircuitLayoutEngine:
 
             n["in_pin"] = (int(n["x"]), self._snap(n["y"] - nh / 2))
             n["out_pin"] = (int(n["x"]), self._snap(n["y"] + nh / 2))
+

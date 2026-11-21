@@ -18,6 +18,31 @@ def _normalize_exclude(value: Any) -> List[str]:
         return [value]
     return []
 
+def build_rule_id(
+    prefix: Optional[str],
+    field_name: Optional[str],
+    rule_type: str,
+    source: Optional[str] = None,
+    target: Optional[str] = None,
+    classification: Optional[str] = None,
+) -> str:
+    """Canonical rule_id builder shared by config ingestion and violation checkers."""
+    parts: List[str] = []
+    if prefix:
+        parts.append(prefix)
+    if field_name:
+        parts.append(field_name)
+
+    if rule_type == "package_restriction":
+        parts.extend(["pkg", source or "*"])
+    elif rule_type == "naming_convention":
+        parts.extend(["naming", classification or "*"])
+    else:
+        parts.extend([source or "*", target or "*"])
+
+    return "_".join(parts).lower().replace("/", "_").replace(".", "_")
+
+
 
 class _MappingMixin:
     """Small read-only mapping helper shared by the config dataclasses."""
@@ -366,32 +391,13 @@ class ArchConfig(_MappingMixin):
 
         return cls.from_dict(data), val_result
 
-    def get_applicable_prefix(
-        self_or_filepath: Any,
-        filepath_or_config: Any = None,
-        maybe_config: Optional[Any] = None,
-    ) -> Optional[str]:
+    def get_applicable_prefix(self, filepath: str) -> Optional[str]:
         """Resolves the most specific directory prefix matching the filepath."""
-        if isinstance(self_or_filepath, ArchConfig):
-            target_config = maybe_config or self_or_filepath
-            filepath = filepath_or_config
-        else:
-            filepath = self_or_filepath
-            target_config = filepath_or_config
-
         if not filepath:
             return None
-
-        if isinstance(target_config, ArchConfig):
-            prefixes = target_config.prefixes
-        elif isinstance(target_config, dict):
-            prefixes = target_config.get("prefixes", target_config)
-        else:
-            prefixes = {}
-
         normalized_path = filepath.replace("\\", "/")
-        matching = None
-        for prefix in prefixes.keys():
+        matching: Optional[str] = None
+        for prefix in self.prefixes.keys():
             if prefix == ".":
                 if matching is None:
                     matching = "."
@@ -400,28 +406,10 @@ class ArchConfig(_MappingMixin):
                     matching = prefix
         return matching
 
-    def get_applicable_config(
-        self_or_filepath: Any,
-        filepath_or_config: Any = None,
-        maybe_config: Optional[Any] = None,
-    ) -> Optional[Any]:
+    def get_applicable_config(self, filepath: str) -> Optional[PrefixConfig]:
         """Resolves the most specific directory prefix configuration matching the filepath."""
-        if isinstance(self_or_filepath, ArchConfig):
-            target_config = maybe_config or self_or_filepath
-            filepath = filepath_or_config
-        else:
-            filepath = self_or_filepath
-            target_config = filepath_or_config
-
-        prefix = ArchConfig.get_applicable_prefix(filepath, target_config)
-        if not prefix:
-            return None
-        if isinstance(target_config, ArchConfig):
-            return target_config.prefixes.get(prefix)
-        elif isinstance(target_config, dict):
-            prefixes = target_config.get("prefixes", target_config)
-            return prefixes.get(prefix)
-        return None
+        prefix = self.get_applicable_prefix(filepath)
+        return self.prefixes.get(prefix) if prefix else None
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.prefixes.get(key, default)
@@ -452,3 +440,4 @@ class ArchConfig(_MappingMixin):
             result[name] = prefix_conf.to_dict()
         result.update(self.extra)
         return result
+

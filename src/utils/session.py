@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from db.connection import DbConnection
 from db.repository import Repository
 from utils.helpers import CONFIG_DIR_NAME
-from utils.helpers import resolve_filepath  # noqa: F401 - re-export for backward compatibility
 
 
 def get_project_root(args=None) -> Path:
@@ -50,7 +49,6 @@ def workspace_session(args):
 @contextmanager
 def db_session(project_root: Path):
     """Context manager that yields (repository, db_conn) for a given project root."""
-    from utils.helpers import CONFIG_FILE_NAME
     arch_dir = project_root / CONFIG_DIR_NAME
     db_path = arch_dir / "arch.db"
     if not db_path.exists():

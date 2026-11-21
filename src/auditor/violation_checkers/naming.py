@@ -1,8 +1,9 @@
 from typing import Dict, List, Any, Optional
-from auditor.path_tracer import PathTracer
-from utils.helpers import matches_filter
-from utils.violation_id import ViolationId
+from auditor.path_tracer import get_simple_name
 from auditor.snapshot import AuditSnapshot
+from utils.arch_config import ArchConfig, build_rule_id
+from utils.helpers import matches_filter
+from utils.violation_id import generate_violation_id
 
 
 def check(
@@ -13,60 +14,60 @@ def check(
     filepath_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Checks naming conventions for architectural boundary compliance."""
-    violations = []
+    violations: List[Dict[str, Any]] = []
     if not config:
         return violations
 
-    tracer = PathTracer()
+    cfg = config if isinstance(config, ArchConfig) else ArchConfig.from_dict(config)
+
     naming_rules = []
-    for prefix, prefix_conf in config.items():
-        rules = prefix_conf.get("rules", [])
-        for r in rules:
+    for prefix, prefix_conf in cfg.items():
+        for r in prefix_conf.rules:
             if r.get("rule_type") == "naming_convention":
                 naming_rules.append((prefix, r, None))
-        auto_fields = prefix_conf.get("automatic_fields", {})
-        for field_name, field_conf in auto_fields.items():
+        for field_name, field_conf in prefix_conf.automatic_fields.items():
             for r in field_conf.get("rules", []):
                 if r.get("rule_type") == "naming_convention":
                     naming_rules.append((prefix, r, field_name))
 
     for sym, data in (symbol_classifications or {}).items():
         filepath = data["symbol_info"]["filepath"]
-        if not filepath:
-            continue
-        if not matches_filter(filepath, filepath_filter):
+        if not filepath or not matches_filter(filepath, filepath_filter):
             continue
 
+        norm_fp = filepath.replace("\\", "/")
         for prefix, rule, field_name in naming_rules:
-            if filepath.replace("\\", "/").startswith(prefix):
+            if prefix == "." or norm_fp.startswith(prefix):
                 classification = rule.get("classification")
                 suffix = rule.get("name_suffix")
                 prefix_pattern = rule.get("name_prefix")
-                is_match = any(f_val == classification for f_val in data["fields"].values())
-                if not is_match:
+                if not any(f_val == classification for f_val in data["fields"].values()):
                     continue
-                simple_name = tracer.get_simple_name(sym)
+                simple_name = get_simple_name(sym)
                 violated = (suffix and not simple_name.endswith(suffix)) or (
                     prefix_pattern and not simple_name.startswith(prefix_pattern)
                 )
                 if not violated:
                     continue
+
                 msg = rule.get(
                     "message",
                     f"Naming convention violation: '{simple_name}' must match constraints for {classification}",
                 )
                 line_number = None
                 if snapshot is not None:
-                    def_info = snapshot.definitions_by_symbol.get(sym)
+                    def_info = snapshot.get_definition(sym)
                     if def_info:
                         line_number = def_info.get("start_line")
-                    if line_number is None and sym in snapshot.symbol_map:
-                        line_number = snapshot.symbol_map[sym].get("start_line")
+                    if line_number is None:
+                        sym_info = snapshot.get_symbol(sym)
+                        if sym_info:
+                            line_number = sym_info.get("start_line")
                 if line_number is None:
                     line_number = 1
 
-                violation_id = ViolationId.generate(sym, "naming", classification)
-                rule_id = f"naming_{classification}".lower().replace("/", "_").replace(".", "_")
+                violation_id = generate_violation_id(sym, "naming", classification)
+                rule_id = build_rule_id(prefix, field_name, "naming_convention", classification=classification)
                 violations.append({
                     "violation_id": violation_id,
                     "rule_id": rule_id,

@@ -1,9 +1,4 @@
-"""Immutable snapshot of the architectural index used during a single audit pass.
-
-The snapshot performs the bulk database reads once and exposes pure accessors for
-the hot paths (symbol/definition/incoming-edge lookups) so the audit and the
-violation checkers operate completely in-memory with zero per-node database queries.
-"""
+"""Immutable snapshot of the architectural index used during a single audit pass."""
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -14,7 +9,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class AuditSnapshot:
-    """Bulk-loaded, pure immutable view of files, symbols, edges and definitions."""
+    """Bulk-loaded, pure immutable view of files, symbols, edges, and definitions."""
 
     all_files: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     all_symbols: List[Dict[str, Any]] = field(default_factory=list)
@@ -36,14 +31,26 @@ class AuditSnapshot:
         if symbols is None:
             symbols = repository.graph.get_all_symbols()
         if edges is None:
-            edges = repository.graph.get_all_edges()
+            edges = repository.graph.get_edges()
         if files is None:
             files = repository.workspace.get_all_files_metadata()
 
         symbol_map: Dict[str, Dict[str, Any]] = {}
+        definitions_by_symbol: Dict[str, Dict[str, Any]] = {}
         for sym in symbols:
-            if "symbol" in sym:
-                symbol_map[sym["symbol"]] = sym
+            sid = sym.get("symbol")
+            if not sid:
+                continue
+            symbol_map[sid] = sym
+            if sym.get("start_line") is not None:
+                definitions_by_symbol[sid] = {
+                    "symbol": sid,
+                    "filepath": sym.get("filepath"),
+                    "start_line": int(sym["start_line"]),
+                    "start_col": int(sym["start_col"]) if sym.get("start_col") is not None else 0,
+                    "end_line": int(sym["end_line"]) if sym.get("end_line") is not None else int(sym["start_line"]),
+                    "end_col": int(sym["end_col"]) if sym.get("end_col") is not None else 0,
+                }
 
         outgoing_map: Dict[str, List[str]] = {}
         incoming_map: Dict[str, List[Dict[str, Any]]] = {}
@@ -60,8 +67,6 @@ class AuditSnapshot:
                     "call_line": edge.get("call_line"),
                 })
 
-        definitions_by_symbol = repository.graph.get_definitions_map()
-
         return cls(
             all_files=files,
             all_symbols=symbols,
@@ -73,17 +78,13 @@ class AuditSnapshot:
         )
 
     def get_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Returns symbol metadata from the snapshot."""
         return self.symbol_map.get(symbol)
 
     def get_definition(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Returns definition metadata (filepath, start_line, etc.) for a symbol."""
         return self.definitions_by_symbol.get(symbol)
 
     def get_incoming(self, symbol: str) -> List[Dict[str, Any]]:
-        """Returns incoming edges (with source/relation/weight/call_line) for a symbol."""
         return self.incoming_map.get(symbol, [])
 
     def get_outgoing(self, symbol: str) -> List[str]:
-        """Returns outgoing callee symbol identifiers."""
         return self.outgoing_map.get(symbol, [])

@@ -18,8 +18,6 @@ class LanguageSpec:
     container_node_types: Tuple[str, ...] = ("Class", "Interface", "Struct", "Trait")
     impl_node_types: Tuple[str, ...] = ()
     scip_command: Optional[Tuple[str, ...]] = None
-    scip_prerequisites: Tuple[str, ...] = ()
-    scip_index_subpath: Optional[str] = None
     is_client_lang: bool = False
     is_native_lang: bool = False
 
@@ -61,8 +59,6 @@ class LanguageRegistry:
                   container_node_types: Optional[Sequence[str]] = None,
                   impl_node_types: Optional[Sequence[str]] = None,
                   scip_command: Optional[Sequence[str]] = None,
-                  scip_prerequisites: Optional[Sequence[str]] = None,
-                  scip_index_subpath: Optional[str] = None,
                   is_client_lang: bool = False,
                   is_native_lang: bool = False,
                   **kwargs) -> None:
@@ -81,8 +77,6 @@ class LanguageRegistry:
                 container_node_types=tuple(container_node_types) if container_node_types is not None else kwargs.get("container_node_types", ("Class", "Interface", "Struct", "Trait")),
                 impl_node_types=tuple(impl_node_types or ()) if impl_node_types is not None else kwargs.get("impl_node_types", ()),
                 scip_command=tuple(scip_command) if scip_command is not None else kwargs.get("scip_command"),
-                scip_prerequisites=tuple(scip_prerequisites or ()) if scip_prerequisites is not None else kwargs.get("scip_prerequisites", ()),
-                scip_index_subpath=scip_index_subpath if scip_index_subpath is not None else kwargs.get("scip_index_subpath"),
                 is_client_lang=is_client_lang if is_client_lang is not None else kwargs.get("is_client_lang", False),
                 is_native_lang=is_native_lang if is_native_lang is not None else kwargs.get("is_native_lang", False),
             )

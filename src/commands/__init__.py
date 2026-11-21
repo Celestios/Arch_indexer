@@ -9,6 +9,7 @@ from commands.impact import cmd_impact
 from commands.set_status import cmd_set_status
 from commands.set_fields import cmd_set_fields
 from commands.clear_pending import cmd_clear_pending
+from commands.graph import cmd_graph
 from commands.mcp import cmd_mcp
 
 # Explicit list of CLI command modules. Order = order shown in --help.

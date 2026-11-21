@@ -11,7 +11,6 @@ a = Analysis(
     binaries=ts_dart_binaries,
     datas=[
         ('src/db/schema.sql', 'src/db'),
-        ('src/engines/treesitter/queries/*', 'src/engines/treesitter/queries'),
         ('src/graph_builder/circuit_config.json', 'src/graph_builder'),
     ] + ts_dart_datas,
     hiddenimports=[
@@ -38,6 +37,7 @@ a = Analysis(
         'pydantic_settings', 'sse_starlette',
         'utils.single_instance',
         'interface.project_registry',
+        'commands.graph',
         'change_tracker.watcher_manager',
         'tree_sitter', 'tree_sitter_python', 'tree_sitter_rust',
         'tree_sitter_typescript', 'tree_sitter_dart', 'tree_sitter_dart._binding',

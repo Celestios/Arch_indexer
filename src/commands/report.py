@@ -1,5 +1,6 @@
 import sys
 
+from interface.tools.report import handle_report
 from utils.session import workspace_session
 
 
@@ -13,12 +14,9 @@ def register(subparsers):
 
 def cmd_report(args):
     """Generates a codebase report."""
-    with workspace_session(args) as (project_root, arch_dir, repository):
-        from reporter.generator import Reporter
-        reporter = Reporter(repository)
+    with workspace_session(args) as (_, _, repository):
         try:
-            report_text = reporter.generate_report(args.name, args.format)
-            print(report_text)
+            print(handle_report(repository, args.name, args.format))
         except KeyError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)

@@ -7,7 +7,7 @@ def detect_communities(repository: Repository):
     """
     # Fetch symbols and edges using repository methods
     symbols_list = repository.graph.get_all_symbols()
-    edges_list = repository.graph.get_all_edges()
+    edges_list = repository.graph.get_edges()
 
     symbols = {item["symbol"]: item["filepath"] for item in symbols_list}
     edges = [(item["source"], item["target"], item["weight"]) for item in edges_list]
@@ -80,3 +80,4 @@ def detect_communities(repository: Repository):
             connections[lbl_src][lbl_tgt] += 1
 
     return communities, connections, degrees
+

@@ -5,8 +5,8 @@ from typing import Dict, List, Any, Optional
 from utils.exclusions import load_include_dirs, is_included
 from engines.registry import LanguageRegistry
 from engines.scip.indexers import run_indexer, _move_index_to_arch
-from engines.scip.parser import ScipParser
-from engines.scip.ingester import IndexIngester
+from engines.scip.parser import parse_index
+from engines.scip.ingester import ingest_index
 
 
 def detect_languages(project_dir: Path) -> List[str]:
@@ -22,14 +22,8 @@ def detect_languages(project_dir: Path) -> List[str]:
             continue
         lang = spec.name
 
-        detected = False
-        # 1. Check primary manifests at project root
-        for manifest in spec.manifest_names:
-            if (project_dir / manifest).exists():
-                detected = True
-                break
+        detected = any((project_dir / manifest).exists() for manifest in spec.manifest_names)
 
-        # 2. Check recursive manifests (excluding standard build/cache artifacts)
         if not detected and spec.manifest_names:
             for manifest in spec.manifest_names:
                 for p in project_dir.rglob(manifest):
@@ -42,11 +36,9 @@ def detect_languages(project_dir: Path) -> List[str]:
                 if detected:
                     break
 
-        # 3. Check source file extensions under include_dirs
         if not detected and spec.extensions:
             for ext in spec.extensions:
-                pattern = f"**/*{ext}"
-                for p in project_dir.glob(pattern):
+                for p in project_dir.glob(f"**/*{ext}"):
                     p_str = str(p).replace("\\", "/")
                     if any(skip in p_str for skip in (".dart_tool", "/target/", "/.arch/", "/node_modules/", "/.git/", "/__pycache__/")):
                         continue
@@ -70,24 +62,18 @@ def verify_environment(languages: List[str]) -> Dict[str, bool]:
         if not spec:
             status[lang] = False
             continue
-        bin_found = False
-        if spec.scip_binary:
-            bin_found = shutil.which(spec.scip_binary) is not None
+        bin_found = bool(spec.scip_binary and shutil.which(spec.scip_binary) is not None)
         if not bin_found and spec.tool_names:
             bin_found = any(shutil.which(tool) is not None for tool in spec.tool_names)
         status[lang] = bin_found
     return status
 
 
-def parse_index(
-    scip_file: Path,
-    project_root: Optional[Path] = None,
-    changed_files: Optional[Any] = None
-) -> Dict[str, Any]:
-    """Parses binary index.scip file into normalized dict of symbols, occurrences, and edges."""
-    return ScipParser.parse_index(scip_file, project_root, changed_files=changed_files)
-
-
-def ingest_index(repository, parsed_data, project_root=None, force=False, config=None):
-    """Ingests parsed symbols, occurrences, and edges into the database."""
-    return IndexIngester.ingest_index(repository, parsed_data, project_root, force)
+__all__ = [
+    "detect_languages",
+    "verify_environment",
+    "run_indexer",
+    "parse_index",
+    "ingest_index",
+    "_move_index_to_arch",
+]

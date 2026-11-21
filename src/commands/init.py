@@ -150,15 +150,12 @@ def cmd_init(args):
     repository = Repository(db_conn)
 
     # Sync compliance rules from config.json now that it is configured
-    config_path = arch_dir / "config.json"
-    if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                conf = json.load(f)
-            from setup.initializer import sync_rules_to_db
-            sync_rules_to_db(repository, conf)
-        except Exception as e:
-            print(f"Warning: Failed to sync compliance rules: {e}", file=sys.stderr)
+    try:
+        from setup.initializer import sync_rules_to_db
+        from utils.helpers import load_config
+        sync_rules_to_db(repository, load_config(project_root))
+    except Exception as e:
+        print(f"Warning: Failed to sync compliance rules: {e}", file=sys.stderr)
 
     # 5. Run Unified Synchronization Pipeline (Tree-sitter AST, SCIP Semantic, and FFI)
     print("\n--- Running Workspace Synchronization Pipeline ---")
@@ -190,3 +187,4 @@ def cmd_init(args):
     print("\n====================================================")
     print(" Arch setup is complete! Ready to start MCP Server. ")
     print("====================================================")
+

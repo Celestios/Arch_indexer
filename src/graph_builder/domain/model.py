@@ -10,7 +10,6 @@ from typing import Dict, List, Any, Optional, Tuple, Union, Set
 from pathlib import Path
 from .types import NodeType, EdgeType, NODE_COLORS, NODE_SIZES, EDGE_COLORS
 from .entities import GraphNode, GraphEdge
-from ..serialization.compressor import compress_circuit_data
 from utils.helpers import extract_code_slice
 
 
@@ -439,12 +438,6 @@ class GraphModel:
 
         return self
 
-    def to_compact_dict(self, packages: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-        d = self.to_dict()
-        if packages is not None:
-            d["packages"] = packages
-        return compress_circuit_data(d)
-
     def to_dict(self) -> Dict[str, Any]:
         type_counts: Dict[str, int] = {}
         for n in self.nodes.values():
@@ -470,3 +463,4 @@ class GraphModel:
                 "edge_types": edge_counts,
             },
         }
+

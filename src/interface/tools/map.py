@@ -142,7 +142,7 @@ def handle_map(
     totals = repository.analytics.get_repo_totals()
 
     sym_rows = repository.graph.get_all_symbols()
-    edge_rows = repository.graph.get_all_edges()
+    edge_rows = repository.graph.get_edges()
 
     symbols_dict: Dict[str, Dict[str, Any]] = {r["symbol"]: r for r in sym_rows}
 
@@ -316,3 +316,4 @@ def handle_map(
         md.append("")
 
     return "\n".join(md)
+

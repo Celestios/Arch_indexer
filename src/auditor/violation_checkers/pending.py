@@ -1,7 +1,7 @@
 from typing import Dict, List, Any, Optional
-from utils.helpers import matches_filter
-from utils.violation_id import ViolationId
 from auditor.snapshot import AuditSnapshot
+from utils.helpers import matches_filter
+from utils.violation_id import generate_violation_id
 
 
 def check(
@@ -12,8 +12,8 @@ def check(
     filepath_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Checks pending audit files for architectural boundary compliance."""
-    violations = []
-    file_metadata = snapshot.all_files if snapshot and hasattr(snapshot, "all_files") else {}
+    violations: List[Dict[str, Any]] = []
+    file_metadata = snapshot.all_files if snapshot else {}
 
     for f_path, meta in file_metadata.items():
         if not meta.get("pending_audit"):
@@ -26,7 +26,7 @@ def check(
             if "modified" in justification_msg.lower() or "changed" in justification_msg.lower()
             else f"{f_path}: new file"
         )
-        violation_id = ViolationId.generate("pending_audit", f_path)
+        violation_id = generate_violation_id("pending_audit", f_path)
         violations.append({
             "violation_id": violation_id,
             "rule_id": "pending_audit",

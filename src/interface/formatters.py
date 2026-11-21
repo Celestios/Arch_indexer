@@ -263,74 +263,64 @@ def format_context_results(
 
 
 def format_lookup_symbol(
-    exact_symbol: tuple,
-    occurrences: List[tuple],
-    edges: List[tuple],
+    exact_symbol: Dict[str, Any],
+    occurrences: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]],
     symbol_filepath_map: Optional[Dict[str, str]] = None,
 ) -> str:
     """Format lookup results for a code symbol as markdown with unified references and call graph."""
-    if isinstance(exact_symbol, dict):
-        clean_symbol = exact_symbol.get("clean_symbol") or demangle_scip_symbol(exact_symbol.get("symbol"))
-        raw_symbol = str(exact_symbol.get("symbol", ""))
-        filepath = exact_symbol.get("filepath")
-        kind = exact_symbol.get("kind", "")
-        signature = exact_symbol.get("signature")
-        classification = exact_symbol.get("classification")
-        parent_symbol = exact_symbol.get("parent_symbol")
-        change_count = exact_symbol.get("change_count")
-        docstring = exact_symbol.get("docstring")
-    else:
-        clean_symbol = exact_symbol[10] if len(exact_symbol) > 10 and exact_symbol[10] else demangle_scip_symbol(exact_symbol[0])
-        raw_symbol = str(exact_symbol[0])
-        filepath = exact_symbol[1] if len(exact_symbol) > 1 else None
-        kind = exact_symbol[2] if len(exact_symbol) > 2 else ""
-        signature = exact_symbol[3] if len(exact_symbol) > 3 else None
-        classification = exact_symbol[8] if len(exact_symbol) > 8 else None
-        parent_symbol = exact_symbol[7] if len(exact_symbol) > 7 else None
-        change_count = exact_symbol[9] if len(exact_symbol) > 9 else None
-        docstring = exact_symbol[4] if len(exact_symbol) > 4 else None
+    raw_symbol = str(exact_symbol.get("symbol", ""))
+    clean_symbol = exact_symbol.get("clean_symbol") or demangle_scip_symbol(raw_symbol)
+    filepath = exact_symbol.get("filepath")
+    kind = exact_symbol.get("kind", "")
+    signature = exact_symbol.get("signature")
+    classification = exact_symbol.get("classification")
+    parent_symbol = exact_symbol.get("parent_symbol")
+    change_count = exact_symbol.get("change_count")
+    docstring = exact_symbol.get("docstring")
 
-    badge = ""
-    if classification:
-        badge = format_classification_badge(classification)
+    badge = format_classification_badge(classification) if classification else ""
     badge_header = f" `{badge}`" if badge else ""
 
-    md = []
-    md.append(f"## Code Symbol: `{clean_symbol}`{badge_header}\n")
-    md.append(f"- **Filepath**: `{filepath or 'External / Third-party'}`")
-    md.append(f"- **Kind**: `{kind}`")
-    md.append(f"- **Signature**: `{signature or 'None'}`")
+    md = [
+        f"## Code Symbol: `{clean_symbol}`{badge_header}\n",
+        f"- **Filepath**: `{filepath or 'External / Third-party'}`",
+        f"- **Kind**: `{kind}`",
+        f"- **Signature**: `{signature or 'None'}`",
+    ]
     if badge:
         md.append(f"- **Classification**: `{badge}`")
     if parent_symbol:
-        parent_clean = demangle_scip_symbol(parent_symbol)
-        md.append(f"- **Enclosing Symbol**: `{parent_clean}`")
+        md.append(f"- **Enclosing Symbol**: `{demangle_scip_symbol(parent_symbol)}`")
     if change_count is not None:
-        cnt = change_count
-        churn_str = f"⚡ High Churn ({cnt} modifications)" if cnt >= 3 else f"Stable ({cnt} edits)"
+        churn_str = f"⚡ High Churn ({change_count} modifications)" if change_count >= 3 else f"Stable ({change_count} edits)"
         md.append(f"- **Stability**: {churn_str}")
     doc = sanitize_docstring(docstring).strip() if docstring else "No docstring available."
     md.append(f"- **Docstring**:\n  {doc.replace(chr(10), chr(10) + '  ')}\n")
 
-    # Group occurrences by normalized filepath
     file_occs: Dict[str, Dict[str, Any]] = {}
-    for o in (occurrences or []):
-        norm_fp = str(o[0]).replace("\\", "/")
-        s_line, e_line, role = o[1], o[2], o[3]
-        if norm_fp not in file_occs:
-            file_occs[norm_fp] = {"lines": [], "roles": set(), "has_def": False}
-        file_occs[norm_fp]["lines"].append((s_line, e_line))
+    if filepath and exact_symbol.get("start_line") is not None:
+        norm_def_fp = str(filepath).replace("\\", "/")
+        s_line = exact_symbol["start_line"]
+        e_line = exact_symbol.get("end_line") or s_line
+        file_occs[norm_def_fp] = {"lines": [(s_line, e_line)], "roles": {"Definition"}, "has_def": True}
+
+    for o in occurrences or []:
+        norm_fp = str(o["filepath"]).replace("\\", "/")
+        s_line, e_line, role = o["start_line"], o["end_line"], o["role"]
+        entry = file_occs.setdefault(norm_fp, {"lines": [], "roles": set(), "has_def": False})
+        entry["lines"].append((s_line, e_line))
         if role & 1:
-            file_occs[norm_fp]["has_def"] = True
-            file_occs[norm_fp]["roles"].add("Definition")
+            entry["has_def"] = True
+            entry["roles"].add("Definition")
         else:
-            file_occs[norm_fp]["roles"].add("Reference")
+            entry["roles"].add("Reference")
         if role & 4:
-            file_occs[norm_fp]["roles"].add("[Mutates]")
+            entry["roles"].add("[Mutates]")
         if role & 8:
-            file_occs[norm_fp]["roles"].add("[Reads]")
+            entry["roles"].add("[Reads]")
         if role & 0x20:
-            file_occs[norm_fp]["roles"].add("[Test]")
+            entry["roles"].add("[Test]")
 
     def _format_lines(line_tuples: List[Tuple[int, int]]) -> str:
         unique_ranges = []
@@ -344,47 +334,27 @@ def format_lookup_symbol(
         if "Definition" in role_set and len(role_set) == 1:
             return "Definition"
         is_ref = "Reference" in role_set or not role_set
-        tags = []
-        if "[Mutates]" in role_set:
-            tags.append("[Mutates]")
-        if "[Reads]" in role_set:
-            tags.append("[Reads]")
-        if "[Test]" in role_set:
-            tags.append("[Test]")
+        tags = [t for t in ("[Mutates]", "[Reads]", "[Test]") if t in role_set]
         if "Definition" in role_set:
             tags.append("[Def]")
         tag_str = " ".join(tags)
         if is_ref:
             return f"Reference {tag_str}".strip()
-        return tag_str if tag_str else "Reference"
+        return tag_str or "Reference"
 
-    # Filter out local edges and group edges by (related_symbol, direction)
-    def _edge_src(e):
-        return str(e["source"] if isinstance(e, dict) else e[0])
-
-    def _edge_tgt(e):
-        return str(e["target"] if isinstance(e, dict) else e[1])
-
-    def _edge_rel(e):
-        return str(e["relation"] if isinstance(e, dict) else e[2])
-
-    clean_edges = [e for e in (edges or []) if not _edge_src(e).startswith("local ") and not _edge_tgt(e).startswith("local ")]
+    clean_edges = [
+        e for e in (edges or [])
+        if not str(e["source"]).startswith("local ") and not str(e["target"]).startswith("local ")
+    ]
     sym_edges: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for e in clean_edges:
-        src_raw = _edge_src(e)
-        tgt_raw = _edge_tgt(e)
-        rel = _edge_rel(e)
-
-        # Determine direction relative to queried symbol
+        src_raw, tgt_raw, rel = str(e["source"]), str(e["target"]), str(e["relation"])
         if tgt_raw == raw_symbol or demangle_scip_symbol(tgt_raw) == clean_symbol:
-            direction = "←"
-            rel_raw = src_raw
+            direction, rel_raw = "←", src_raw
         elif src_raw == raw_symbol or demangle_scip_symbol(src_raw) == clean_symbol:
-            direction = "→"
-            rel_raw = tgt_raw
+            direction, rel_raw = "→", tgt_raw
         else:
-            direction = "←"
-            rel_raw = src_raw
+            direction, rel_raw = "←", src_raw
 
         rel_clean = demangle_scip_symbol(rel_raw)
         key = (rel_raw, direction)
@@ -397,7 +367,6 @@ def format_lookup_symbol(
             elif rel_raw.replace("\\", "/") in file_occs:
                 fp = rel_raw.replace("\\", "/")
             else:
-                # Heuristic match against occurrence file stems
                 for ofp in file_occs:
                     stem = ofp.rsplit("/", 1)[-1].split(".", 1)[0]
                     if stem and stem in rel_clean.split("."):
@@ -419,8 +388,7 @@ def format_lookup_symbol(
         stem = fp.rsplit("/", 1)[-1].split(".", 1)[0]
         parts = rel_clean.split(".")
         if stem in parts:
-            idx = parts.index(stem)
-            subparts = parts[idx + 1:]
+            subparts = parts[parts.index(stem) + 1:]
             if subparts:
                 return ".".join(subparts)
         return rel_clean
@@ -428,61 +396,49 @@ def format_lookup_symbol(
     matched_files = set()
     table_rows = []
 
-    # 1. Definition row if occurrences contain definition
     for fp, occ_data in file_occs.items():
         if occ_data["has_def"]:
             matched_files.add(fp)
-            lines_str = _format_lines(occ_data["lines"])
-            loc = f"`{fp}:{lines_str}`"
             table_rows.append({
-                "loc": loc,
+                "loc": f"`{fp}:{_format_lines(occ_data['lines'])}`",
                 "sym": f"`{clean_symbol}`",
                 "rel": "—",
                 "role": "Definition",
-                "order": (0, fp, clean_symbol)
+                "order": (0, fp, clean_symbol),
             })
 
-    # 2. Correlated or standalone edges
-    for (rel_raw, direction), data in sym_edges.items():
+    for (_, _), data in sym_edges.items():
         fp = data["fp"]
-        rel_str = f"{direction} {', '.join(sorted(data['relations']))}"
+        rel_str = f"{data['direction']} {', '.join(sorted(data['relations']))}"
         sym_label = f"`{_display_sym(data['clean'], fp)}`"
 
         if fp and fp in file_occs:
             matched_files.add(fp)
-            lines_str = _format_lines(file_occs[fp]["lines"])
-            loc = f"`{fp}:{lines_str}`"
-            role_str = _format_roles(file_occs[fp]["roles"])
             table_rows.append({
-                "loc": loc,
+                "loc": f"`{fp}:{_format_lines(file_occs[fp]['lines'])}`",
                 "sym": sym_label,
                 "rel": rel_str,
-                "role": role_str,
-                "order": (1, fp, data["clean"])
+                "role": _format_roles(file_occs[fp]["roles"]),
+                "order": (1, fp, data["clean"]),
             })
         else:
-            loc = f"`{fp}`" if fp else "—"
             table_rows.append({
-                "loc": loc,
+                "loc": f"`{fp}`" if fp else "—",
                 "sym": sym_label,
                 "rel": rel_str,
                 "role": "—",
-                "order": (2, fp or "zzz", data["clean"])
+                "order": (2, fp or "zzz", data["clean"]),
             })
 
-    # 3. Remaining file occurrences without graph edges
     for fp, occ_data in file_occs.items():
         if fp in matched_files:
             continue
-        lines_str = _format_lines(occ_data["lines"])
-        loc = f"`{fp}:{lines_str}`"
-        role_str = _format_roles(occ_data["roles"])
         table_rows.append({
-            "loc": loc,
+            "loc": f"`{fp}:{_format_lines(occ_data['lines'])}`",
             "sym": "—",
             "rel": "—",
-            "role": role_str,
-            "order": (3, fp, "")
+            "role": _format_roles(occ_data["roles"]),
+            "order": (3, fp, ""),
         })
 
     if table_rows:
@@ -498,51 +454,36 @@ def format_lookup_symbol(
 
 
 def format_lookup_file(
-    exact_file: Any,
-    file_symbols: List[Any],
+    exact_file: Dict[str, Any],
+    file_symbols: List[Dict[str, Any]],
 ) -> str:
     """Format lookup results for a file module as markdown."""
-    md = []
-    if isinstance(exact_file, dict):
-        fp = exact_file.get("filepath", "")
-        raw_status = exact_file.get("status") or ""
-        status = raw_status.replace("VIOLATION_DETECTED", "VIOLATION")
-        justification = exact_file.get("justification") or "None"
-        mf = exact_file.get("manual_fields")
-        manual_str = json.dumps(mf) if isinstance(mf, dict) and mf else (str(mf) if mf and str(mf) != "{}" else "")
-    else:
-        fp = exact_file[0]
-        raw_status = exact_file[4] if len(exact_file) > 4 and exact_file[4] else ""
-        status = raw_status.replace("VIOLATION_DETECTED", "VIOLATION")
-        justification = exact_file[8] if len(exact_file) > 8 and exact_file[8] else "None"
-        manual_str = str(exact_file[7]) if len(exact_file) > 7 and exact_file[7] and str(exact_file[7]) != "{}" else ""
+    fp = exact_file.get("filepath", "")
+    status = (exact_file.get("status") or "").replace("VIOLATION_DETECTED", "VIOLATION")
+    justification = exact_file.get("justification") or "None"
+    mf = exact_file.get("manual_fields")
+    manual_str = json.dumps(mf) if isinstance(mf, dict) and mf else (str(mf) if mf and str(mf) != "{}" else "")
 
-    md.append(f"## File Module: `{fp}`\n")
-    md.append(f"- **Status**: `{status}`")
-    md.append(f"- **Justification**: *{justification}*")
+    md = [
+        f"## File Module: `{fp}`\n",
+        f"- **Status**: `{status}`",
+        f"- **Justification**: *{justification}*",
+    ]
     if manual_str:
         md.append(f"- **Manual Fields**: `{manual_str}`")
     md.append("")
 
-    # Filter out local symbols
-    def _sym_name(s):
-        return s["symbol"] if isinstance(s, dict) else s[0]
-
-    def _sym_kind(s):
-        return s.get("kind", "") if isinstance(s, dict) else s[1]
-
-    non_local_symbols = [s for s in file_symbols if not str(_sym_name(s)).startswith("local ")]
+    non_local_symbols = [s for s in file_symbols if not str(s["symbol"]).startswith("local ")]
     if non_local_symbols:
         md.append("### Symbols Declared in File")
         md.append("| Symbol | Kind |")
         md.append("| :--- | :--- |")
         for s in non_local_symbols:
-            raw_s = _sym_name(s)
-            clean_s = s.get("clean_symbol") if isinstance(s, dict) and s.get("clean_symbol") else demangle_scip_symbol(raw_s)
-            k = _sym_kind(s)
-            kind = infer_scip_kind(raw_s) if k == "UnspecifiedKind" or not k else k
+            raw_s = s["symbol"]
+            clean_s = s.get("clean_symbol") or demangle_scip_symbol(raw_s)
+            k = s.get("kind", "")
+            kind = infer_scip_kind(raw_s) if (k == "UnspecifiedKind" or not k) else k
             md.append(f"| `{clean_s}` | {kind} |")
         md.append("")
 
     return "\n".join(md)
-

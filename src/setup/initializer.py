@@ -1,8 +1,12 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
 from db.connection import DbConnection
 from db.repository import Repository
+from utils.arch_config import ArchConfig, build_rule_id
+from utils.helpers import load_config
 
 DEFAULT_CONFIG_JSON = {}
 
@@ -323,92 +327,67 @@ The validated workspace configuration uses the following mapping:
 """
 
 
-def sync_rules_to_db(repository: Repository, config: dict):
-    """Sync all architectural rules from config to compliance_rules table."""
-    if not isinstance(config, dict):
+def sync_rules_to_db(repository: Repository, config: Any):
+    """Sync all architectural rules from ArchConfig (or dict) to compliance_rules table."""
+    cfg = config if isinstance(config, ArchConfig) else ArchConfig.from_dict(config)
+    if not cfg:
         return
 
-    for prefix, prefix_conf in config.items():
-        if not isinstance(prefix_conf, dict):
-            continue
-
-        # Top-level prefix rules
-        for rule in prefix_conf.get("rules", []):
-            if not isinstance(rule, dict):
-                continue
+    for prefix, prefix_conf in cfg.items():
+        for rule in prefix_conf.rules:
             rule_type = rule.get("rule_type", "dependency_check")
             severity = rule.get("severity", "Error")
             if rule_type == "package_restriction":
                 source = rule.get("source", "*")
                 msg = rule.get("message", f"Package restriction: {source} cannot depend on blocklist")
-                rule_id = f"{prefix}_pkg_{source}".lower().replace("/", "_").replace(".", "_")
-                repository.quality.upsert_rule(rule_id, msg, severity)
+                rule_id = build_rule_id(prefix, None, rule_type, source=source)
             elif rule_type == "naming_convention":
                 classification = rule.get("classification", "*")
                 msg = rule.get("message", f"Naming convention for {classification}")
-                rule_id = f"{prefix}_naming_{classification}".lower().replace("/", "_").replace(".", "_")
-                repository.quality.upsert_rule(rule_id, msg, severity)
+                rule_id = build_rule_id(prefix, None, rule_type, classification=classification)
             else:
                 source = rule.get("source", "*")
                 target = rule.get("target", "*")
                 msg = rule.get("message", f"Dependency violation: {source} -> {target}")
-                rule_id = f"{prefix}_{source}_{target}".lower().replace("/", "_").replace(".", "_")
-                repository.quality.upsert_rule(rule_id, msg, severity)
+                rule_id = build_rule_id(prefix, None, rule_type, source=source, target=target)
+            repository.quality.upsert_rule(rule_id, msg, severity)
 
-        # Field-level rules
-        auto_fields = prefix_conf.get("automatic_fields", {})
-        for field_name, field_conf in auto_fields.items():
-            if not isinstance(field_conf, dict):
-                continue
+        for field_name, field_conf in prefix_conf.automatic_fields.items():
             handler = field_conf.get("handler", "dependency_check")
             for rule in field_conf.get("rules", []):
-                if not isinstance(rule, dict):
-                    continue
                 rule_type = rule.get("rule_type", handler)
                 severity = rule.get("severity", "Error")
                 if rule_type == "package_restriction":
                     source = rule.get("source", "*")
                     msg = rule.get("message", f"Package restriction: {source} cannot depend on blocklist")
-                    rule_id = f"{prefix}_{field_name}_pkg_{source}".lower().replace("/", "_").replace(".", "_")
-                    repository.quality.upsert_rule(rule_id, msg, severity)
+                    rule_id = build_rule_id(prefix, field_name, rule_type, source=source)
                 elif rule_type == "naming_convention":
                     classification = rule.get("classification", "*")
                     msg = rule.get("message", f"Naming convention for {classification}")
-                    rule_id = f"{prefix}_{field_name}_naming_{classification}".lower().replace("/", "_").replace(".", "_")
-                    repository.quality.upsert_rule(rule_id, msg, severity)
+                    rule_id = build_rule_id(prefix, field_name, rule_type, classification=classification)
                 else:
                     source = rule.get("source", "*")
                     target = rule.get("target", "*")
                     msg = rule.get("message", f"Dependency violation: {source} -> {target}")
-                    rule_id = f"{prefix}_{field_name}_{source}_{target}".lower().replace("/", "_").replace(".", "_")
-                    repository.quality.upsert_rule(rule_id, msg, severity)
+                    rule_id = build_rule_id(prefix, field_name, rule_type, source=source, target=target)
+                repository.quality.upsert_rule(rule_id, msg, severity)
 
 
 def initialize_workspace(project_root: Path) -> Path:
-    """
-    Initializes the workspace: creates output folders, deploys a default config.json,
-    deploys a config_guide.md, initializes the database schema, and loads
-    configuration rules into the DB.
-    """
+    """Initializes .arch workspace, config, guide, database schema, and compliance rules."""
     arch_dir = project_root / ".arch"
     arch_dir.mkdir(parents=True, exist_ok=True)
 
     config_file = arch_dir / "config.json"
     guide_file = arch_dir / "config_guide.md"
 
-    # 1. Deploy default config.json if not present
     if not config_file.exists():
         print(f"Deploying default configuration rules to {config_file}...")
-        try:
-            with open(config_file, "w", encoding="utf-8") as f:
-                json.dump(DEFAULT_CONFIG_JSON, f, indent=2)
-        except Exception as e:
-            print(f"Error deploying config.json: {e}", file=sys.stderr)
-            raise e
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_CONFIG_JSON, f, indent=2)
     else:
         print(f"Configuration file already exists at {config_file}.")
 
-    # Deploy configuration guide if not present
     if not guide_file.exists():
         print(f"Deploying configuration guide to {guide_file}...")
         try:
@@ -419,7 +398,6 @@ def initialize_workspace(project_root: Path) -> Path:
     else:
         print(f"Configuration guide already exists at {guide_file}.")
 
-    # 2. Initialize the database connection & schema
     db_path = arch_dir / "arch.db"
     print(f"Initializing database at {db_path}...")
     db_conn = DbConnection(db_path)
@@ -427,28 +405,13 @@ def initialize_workspace(project_root: Path) -> Path:
 
     try:
         db_conn.get_connection()
-
-        # 3. Read config.json and sync compliance rules to the database
         print("Syncing architectural rules to compliance catalog...")
         try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                config = json.load(f)
-
-            sync_rules_to_db(repository, config)
+            sync_rules_to_db(repository, load_config(project_root))
             print("Architectural compliance rules successfully synchronized.")
         except Exception as e:
             print(f"Warning: Failed to synchronize compliance rules from config.json: {e}", file=sys.stderr)
 
-        # 4. Historical git co-change coupling ingestion (disabled)
-        # try:
-        #     from change_tracker.git_coupling import GitCouplingMiner
-        #     pairs_count = GitCouplingMiner.mine_git_co_changes(project_root, repository)
-        #     if pairs_count > 0:
-        #         print(f"Mined {pairs_count} historical git co-change relationships.")
-        # except Exception:
-        #     pass
-
-        # 5. Register in machine-wide daemon registry
         try:
             from utils.single_instance import register_workspace
             register_workspace(project_root)

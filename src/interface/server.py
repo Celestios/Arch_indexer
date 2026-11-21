@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 import asyncio
 import functools
 import contextvars
@@ -18,7 +17,6 @@ from mcp.server.fastmcp import FastMCP, Context
 from db.repository import Repository
 from interface.project_registry import ProjectRegistry, find_project_root_with_db
 from change_tracker.watcher_manager import WatcherManager
-from interface.server_config import get_project_root as get_default_project_root
 from interface.tools.context import handle_context
 from interface.tools.lookup import handle_lookup
 from interface.tools.impact import handle_impact
@@ -28,6 +26,10 @@ from interface.tools.map import handle_map
 from interface.tools.update import handle_update
 from interface.tools.set_status import handle_set_status
 from interface.tools.graph import handle_graph
+from interface.tools.report import handle_report
+from interface.tools.analyze import handle_analyze
+from interface.tools.set_fields import handle_set_fields
+from interface.tools.clear_pending import handle_clear_pending
 from interface.validators import validate_direction, validate_resolution
 
 mcp = FastMCP("arch")
@@ -347,9 +349,7 @@ async def report(name: str, project_root: str, format: str = "markdown", ctx: Co
     """
     try:
         _, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        from reporter.generator import Reporter
-        reporter = Reporter(repository)
-        return reporter.generate_report(name, format)
+        return handle_report(repository, name, format)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -364,25 +364,8 @@ async def analyze(project_root: str, ctx: Context = None) -> str:
     """
     try:
         resolved_root, _ = await _resolve_context(ctx=ctx, project_root=project_root)
-        from utils.arch_config import ArchConfig
-        _, res = ArchConfig.parse_and_validate(resolved_root)
-        lines = ["=== Configuration Sanity & Completeness Analysis ==="]
-        if res["warnings"]:
-            lines.append(f"\n[WARNING] Reachability warnings ({len(res['warnings'])}):")
-            for w in res["warnings"]:
-                lines.append(f"  - {w}")
-        else:
-            lines.append("\n[OK] Value reachability check passed (no unreachable values).")
-
-        if res["errors"]:
-            lines.append(f"\n[ERROR] Referential integrity failures ({len(res['errors'])}):")
-            for err in res["errors"]:
-                lines.append(f"  - {err}")
-            lines.append("\nValidation failed.")
-        else:
-            lines.append("[OK] Referential integrity validation passed.")
-            lines.append("\nValidation succeeded.")
-        return "\n".join(lines)
+        report_text, _ = handle_analyze(resolved_root)
+        return report_text
     except Exception as e:
         return f"Error analyzing configuration: {e}"
 
@@ -403,40 +386,9 @@ async def set_fields(
     justification: Optional reason for the update.
     """
     try:
-        fields = json.loads(fields_json)
-    except Exception as e:
-        return f"Error: Invalid JSON fields payload: {e}"
-
-    try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath)
-        from utils.session import resolve_filepath
-        resolved = resolve_filepath(repository, filepath)
-        if not resolved:
-            return f"Error: File '{filepath}' is not registered in the database."
-
-        file_info = repository.workspace.get_file(resolved)
-        current_fields = {}
-        if file_info and file_info.get("manual_fields"):
-            mf = file_info["manual_fields"]
-            if isinstance(mf, dict):
-                current_fields = dict(mf)
-            else:
-                try:
-                    current_fields = json.loads(mf)
-                except Exception:
-                    pass
-
-        for k, v in fields.items():
-            if v is None:
-                current_fields.pop(k, None)
-            else:
-                current_fields[k] = v
-
-        repository.workspace.set_manual_fields(resolved, current_fields, justification)
-        from auditor.analyzer import Auditor
-        auditor = Auditor(repository, resolved_root)
-        auditor.run_audit()
-        return f"Successfully updated manual fields for '{resolved}' to: {current_fields}."
+        msg, _ = handle_set_fields(repository, resolved_root, filepath, fields_json, justification)
+        return msg
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -452,11 +404,7 @@ async def clear_pending(justification: str, project_root: str, ctx: Context = No
     """
     try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        repository.workspace.clear_all_pending_audits(justification)
-        from auditor.analyzer import Auditor
-        auditor = Auditor(repository, resolved_root)
-        auditor.run_audit()
-        return "Successfully cleared pending audit status for all files."
+        return handle_clear_pending(repository, resolved_root, justification)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -515,7 +463,8 @@ async def set_status(
     """
     try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath)
-        return handle_set_status(repository, resolved_root, filepath, status, justification)
+        msg, _ = handle_set_status(repository, resolved_root, filepath, status, justification)
+        return msg
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -564,3 +513,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

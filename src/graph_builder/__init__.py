@@ -1,15 +1,13 @@
-"""
-Graph Builder Package (SRP Modular Architecture).
-"""
+"""Graph Builder Package (SRP Modular Architecture)."""
 
 from .config import CircuitConfig, LayoutConfig, SizerConfig, RoutingConfig
 from .ingestion.db_reader import DatabaseReader
-from .ingestion.scip_parser import ScipParser
+from .ingestion.scip_parser import parse_scip_symbol, parse_signature_ports
 from .domain.types import NodeType, EdgeType, NODE_COLORS, NODE_SIZES, EDGE_COLORS
 from .domain.entities import GraphNode, GraphEdge
 from .domain.model import GraphModel
 from .layout.circuit_layout import CircuitLayoutEngine
-from .layout.zone_classifier import TopologicalZoneClassifier
+from .layout.zone_classifier import build_directory_funnel
 from .layout.package_sizer import PackageSizer
 from .routing.channel_router import OrthogonalChannelRouter
 from .serialization.compressor import compress_circuit_data
@@ -22,7 +20,8 @@ __all__ = [
     "SizerConfig",
     "RoutingConfig",
     "DatabaseReader",
-    "ScipParser",
+    "parse_scip_symbol",
+    "parse_signature_ports",
     "NodeType",
     "EdgeType",
     "NODE_COLORS",
@@ -32,7 +31,7 @@ __all__ = [
     "GraphEdge",
     "GraphModel",
     "CircuitLayoutEngine",
-    "TopologicalZoneClassifier",
+    "build_directory_funnel",
     "PackageSizer",
     "OrthogonalChannelRouter",
     "compress_circuit_data",

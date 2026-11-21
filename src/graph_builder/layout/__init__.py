@@ -1,13 +1,11 @@
-"""
-Layout Package.
-"""
+"""Layout Package."""
 
-from .zone_classifier import TopologicalZoneClassifier
+from .zone_classifier import build_directory_funnel
 from .package_sizer import PackageSizer
 from .circuit_layout import CircuitLayoutEngine
 
 __all__ = [
-    "TopologicalZoneClassifier",
+    "build_directory_funnel",
     "PackageSizer",
     "CircuitLayoutEngine",
 ]

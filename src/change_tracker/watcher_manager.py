@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, Set, Union
 
-from change_tracker.tracker import ChangeTracker
+from change_tracker.tracker import calculate_sha256
 from change_tracker.watcher import (
     _FFI_BRIDGE_INDICATORS,
     _WATCHED_EXTENSIONS,
@@ -21,7 +21,7 @@ from db.connection import DbConnection
 from db.repository import Repository
 from engines.registry import LanguageRegistry
 from engines.sync_pipeline import sync_workspace
-from engines.treesitter import TreesitterEngine
+from engines.treesitter import sync_file_to_db
 from utils.exclusions import load_include_dirs
 
 
@@ -104,7 +104,7 @@ class ProjectWatcher:
                 if path.exists() and path.is_file() and watcher_self._repository:
                     try:
                         with watcher_self._db_lock:
-                            TreesitterEngine.sync_file_to_db(watcher_self._repository, path)
+                            sync_file_to_db(watcher_self._repository, path, project_root=project_root)
                     except Exception:
                         pass
 
@@ -146,7 +146,8 @@ class ProjectWatcher:
 
         repository = self._repository
 
-        db_files = repository.workspace.get_all_files_metadata()
+        with self._db_lock:
+            db_files = repository.workspace.get_all_files_metadata()
         dirty_files: Set[str] = set()
         for p in batch:
             try:
@@ -158,7 +159,7 @@ class ProjectWatcher:
                 dirty_files.add(rel_fp)
                 continue
 
-            curr_hash = ChangeTracker.calculate_sha256(p)
+            curr_hash = calculate_sha256(p)
             db_hash = db_files.get(rel_fp, {}).get("sha256", "")
             if curr_hash != db_hash:
                 dirty_files.add(rel_fp)
@@ -292,3 +293,4 @@ class WatcherManager:
 
 
 atexit.register(lambda: WatcherManager.get_instance().stop_all())
+

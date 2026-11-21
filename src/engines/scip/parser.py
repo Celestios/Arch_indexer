@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
+from engines.registry import LanguageRegistry
 from utils.exclusions import load_include_dirs, load_exclude_patterns, is_included, is_excluded
 from utils.helpers import infer_scip_kind, score_definition_candidate
 
@@ -104,120 +105,176 @@ def _detect_scip_run_dir(scip_file: Path, project_root: Path, metadata_uri: Opti
         except Exception:
             pass
 
-    # 2. Fallback based on scip_file name and project_root structure
-    if "rust" in scip_file.name:
-        if (project_root / "rust" / "Cargo.toml").exists():
-            return project_root / "rust"
-        for p in project_root.rglob("Cargo.toml"):
-            if "target" not in str(p) and ".arch" not in str(p):
-                return p.parent
-    elif "dart" in scip_file.name:
-        if (project_root / "pubspec.yaml").exists():
-            return project_root
-        for p in project_root.rglob("pubspec.yaml"):
-            if ".dart_tool" not in str(p) and "dart_analyzer" not in str(p):
+    # 2. Dynamic fallback via LanguageRegistry based on scip_file name and project_root structure
+    lang_key = scip_file.stem
+    if lang_key.startswith("index_"):
+        lang_key = lang_key[6:]
+    spec = LanguageRegistry.get_spec(lang_key)
+    if spec is None:
+        file_name_lower = scip_file.name.lower()
+        for s in LanguageRegistry.get_all_specs():
+            if s.name in file_name_lower:
+                spec = s
+                break
+
+    if spec and spec.manifest_names:
+        exclude_patterns = load_exclude_patterns(project_root)
+        skip_parts = {".dart_tool", "dart_analyzer", "target", ".arch"}
+        for manifest in spec.manifest_names:
+            if any(project_root.glob(manifest)):
+                return project_root
+
+            sub_dir = project_root / spec.name
+            if sub_dir.is_dir() and any(sub_dir.glob(manifest)):
+                return sub_dir
+
+            for p in project_root.rglob(manifest):
+                if any(part in p.parts for part in skip_parts):
+                    continue
+                try:
+                    rel_str = str(p.relative_to(project_root)).replace("\\", "/")
+                    if is_excluded(rel_str, exclude_patterns):
+                        continue
+                except ValueError:
+                    pass
                 return p.parent
 
     return project_root
 
 
-class ScipParser:
-    """Parses binary SCIP index files into normalized Python dictionaries."""
+def parse_index(
 
-    @staticmethod
-    def parse_index(
-        scip_file: Path,
-        project_root: Optional[Path] = None,
-        changed_files: Optional[Any] = None
-    ) -> Dict[str, Any]:
-        """
-        Parses a binary index.scip file into a normalized dictionary
-        of symbols, occurrences, and edges.
-        Filters by include_dirs and exclude from config.json if project_root is provided.
-        Filters by changed_files to skip disk I/O and occurrences for unchanged files.
-        """
-        if not scip_file.exists():
-            raise FileNotFoundError(f"SCIP index file not found at {scip_file}")
+    scip_file: Path,
+    project_root: Optional[Path] = None,
+    changed_files: Optional[Any] = None
+) -> Dict[str, Any]:
+    """
+    Parses a binary index.scip file into a normalized dictionary
+    of symbols, occurrences, and edges.
+    Filters by include_dirs and exclude from config.json if project_root is provided.
+    Filters by changed_files to skip disk I/O and occurrences for unchanged files.
+    """
+    if not scip_file.exists():
+        raise FileNotFoundError(f"SCIP index file not found at {scip_file}")
 
-        changed_set = None
-        if changed_files is not None:
-            changed_set = set()
-            for f in changed_files:
-                p = Path(f)
-                if project_root and p.is_absolute():
-                    try:
-                        rel = str(p.relative_to(project_root)).replace("\\", "/")
-                    except ValueError:
-                        rel = str(p).replace("\\", "/")
-                else:
-                    rel = str(p).replace("\\", "/")
-                rel = rel.replace("\\", "/")
-                if rel.startswith("./"):
-                    rel = rel[2:]
-                changed_set.add(rel)
-
-        include_dirs = load_include_dirs(project_root) if project_root else None
-        exclude_patterns = load_exclude_patterns(project_root) if project_root else None
-
-        index = scip_pb2.Index()
-        with open(scip_file, "rb") as f:
-            raw = f.read()
-
-        try:
-            index.ParseFromString(raw)
-        except Exception:
-            raw = raw.replace(b'\xed\xa0\x80', b'___')
-            raw = raw.replace(b'\xed\xa8\x80', b'___')
-            raw = raw.replace(b'\xed\xb0\x80', b'___')
-            raw = raw.replace(b'\xed\xbf\xbf', b'___')
-            index.ParseFromString(raw)
-
-        scip_run_dir = None
-        if project_root:
-            scip_run_dir = _detect_scip_run_dir(scip_file, project_root, index.metadata.project_root)
-
-        def _normalize_scip_doc_path(doc_path: str) -> str:
-            rel = doc_path.replace("\\", "/")
-            if project_root and scip_run_dir:
+    changed_set = None
+    if changed_files is not None:
+        changed_set = set()
+        for f in changed_files:
+            p = Path(f)
+            if project_root and p.is_absolute():
                 try:
-                    abs_path = scip_run_dir / rel
-                    rel = str(abs_path.relative_to(project_root)).replace("\\", "/")
+                    rel = str(p.relative_to(project_root)).replace("\\", "/")
                 except ValueError:
-                    pass
+                    rel = str(p).replace("\\", "/")
+            else:
+                rel = str(p).replace("\\", "/")
             rel = rel.replace("\\", "/")
             if rel.startswith("./"):
                 rel = rel[2:]
-            return rel
+            changed_set.add(rel)
 
-        parsed_data = {
-            "metadata": {
-                "project_root": index.metadata.project_root,
-                "tool_name": index.metadata.tool_info.name,
-                "tool_version": index.metadata.tool_info.version
-            },
-            "symbols": {},
-            "occurrences": [],
-            "edges": [],
-            "files": [],
-            "diagnostics": []
+    include_dirs = load_include_dirs(project_root) if project_root else None
+    exclude_patterns = load_exclude_patterns(project_root) if project_root else None
+
+    index = scip_pb2.Index()
+    with open(scip_file, "rb") as f:
+        raw = f.read()
+
+    try:
+        index.ParseFromString(raw)
+    except Exception:
+        raw = raw.replace(b'\xed\xa0\x80', b'___')
+        raw = raw.replace(b'\xed\xa8\x80', b'___')
+        raw = raw.replace(b'\xed\xb0\x80', b'___')
+        raw = raw.replace(b'\xed\xbf\xbf', b'___')
+        index.ParseFromString(raw)
+
+    scip_run_dir = None
+    if project_root:
+        scip_run_dir = _detect_scip_run_dir(scip_file, project_root, index.metadata.project_root)
+
+    def _normalize_scip_doc_path(doc_path: str) -> str:
+        rel = doc_path.replace("\\", "/")
+        if project_root and scip_run_dir:
+            try:
+                abs_path = scip_run_dir / rel
+                rel = str(abs_path.relative_to(project_root)).replace("\\", "/")
+            except ValueError:
+                pass
+        rel = rel.replace("\\", "/")
+        if rel.startswith("./"):
+            rel = rel[2:]
+        return rel
+
+    parsed_data = {
+        "metadata": {
+            "project_root": index.metadata.project_root,
+            "tool_name": index.metadata.tool_info.name,
+            "tool_version": index.metadata.tool_info.version
+        },
+        "symbols": {},
+        "occurrences": [],
+        "edges": [],
+        "files": [],
+        "diagnostics": []
+    }
+
+    # 1. Parse external symbols (from external packages)
+    for sym_info in index.external_symbols:
+        docs = "\n".join(sym_info.documentation) if sym_info.documentation else ""
+        kind_val = sym_info.kind
+        kind_str = scip_pb2.SymbolInformation.Kind.Name(kind_val) if kind_val in scip_pb2.SymbolInformation.Kind.values() else "UnspecifiedKind"
+        parent_sym = getattr(sym_info, "enclosing_symbol", None) or None
+
+        parsed_data["symbols"][sym_info.symbol] = {
+            "symbol": sym_info.symbol,
+            "filepath": None,
+            "kind": kind_str,
+            "signature": None,
+            "docstring": docs,
+            "body_hash": None,
+            "start_line": 1,
+            "end_line": 1,
+            "parent_symbol": parent_sym,
         }
 
-        # 1. Parse external symbols (from external packages)
-        for sym_info in index.external_symbols:
+        for rel in getattr(sym_info, "relationships", []):
+            if getattr(rel, "is_implementation", False):
+                parsed_data["edges"].append({
+                    "source": sym_info.symbol,
+                    "target": rel.symbol,
+                    "relation": "Implements"
+                })
+            if getattr(rel, "is_type_definition", False):
+                parsed_data["edges"].append({
+                    "source": sym_info.symbol,
+                    "target": rel.symbol,
+                    "relation": "TypeDefinition"
+                })
+
+    # 2. First pass: Extract local symbol definitions & hover/docstrings
+    for document in index.documents:
+        resolved_filepath = _normalize_scip_doc_path(document.relative_path)
+
+        if is_excluded(resolved_filepath, exclude_patterns):
+            continue
+        if include_dirs and not is_included(resolved_filepath, include_dirs, exclude_patterns):
+            continue
+        if changed_set is not None and resolved_filepath not in changed_set:
+            continue
+        parsed_data["files"].append(resolved_filepath)
+
+        symbol_metadata = {}
+        for sym_info in document.symbols:
             docs = "\n".join(sym_info.documentation) if sym_info.documentation else ""
             kind_val = sym_info.kind
             kind_str = scip_pb2.SymbolInformation.Kind.Name(kind_val) if kind_val in scip_pb2.SymbolInformation.Kind.values() else "UnspecifiedKind"
             parent_sym = getattr(sym_info, "enclosing_symbol", None) or None
 
-            parsed_data["symbols"][sym_info.symbol] = {
-                "symbol": sym_info.symbol,
-                "filepath": None,
+            symbol_metadata[sym_info.symbol] = {
+                "docs": docs,
                 "kind": kind_str,
-                "signature": None,
-                "docstring": docs,
-                "body_hash": None,
-                "start_line": 1,
-                "end_line": 1,
                 "parent_symbol": parent_sym,
             }
 
@@ -235,190 +292,167 @@ class ScipParser:
                         "relation": "TypeDefinition"
                     })
 
-        # 2. First pass: Extract local symbol definitions & hover/docstrings
-        for document in index.documents:
-            resolved_filepath = _normalize_scip_doc_path(document.relative_path)
+        for occ in document.occurrences:
+            symbol = occ.symbol
+            is_definition = bool(occ.symbol_roles & 1)
 
-            if is_excluded(resolved_filepath, exclude_patterns):
+            r_tuple = normalize_range(occ, use_enclosing=is_definition)
+            if not r_tuple:
                 continue
-            if include_dirs and not is_included(resolved_filepath, include_dirs, exclude_patterns):
-                continue
-            if changed_set is not None and resolved_filepath not in changed_set:
-                continue
-            parsed_data["files"].append(resolved_filepath)
+            start_line, start_col, end_line, end_col = r_tuple
 
-            symbol_metadata = {}
-            for sym_info in document.symbols:
-                docs = "\n".join(sym_info.documentation) if sym_info.documentation else ""
-                kind_val = sym_info.kind
-                kind_str = scip_pb2.SymbolInformation.Kind.Name(kind_val) if kind_val in scip_pb2.SymbolInformation.Kind.values() else "UnspecifiedKind"
-                parent_sym = getattr(sym_info, "enclosing_symbol", None) or None
+            if not is_definition:
+                parsed_data["occurrences"].append({
+                    "symbol": symbol,
+                    "filepath": resolved_filepath,
+                    "start_line": start_line + 1,
+                    "start_col": start_col,
+                    "end_line": end_line + 1,
+                    "end_col": end_col,
+                    "role": occ.symbol_roles
+                })
 
-                symbol_metadata[sym_info.symbol] = {
-                    "docs": docs,
-                    "kind": kind_str,
+            # Harvest compiler/analyzer diagnostics
+            for diag in getattr(occ, "diagnostics", []):
+                sev_name = scip_pb2.Severity.Name(diag.severity) if diag.severity in scip_pb2.Severity.values() else str(diag.severity)
+                clean_sev = sev_name.replace("Severity", "") if sev_name.endswith("Severity") and len(sev_name) > 8 else sev_name
+                tag_names = [scip_pb2.DiagnosticTag.Name(t) for t in getattr(diag, "tags", []) if t in scip_pb2.DiagnosticTag.values() and t != 0]
+                parsed_data["diagnostics"].append({
+                    "filepath": resolved_filepath,
+                    "symbol": symbol if (symbol and not symbol.startswith("local ")) else None,
+                    "line": start_line + 1,
+                    "col": start_col,
+                    "severity": clean_sev,
+                    "code": diag.code or None,
+                    "message": diag.message or "",
+                    "tags": ",".join(tag_names) if tag_names else None,
+                })
+
+            if is_definition and not symbol.startswith("local "):
+                meta = symbol_metadata.get(symbol, {"docs": "", "kind": "UnspecifiedKind", "parent_symbol": None})
+                kind = meta["kind"]
+                if kind == "UnspecifiedKind" or not kind:
+                    kind = infer_scip_kind(symbol)
+
+                docs = meta["docs"]
+                parent_sym = meta.get("parent_symbol")
+
+                new_candidate = {
+                    "symbol": symbol,
+                    "filepath": resolved_filepath,
+                    "kind": kind,
+                    "signature": None,
+                    "docstring": docs,
+                    "body_hash": None,
+                    "start_line": start_line + 1,
+                    "start_col": start_col,
+                    "end_line": end_line + 1,
+                    "end_col": end_col,
                     "parent_symbol": parent_sym,
                 }
 
-                for rel in getattr(sym_info, "relationships", []):
-                    if getattr(rel, "is_implementation", False):
-                        parsed_data["edges"].append({
-                            "source": sym_info.symbol,
-                            "target": rel.symbol,
-                            "relation": "Implements"
-                        })
-                    if getattr(rel, "is_type_definition", False):
-                        parsed_data["edges"].append({
-                            "source": sym_info.symbol,
-                            "target": rel.symbol,
-                            "relation": "TypeDefinition"
-                        })
-
-            for occ in document.occurrences:
-                symbol = occ.symbol
-                is_definition = bool(occ.symbol_roles & 1)
-
-                r_tuple = normalize_range(occ, use_enclosing=is_definition)
-                if not r_tuple:
-                    continue
-                start_line, start_col, end_line, end_col = r_tuple
-
-                if not is_definition:
-                    parsed_data["occurrences"].append({
-                        "symbol": symbol,
-                        "filepath": resolved_filepath,
-                        "start_line": start_line + 1,
-                        "start_col": start_col,
-                        "end_line": end_line + 1,
-                        "end_col": end_col,
-                        "role": occ.symbol_roles
-                    })
-
-                # Harvest compiler/analyzer diagnostics
-                for diag in getattr(occ, "diagnostics", []):
-                    sev_name = scip_pb2.Severity.Name(diag.severity) if diag.severity in scip_pb2.Severity.values() else str(diag.severity)
-                    clean_sev = sev_name.replace("Severity", "") if sev_name.endswith("Severity") and len(sev_name) > 8 else sev_name
-                    tag_names = [scip_pb2.DiagnosticTag.Name(t) for t in getattr(diag, "tags", []) if t in scip_pb2.DiagnosticTag.values() and t != 0]
-                    parsed_data["diagnostics"].append({
-                        "filepath": resolved_filepath,
-                        "symbol": symbol if (symbol and not symbol.startswith("local ")) else None,
-                        "line": start_line + 1,
-                        "col": start_col,
-                        "severity": clean_sev,
-                        "code": diag.code or None,
-                        "message": diag.message or "",
-                        "tags": ",".join(tag_names) if tag_names else None,
-                    })
-
-                if is_definition and not symbol.startswith("local "):
-                    meta = symbol_metadata.get(symbol, {"docs": "", "kind": "UnspecifiedKind", "parent_symbol": None})
-                    kind = meta["kind"]
-                    if kind == "UnspecifiedKind" or not kind:
-                        kind = infer_scip_kind(symbol)
-
-                    docs = meta["docs"]
-                    parent_sym = meta.get("parent_symbol")
-
-                    new_candidate = {
-                        "symbol": symbol,
-                        "filepath": resolved_filepath,
-                        "kind": kind,
-                        "signature": None,
-                        "docstring": docs,
-                        "body_hash": None,
-                        "start_line": start_line + 1,
-                        "start_col": start_col,
-                        "end_line": end_line + 1,
-                        "end_col": end_col,
-                        "parent_symbol": parent_sym,
-                    }
-
-                    # Deterministic canonical symbol disambiguation
-                    if symbol in parsed_data["symbols"]:
-                        existing = parsed_data["symbols"][symbol]
-                        existing_score = score_definition_candidate(
-                            existing,
-                            filepath=existing.get("filepath"),
-                            start_line=existing.get("start_line", 1),
-                            end_line=existing.get("end_line", 1)
-                        )
-                        new_score = score_definition_candidate(
-                            new_candidate,
-                            filepath=resolved_filepath,
-                            start_line=start_line + 1,
-                            end_line=end_line + 1
-                        )
-                        if new_score > existing_score:
-                            parsed_data["symbols"][symbol] = new_candidate
-                    else:
+                # Deterministic canonical symbol disambiguation
+                if symbol in parsed_data["symbols"]:
+                    existing = parsed_data["symbols"][symbol]
+                    existing_score = score_definition_candidate(
+                        existing,
+                        filepath=existing.get("filepath"),
+                        start_line=existing.get("start_line", 1),
+                        end_line=existing.get("end_line", 1)
+                    )
+                    new_score = score_definition_candidate(
+                        new_candidate,
+                        filepath=resolved_filepath,
+                        start_line=start_line + 1,
+                        end_line=end_line + 1
+                    )
+                    if new_score > existing_score:
                         parsed_data["symbols"][symbol] = new_candidate
+                else:
+                    parsed_data["symbols"][symbol] = new_candidate
 
-        # 3. Second pass: Extract call & reference edges
-        occurrences_by_file = {}
-        for sym, sym_data in parsed_data["symbols"].items():
-            # Exclude parameters and fields as enclosing callers
-            if sym.endswith(")") or (sym.endswith(".") and not sym.endswith("().")):
+    # 3. Second pass: Extract call & reference edges
+    occurrences_by_file = {}
+    for sym, sym_data in parsed_data["symbols"].items():
+        # Exclude parameters and fields as enclosing callers
+        if sym.endswith(")") or (sym.endswith(".") and not sym.endswith("().")):
+            continue
+        fp = sym_data.get("filepath")
+        if fp:
+            occurrences_by_file.setdefault(fp, []).append(sym_data)
+
+    for fp, defs in occurrences_by_file.items():
+        defs.sort(key=lambda d: d["end_line"] - d["start_line"])
+
+    for document in index.documents:
+        resolved_filepath = _normalize_scip_doc_path(document.relative_path)
+
+        if is_excluded(resolved_filepath, exclude_patterns):
+            continue
+        if include_dirs and not is_included(resolved_filepath, include_dirs, exclude_patterns):
+            continue
+        if changed_set is not None and resolved_filepath not in changed_set:
+            continue
+
+        file_defs = occurrences_by_file.get(resolved_filepath, [])
+
+        for occ in document.occurrences:
+            symbol = occ.symbol
+            is_reference = not bool(occ.symbol_roles & 1)
+
+            if (
+                not is_reference
+                or symbol.startswith("local ")
+                or symbol.endswith(")")
+                or (changed_set is None and symbol not in parsed_data["symbols"])
+            ):
                 continue
-            fp = sym_data.get("filepath")
-            if fp:
-                occurrences_by_file.setdefault(fp, []).append(sym_data)
 
-        for fp, defs in occurrences_by_file.items():
-            defs.sort(key=lambda d: d["end_line"] - d["start_line"])
-
-        for document in index.documents:
-            resolved_filepath = _normalize_scip_doc_path(document.relative_path)
-
-            if is_excluded(resolved_filepath, exclude_patterns):
+            r_tuple = normalize_range(occ)
+            if not r_tuple:
                 continue
-            if include_dirs and not is_included(resolved_filepath, include_dirs, exclude_patterns):
-                continue
-            if changed_set is not None and resolved_filepath not in changed_set:
-                continue
+            ref_line = r_tuple[0] + 1
 
-            file_defs = occurrences_by_file.get(resolved_filepath, [])
+            caller_symbol = None
+            for def_occ in file_defs:
+                if def_occ["start_line"] <= ref_line <= def_occ["end_line"]:
+                    caller_symbol = def_occ["symbol"]
+                    break
 
-            for occ in document.occurrences:
-                symbol = occ.symbol
-                is_reference = not bool(occ.symbol_roles & 1)
+            if (
+                caller_symbol
+                and caller_symbol != symbol
+                and not caller_symbol.startswith("local ")
+                and not symbol.startswith("local ")
+            ):
+                parsed_data["edges"].append({
+                    "source": caller_symbol,
+                    "target": symbol,
+                    "relation": "Calls",
+                    "call_line": ref_line,
+                })
 
-                if (
-                    not is_reference
-                    or symbol.startswith("local ")
-                    or symbol.endswith(")")
-                    or (changed_set is None and symbol not in parsed_data["symbols"])
-                ):
-                    continue
+    # 4. Third pass: Missing symbol recovery / synthesis
+    # Ensure any symbol referenced in occurrences or edges exists in parsed_data["symbols"]
+    for occ in parsed_data["occurrences"]:
+        sym = occ["symbol"]
+        if sym not in parsed_data["symbols"] and not sym.startswith("local "):
+            parsed_data["symbols"][sym] = {
+                "symbol": sym,
+                "filepath": None,
+                "kind": infer_scip_kind(sym),
+                "signature": None,
+                "docstring": "",
+                "body_hash": None,
+                "start_line": 1,
+                "end_line": 1,
+                "parent_symbol": None,
+            }
 
-                r_tuple = normalize_range(occ)
-                if not r_tuple:
-                    continue
-                ref_line = r_tuple[0] + 1
-
-                caller_symbol = None
-                for def_occ in file_defs:
-                    if def_occ["start_line"] <= ref_line <= def_occ["end_line"]:
-                        caller_symbol = def_occ["symbol"]
-                        break
-
-                if (
-                    caller_symbol
-                    and caller_symbol != symbol
-                    and not caller_symbol.startswith("local ")
-                    and not symbol.startswith("local ")
-                ):
-                    parsed_data["edges"].append({
-                        "source": caller_symbol,
-                        "target": symbol,
-                        "relation": "Calls",
-                        "call_line": ref_line,
-                    })
-
-        # 4. Third pass: Missing symbol recovery / synthesis
-        # Ensure any symbol referenced in occurrences or edges exists in parsed_data["symbols"]
-        for occ in parsed_data["occurrences"]:
-            sym = occ["symbol"]
-            if sym not in parsed_data["symbols"] and not sym.startswith("local "):
+    for edge in parsed_data["edges"]:
+        for sym_key in ("source", "target"):
+            sym = edge.get(sym_key)
+            if sym and sym not in parsed_data["symbols"] and not sym.startswith("local "):
                 parsed_data["symbols"][sym] = {
                     "symbol": sym,
                     "filepath": None,
@@ -431,21 +465,6 @@ class ScipParser:
                     "parent_symbol": None,
                 }
 
-        for edge in parsed_data["edges"]:
-            for sym_key in ("source", "target"):
-                sym = edge.get(sym_key)
-                if sym and sym not in parsed_data["symbols"] and not sym.startswith("local "):
-                    parsed_data["symbols"][sym] = {
-                        "symbol": sym,
-                        "filepath": None,
-                        "kind": infer_scip_kind(sym),
-                        "signature": None,
-                        "docstring": "",
-                        "body_hash": None,
-                        "start_line": 1,
-                        "end_line": 1,
-                        "parent_symbol": None,
-                    }
+    return parsed_data
 
-        return parsed_data
 

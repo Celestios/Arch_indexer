@@ -2,9 +2,8 @@
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
-from utils.violation_id import ViolationId
 from utils.arch_config import ArchConfig
 from engines.registry import LanguageRegistry
 
@@ -20,28 +19,10 @@ def config_path_for(project_root: Path) -> Path:
 
 
 def ext_to_lang(ext: str) -> str:
-    """Map file extension to language name."""
+    """Map file extension to language name via LanguageRegistry."""
     if not ext.startswith("."):
         ext = "." + ext
-    lang = LanguageRegistry.detect_language(ext)
-    if lang:
-        return lang
-    mapping = {
-        ".js": "javascript",
-        ".ts": "typescript",
-        ".go": "go",
-        ".cpp": "cpp",
-        ".c": "c",
-        ".h": "cpp",
-        ".cs": "csharp",
-        ".rb": "ruby",
-        ".php": "php",
-        ".html": "html",
-        ".css": "css",
-        ".sh": "bash",
-        ".ps1": "powershell",
-    }
-    return mapping.get(ext.lower(), "unknown")
+    return LanguageRegistry.detect_language(ext) or "unknown"
 
 
 def resolve_filepath(repository, raw_path: str) -> Optional[str]:
@@ -50,8 +31,9 @@ def resolve_filepath(repository, raw_path: str) -> Optional[str]:
     if file_info:
         return raw_path
     all_files = repository.workspace.get_all_files_metadata()
+    norm_raw = raw_path.replace("\\", "/")
     for fp in all_files.keys():
-        if fp.replace("\\", "/").endswith(raw_path.replace("\\", "/")):
+        if fp.replace("\\", "/").endswith(norm_raw):
             return fp
     return None
 
@@ -87,81 +69,44 @@ def extract_code_slice(
         return None
 
 
-def find_definition_line(repository, symbol: str, filepath: str) -> int:
-    """Find the definition line number for a symbol in a given file. Returns 1 as fallback."""
-    occs = repository.graph.get_occurrences_for_symbol(symbol)
-    norm_fp = filepath.replace("\\", "/")
-    for occ in occs:
-        if occ["filepath"].replace("\\", "/") == norm_fp and occ.get("role") == 1:
-            return occ["start_line"]
-    if occs:
-        return occs[0]["start_line"]
-    return 1
-
-
 def find_call_site_or_definition_line(
-    repository,
     source_sym: str,
     target_sym: str,
-    filepath: str,
     edge: Optional[Dict[str, Any]] = None,
     snapshot: Optional[Any] = None,
 ) -> int:
-    """Find the call site line where target_sym is referenced in filepath, falling back to source_sym definition line.
-    If snapshot or edge is provided, returns coordinate directly without DB queries.
-    """
+    """Resolve call site line from edge or snapshot, falling back to source definition line."""
     if edge and edge.get("call_line"):
         return edge["call_line"]
 
     if snapshot is not None:
-        if hasattr(snapshot, "incoming_map"):
-            for incoming_edge in snapshot.incoming_map.get(target_sym, []):
-                if incoming_edge.get("source") == source_sym and incoming_edge.get("call_line"):
-                    return incoming_edge["call_line"]
-        if hasattr(snapshot, "definitions_by_symbol"):
-            def_info = snapshot.definitions_by_symbol.get(source_sym)
-            if def_info and def_info.get("start_line"):
-                return def_info["start_line"]
-        if hasattr(snapshot, "symbol_map"):
-            sym_info = snapshot.symbol_map.get(source_sym)
-            if sym_info and sym_info.get("start_line"):
-                return sym_info["start_line"]
-        return 1
+        for incoming_edge in snapshot.get_incoming(target_sym):
+            if incoming_edge.get("source") == source_sym and incoming_edge.get("call_line"):
+                return incoming_edge["call_line"]
+        def_info = snapshot.get_definition(source_sym)
+        if def_info and def_info.get("start_line"):
+            return def_info["start_line"]
+        sym_info = snapshot.get_symbol(source_sym)
+        if sym_info and sym_info.get("start_line"):
+            return sym_info["start_line"]
 
-    if repository is None:
-        return 1
-
-    norm_fp = filepath.replace("\\", "/")
-    occs = repository.graph.get_occurrences_for_symbol(target_sym)
-    for occ in occs:
-        if occ["filepath"].replace("\\", "/") == norm_fp and (occ.get("role", 0) & 1) == 0:
-            return occ["start_line"]
-    return find_definition_line(repository, source_sym, filepath)
+    return 1
 
 
 def load_config(project_root: Path) -> ArchConfig:
-    """Load and normalize .arch/config.json into an ArchConfig.
+    """Load, validate, and normalize .arch/config.json into an ArchConfig.
 
-    Returns an empty ArchConfig when the file is missing or cannot be parsed.
+    Returns an empty ArchConfig when the file is missing or fails validation.
     """
     config_path = config_path_for(project_root)
     if not config_path.exists():
         return ArchConfig()
-    try:
-        config, _ = ArchConfig.parse_and_validate(config_path)
-        if config is not None:
-            return config
-        with open(config_path, "r", encoding="utf-8") as f:
-            return ArchConfig.from_dict(json.load(f))
-    except Exception:
-        return ArchConfig()
+    config, _ = ArchConfig.parse_and_validate(config_path)
+    return config if config is not None else ArchConfig()
 
 
 def demangle_scip_symbol(sym: Optional[str]) -> str:
-    """Demangle a SCIP symbol into a clean, human-readable identifier.
-    Strips package prefixes (e.g. 'scip-python python Arch_indexer 0.1.0 '),
-    backticks, and converts SCIP descriptor delimiters to clean dot notation.
-    """
+    """Demangle a SCIP symbol into a clean, human-readable identifier."""
     if not sym:
         return ""
     if sym.startswith("local "):
@@ -173,13 +118,7 @@ def demangle_scip_symbol(sym: Optional[str]) -> str:
     else:
         descriptor = sym
 
-    # Strip backticks
-    s = descriptor.replace("`", "")
-
-    # Convert SCIP descriptor delimiters:
-    # / -> .
-    # # -> .
-    s = s.replace("/", ".").replace("#", ".")
+    s = descriptor.replace("`", "").replace("/", ".").replace("#", ".")
     while s.endswith(".") or s.endswith(":"):
         s = s[:-1]
     return s
@@ -198,15 +137,13 @@ def is_auxiliary_path(filepath: Optional[str]) -> bool:
         return False
     norm = filepath.replace("\\", "/").lower()
     parts = norm.split("/")
-    # Check directory components
     for p in parts[:-1]:
         if p in AUXILIARY_PATH_PARTS:
             return True
 
-    # Check filename conventions across languages (*_test.*, *.test.*, test_*.*, *_spec.*, *.spec.*)
     filename = parts[-1]
     name_no_ext = filename.rsplit(".", 1)[0] if "." in filename else filename
-    if (
+    return (
         name_no_ext.startswith("test_")
         or name_no_ext.endswith("_test")
         or name_no_ext.endswith(".test")
@@ -214,16 +151,16 @@ def is_auxiliary_path(filepath: Optional[str]) -> bool:
         or name_no_ext.endswith(".spec")
         or name_no_ext.endswith("_bench")
         or name_no_ext.endswith(".bench")
-    ):
-        return True
-    return False
+    )
 
 
-def score_definition_candidate(defn: Dict[str, Any], filepath: Optional[str] = None,
-                               start_line: int = 1, end_line: int = 1) -> int:
-    """Compute a deterministic score for canonical symbol disambiguation.
-    Score = (is_primary * 100) + (has_signature * 10) + (has_docstring * 5) + min(span, 50).
-    """
+def score_definition_candidate(
+    defn: Dict[str, Any],
+    filepath: Optional[str] = None,
+    start_line: int = 1,
+    end_line: int = 1,
+) -> int:
+    """Compute a deterministic score for canonical symbol disambiguation."""
     fp = filepath or defn.get("filepath")
     is_primary = 1 if (fp and not is_auxiliary_path(fp)) else 0
     sig = defn.get("signature")
@@ -275,22 +212,16 @@ def sanitize_docstring(doc: Optional[str]) -> str:
     return doc.replace("```", "'''")
 
 
-def resolve_symbol_in_repo(repository, target: str) -> Optional[tuple]:
-    """Resolve a target string to an exact symbol tuple from the database.
-    Tries exact match, dot-to-delimiter patterns, and priority-scored candidates
-    (preferring production src/ over tests/ and excluding parameter definitions).
-    Returns (symbol, filepath, kind, signature, docstring, body_hash) or None.
-    """
+def resolve_symbol_in_repo(repository, target: str) -> Optional[Dict[str, Any]]:
+    """Resolve a target string to an exact symbol dict from the database."""
     target_clean = target.strip()
     if not target_clean:
         return None
 
-    # 1. Exact match
     exact = repository.graph.get_symbol(target_clean)
     if exact:
         return exact
 
-    # 2. Match by substring/keyword via GraphStore
     t = target_clean[:-2] if target_clean.endswith("()") else target_clean
     patterns = [t]
     if "." in t:
@@ -309,8 +240,8 @@ def resolve_symbol_in_repo(repository, target: str) -> Optional[tuple]:
                 dem = s.get("clean_symbol") or demangle_scip_symbol(s["symbol"])
                 dem_no_parens = dem[:-2] if dem.endswith("()") else dem
                 is_test = is_auxiliary_path(s.get("filepath"))
-                exact = (dem == t or dem_no_parens == t or dem.endswith("." + t) or dem_no_parens.endswith("." + t))
-                return (0 if exact else 1, 1 if is_test else 0, len(s["symbol"]))
+                is_exact = (dem == t or dem_no_parens == t or dem.endswith("." + t) or dem_no_parens.endswith("." + t))
+                return (0 if is_exact else 1, 1 if is_test else 0, len(s["symbol"]))
 
             candidates.sort(key=score)
             return candidates[0]
@@ -358,9 +289,12 @@ def is_test_caller(sym: str, filepath: Optional[str] = None, role: int = 0) -> b
         ):
             return True
     s_clean = demangle_scip_symbol(sym).lower()
-    if s_clean.startswith("test_") or s_clean.endswith("_test") or ".test_" in s_clean or "::test_" in s_clean:
-        return True
-    return False
+    return (
+        s_clean.startswith("test_")
+        or s_clean.endswith("_test")
+        or ".test_" in s_clean
+        or "::test_" in s_clean
+    )
 
 
 def detect_entry_point(sym: str, filepath: Optional[str] = None, incoming_count: int = 0) -> Optional[str]:
@@ -377,4 +311,3 @@ def detect_entry_point(sym: str, filepath: Optional[str] = None, incoming_count:
     if incoming_count == 0 and not is_test_caller(sym, filepath):
         return "Root Caller (No Upstream)"
     return None
-

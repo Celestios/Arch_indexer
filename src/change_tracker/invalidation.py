@@ -41,7 +41,7 @@ def expand_changed_files(
 
         for fp in changed_files:
             fp_norm = fp.replace("\\", "/")
-            old_syms = repository.graph.get_symbols_in_file(fp_norm)
+            old_syms = repository.graph.get_symbols_for_files([fp_norm])
             old_map = {s["symbol"]: s.get("signature") for s in old_syms}
             new_map = new_by_file.get(fp_norm, {})
 
@@ -74,3 +74,4 @@ def expand_changed_files(
         print(f"[Invalidation] Expanded {len(changed_files)} changed files to {len(expanded)} (depth {max_depth})")
 
     return expanded
+

@@ -97,7 +97,7 @@ class FfiLinker:
             })
 
         if edges_to_insert:
-            self.repository.graph.add_edges_bulk(edges_to_insert)
+            self.repository.graph.upsert_edges(edges_to_insert)
             print(f"[FFI Link] Created {len(edges_to_insert)} FFI_Binds edges.")
 
         return len(edges_to_insert)
@@ -108,7 +108,7 @@ class FfiLinker:
             symbols_needed.add(m.source_symbol)
             symbols_needed.add(m.target_symbol)
 
-        existing_symbols = self.repository.graph.get_existing_symbols(symbols_needed)
+        existing_symbols = set(self.repository.graph.get_symbols_by_ids(list(symbols_needed)).keys())
 
         return [
             m for m in matches
@@ -116,7 +116,7 @@ class FfiLinker:
         ]
 
     def _clear_old_ffi_edges(self):
-        self.repository.graph.delete_edges_by_relation("FFI_Binds")
+        self.repository.graph.delete_edges(relation="FFI_Binds")
 
     def link_scip_bridges(self) -> int:
         """
@@ -127,7 +127,7 @@ class FfiLinker:
         - Normalizes callable and class/struct names (camelCase <-> snake_case, newInstance <-> new).
         - Retains backward compatibility for legacy flutter_rust_bridge SCIP naming patterns.
         """
-        rows = self.repository.graph.get_all_symbols_summary()
+        rows = self.repository.graph.get_all_symbols()
         if not rows:
             return 0
 
@@ -228,8 +228,9 @@ class FfiLinker:
                         })
 
         if edges_to_insert:
-            self.repository.graph.add_edges_bulk(edges_to_insert)
+            self.repository.graph.upsert_edges(edges_to_insert)
             print(f"[Bridge Link] Created {len(edges_to_insert)} cross-language bridge edges.")
             return len(edges_to_insert)
 
         return 0
+

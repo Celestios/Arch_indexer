@@ -2,78 +2,60 @@ import sys
 from typing import Dict, List, Any
 from collections import deque
 
+from utils.arch_config import ArchConfig
+
+
 class MetadataPropagator:
-    """
-    Propagates symbol metadata downstream or upstream on the call graph using LPA or iterative worklist algorithms.
-    """
+    """Propagates symbol metadata downstream or upstream on the call graph via worklist fixed-point."""
 
     def run_propagation(
         self,
         symbol_classifications: Dict[str, Dict[str, Any]],
         all_edges: List[Dict[str, Any]],
-        config: Dict[str, Any]
+        config: Any,
     ) -> Dict[tuple, str]:
-        """
-        Runs the dynamic fixed-point worklist propagation algorithm on the call graph.
-        Returns a predecessor mapping (child, field_name) -> parent to trace the origin of values.
-        """
+        cfg = config if isinstance(config, ArchConfig) else ArchConfig.from_dict(config)
+
         propagation_fields = {}
-        for prefix, prefix_conf in config.items():
-            auto_fields = prefix_conf.get("automatic_fields", {})
-            for field_name, field_conf in auto_fields.items():
+        for _, prefix_conf in cfg.items():
+            for field_name, field_conf in prefix_conf.automatic_fields.items():
                 if field_conf.get("handler") == "propagation":
                     propagation_fields[field_name] = {
                         "direction": field_conf.get("propagation_direction", "upstream"),
                         "weights": field_conf.get("weights") or {},
                         "barriers": set(field_conf.get("barriers") or []),
-                        "barrier_field": field_conf.get("barrier_field") or field_name,
+                        "barrier_field": field_conf.barrier_field,
                         "values": field_conf.get("values") or [],
-                        "default": field_conf.get("default")
+                        "default": field_conf.get("default"),
                     }
 
         if not propagation_fields:
             return {}
 
-        # Build adjacency lists for the call graph
-        adj_forward = {}
-        adj_backward = {}
+        adj_forward: Dict[str, set] = {}
+        adj_backward: Dict[str, set] = {}
         for edge in all_edges:
-            src = edge["source"]
-            tgt = edge["target"]
+            src, tgt = edge["source"], edge["target"]
             if src in symbol_classifications and tgt in symbol_classifications:
                 adj_forward.setdefault(src, set()).add(tgt)
                 adj_backward.setdefault(tgt, set()).add(src)
 
-        # Tracks predecessor mappings: (child, field_name) -> parent
-        propagation_sources = {}
+        propagation_sources: Dict[tuple, str] = {}
 
         for field_name, p_cfg in propagation_fields.items():
             direction = p_cfg["direction"]
-            weights = p_cfg["weights"]
+            weights = p_cfg["weights"] or {val: idx for idx, val in enumerate(p_cfg["values"])}
             barriers = p_cfg["barriers"]
-            barrier_field = p_cfg.get("barrier_field") or field_name
-            values = p_cfg["values"]
+            barrier_field = p_cfg["barrier_field"]
             default_val = p_cfg["default"]
 
-            # Map values to integer weights (priority)
-            if not weights:
-                weights = {val: idx for idx, val in enumerate(values)}
-
-            def get_weight(val):
+            def get_weight(val, _w=weights):
                 if val is None or val == "Unknown":
                     return -1
-                return weights.get(val, 0)
+                return _w.get(val, 0)
 
-            # Determine neighbors traversal function
-            # Use default argument binding to avoid late-binding closure over mutable dict
-            if direction == "upstream":
-                _adj = adj_backward
-                get_neighbors = lambda n, _a=_adj: _a.get(n, [])
-            else:
-                _adj = adj_forward
-                get_neighbors = lambda n, _a=_adj: _a.get(n, [])
+            _adj = adj_backward if direction == "upstream" else adj_forward
 
-            # Initialize worklist with all symbols having non-default values
             worklist = []
             visited = set()
             for sym, data in symbol_classifications.items():
@@ -94,16 +76,13 @@ class MetadataPropagator:
                 n_val = symbol_classifications[n]["fields"].get(field_name, default_val)
                 n_weight = get_weight(n_val)
 
-                for m in get_neighbors(n):
-                    # Check barriers on neighbor node `m`
+                for m in _adj.get(n, ()):
                     m_barrier_val = symbol_classifications[m]["fields"].get(barrier_field, default_val)
                     if m_barrier_val in barriers:
                         continue
 
                     m_val = symbol_classifications[m]["fields"].get(field_name, default_val)
-                    m_weight = get_weight(m_val)
-
-                    if n_weight > m_weight:
+                    if n_weight > get_weight(m_val):
                         symbol_classifications[m]["fields"][field_name] = n_val
                         propagation_sources[(m, field_name)] = n
                         if m not in visited:
@@ -114,7 +93,7 @@ class MetadataPropagator:
                 print(
                     f"[MetadataPropagator] Warning: Worklist propagation for field '{field_name}' "
                     f"reached maximum iteration cap ({max_iterations}) before reaching a fixed point.",
-                    file=sys.stderr
+                    file=sys.stderr,
                 )
 
         return propagation_sources

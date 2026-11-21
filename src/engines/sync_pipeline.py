@@ -1,12 +1,9 @@
-"""
-Unified synchronization pipeline across AST extraction, SCIP semantic indexing, and FFI bridging.
-Single source of truth used by CLI init, MCP update, and filesystem watcher.
-"""
+"""Unified synchronization pipeline across Tree-sitter AST, SCIP semantic indexing, and FFI bridging."""
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Any
 
 from engines.scip.wrapper import detect_languages, run_indexer, parse_index, ingest_index
-from engines.treesitter import TreesitterEngine
+from engines.treesitter import sync_project_to_db
 from engines.ffi_linker import FfiLinker
 
 
@@ -19,12 +16,7 @@ def sync_workspace(
     run_ffi: bool = True,
     package_targets: Optional[Set[tuple[str, Path]]] = None,
 ) -> Dict[str, Any]:
-    """
-    Performs two-tiered synchronization:
-    1. Fast Tree-sitter AST extraction (< 2ms per file) for declarations, signatures, docstrings, and metrics.
-    2. SCIP semantic indexing for cross-file call graphs, occurrences, and diagnostics.
-    3. Cross-language FFI bridge linking when multiple languages are present.
-    """
+    """Performs two-tiered synchronization: Tier-1 Tree-sitter AST, Tier-2 SCIP graph, and FFI linking."""
     if package_targets:
         target_langs = list({lang for lang, _ in package_targets})
     else:
@@ -39,18 +31,14 @@ def sync_workspace(
             "ffi_edges_created": 0,
         }
 
-    # Stage 1: Tree-sitter AST Sync
     ast_count = 0
     try:
-        ast_count = TreesitterEngine.sync_project_to_db(
-            repository, project_root, filepaths=dirty_files, languages=target_langs
-        )
+        ast_count = sync_project_to_db(repository, project_root, filepaths=dirty_files, languages=target_langs)
     except Exception:
         pass
 
-    # Stage 2: SCIP Semantic Graph Sync
-    indexed = []
-    failed = []
+    indexed: List[str] = []
+    failed: List[str] = []
     targets = package_targets or {(lang, project_root) for lang in target_langs}
     for lang, pkg_root in targets:
         index_path = run_indexer(pkg_root, lang)
@@ -59,16 +47,13 @@ def sync_workspace(
             ingest_index(repository, parsed, project_root=project_root, force=force)
             if lang not in indexed:
                 indexed.append(lang)
-        else:
-            if lang not in failed:
-                failed.append(lang)
+        elif lang not in failed:
+            failed.append(lang)
 
-    # Stage 3: FFI Bridge Linking
     ffi_edges = 0
-    if run_ffi and (len(target_langs) > 1 or ("dart" in target_langs and "rust" in target_langs)):
+    if run_ffi and len(target_langs) > 1:
         try:
-            linker = FfiLinker(repository)
-            ffi_edges = linker.link_scip_bridges()
+            ffi_edges = FfiLinker(repository).link_scip_bridges()
         except Exception:
             pass
 

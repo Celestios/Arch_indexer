@@ -39,7 +39,7 @@ def handle_impact(symbol: str, max_depth: int, repository) -> str:
     exposed interface callers, and internal/subsystem downstream dependencies per method.
     """
     resolved = resolve_symbol_in_repo(repository, symbol)
-    db_symbol = (resolved["symbol"] if isinstance(resolved, dict) else resolved[0]) if resolved else symbol
+    db_symbol = resolved["symbol"] if resolved else symbol
     clean_focal = demangle_scip_symbol(db_symbol)
 
     is_cls, _ = is_class_symbol(repository, db_symbol)
@@ -101,7 +101,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     constructor_sym = f"{prefix}__init__()."
     target_symbols = [db_symbol, constructor_sym]
 
-    direct_edges = repository.graph.get_edges_by_targets(target_symbols)
+    direct_edges = repository.graph.get_edges(targets=target_symbols)
 
     direct_usages = []
     seen_sources = set()
@@ -141,7 +141,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     for m_sym in methods_list:
         clean_m = demangle_scip_symbol(m_sym)
         short_m = clean_m.split(".")[-1]
-        incoming = repository.graph.get_incoming_edges(m_sym)
+        incoming = repository.graph.get_edges(target=m_sym)
         ext_callers = []
         for edge in incoming:
             src = edge["source"]
@@ -163,18 +163,16 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     md.append("")
 
     if all_caller_syms:
-        meta_callers = repository.graph.get_symbols_metadata_batch(list(all_caller_syms))
+        meta_callers = repository.graph.get_symbols_by_ids(list(all_caller_syms))
         class_tests = []
         class_roots = []
         for c_sym in all_caller_syms:
             meta = meta_callers.get(c_sym, {})
             fp = meta.get("filepath")
-            defn = meta.get("definition")
-            r = defn.get("role", 0) if defn else 0
-            if is_test_caller(c_sym, fp, r):
+            if is_test_caller(c_sym, fp):
                 class_tests.append((demangle_scip_symbol(c_sym), fp))
             else:
-                inc_count = len(repository.graph.get_incoming_edges(c_sym))
+                inc_count = len(repository.graph.get_edges(target=c_sym))
                 ep = detect_entry_point(c_sym, fp, inc_count)
                 if ep:
                     class_roots.append((demangle_scip_symbol(c_sym), fp, ep))
@@ -199,7 +197,7 @@ def _handle_class_impact(repository, db_symbol: str, clean_focal: str, max_depth
     for m_sym in methods_list:
         clean_m = demangle_scip_symbol(m_sym)
         short_m = clean_m.split(".")[-1]
-        outgoing = repository.graph.get_outgoing_edges(m_sym)
+        outgoing = repository.graph.get_edges(source=m_sym)
         internal_calls = []
         external_calls = []
         for edge in outgoing:
@@ -241,7 +239,7 @@ def _handle_symbol_impact(repository, db_symbol: str, clean_focal: str, max_dept
     downstream = [item for item in raw_downstream if not is_noisy_symbol(item.get("symbol", ""))]
 
     caller_syms = [item["symbol"] for item in upstream]
-    meta_batch = repository.graph.get_symbols_metadata_batch(caller_syms) if caller_syms else {}
+    meta_batch = repository.graph.get_symbols_by_ids(caller_syms) if caller_syms else {}
 
     test_callers = []
     root_entry_points = []
@@ -251,13 +249,11 @@ def _handle_symbol_impact(repository, db_symbol: str, clean_focal: str, max_dept
         sym = item["symbol"]
         meta = meta_batch.get(sym, {})
         fp = meta.get("filepath")
-        defn = meta.get("definition")
-        role = defn.get("role", 0) if defn else 0
-        if is_test_caller(sym, fp, role):
+        if is_test_caller(sym, fp):
             test_callers.append((item, fp))
         else:
             production_callers.append((item, fp))
-            incoming_edges = repository.graph.get_incoming_edges(sym)
+            incoming_edges = repository.graph.get_edges(target=sym)
             incoming_count = len(incoming_edges)
             entry_type = detect_entry_point(sym, fp, incoming_count)
             if entry_type:
@@ -323,4 +319,5 @@ def _handle_symbol_impact(repository, db_symbol: str, clean_focal: str, max_dept
     md.append("")
 
     return "\n".join(md)
+
 

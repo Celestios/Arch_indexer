@@ -1,4 +1,4 @@
-from auditor.analyzer import Auditor
+from interface.tools.clear_pending import handle_clear_pending
 from utils.session import workspace_session
 
 
@@ -11,8 +11,5 @@ def register(subparsers):
 
 def cmd_clear_pending(args):
     """Clears all pending audit flags in the database."""
-    with workspace_session(args) as (project_root, arch_dir, repository):
-        repository.workspace.clear_all_pending_audits(args.justification)
-        auditor = Auditor(repository, project_root)
-        auditor.run_audit()
-        print("Successfully cleared pending audit status for all files.")
+    with workspace_session(args) as (project_root, _, repository):
+        print(handle_clear_pending(repository, project_root, args.justification))
