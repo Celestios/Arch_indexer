@@ -265,17 +265,31 @@ async def context(filepaths: Union[List[str], str], project_root: str, ctx: Cont
 
 
 @_tool()
-async def impact(symbol: str, project_root: str, max_depth: int = 3, ctx: Context = None) -> str:
+async def impact(
+    symbol: str,
+    project_root: str,
+    max_depth: int = 4,
+    direction: str = "upstream",
+    max_nodes: int = 50,
+    ctx: Context = None,
+) -> str:
     """
-    Performs blast radius analysis by computing the transitive closure of upstream callers and downstream callees up to max_depth.
+    Performs blast radius analysis by computing the transitive call tree up to max_depth.
     Use this tool when evaluating the ripple effects of proposed refactors or deletions.
     symbol: Focal symbol identifier to analyze.
     project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    max_depth: Maximum call graph traversal depth (default 3).
+    max_depth: Maximum call graph traversal depth (default 4).
+    direction: 'upstream' (callers, default), 'downstream' (callees), or 'both'.
+    max_nodes: Maximum number of tree nodes rendered per direction (default 50).
     """
+    direction = direction.lower()
+    valid, msg = validate_direction(direction)
+    if not valid:
+        return f"Error: {msg}"
+
     try:
         _, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        return handle_impact(symbol, max_depth, repository)
+        return handle_impact(symbol, max_depth, repository, direction=direction, max_nodes=max_nodes)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -513,4 +527,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

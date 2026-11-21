@@ -57,50 +57,70 @@ class AnalyticsStore(BaseRepository):
         )
         return row["cnt"] if row else 0
 
-    def get_transitive_closure(self, symbol: str, max_depth: int = 3) -> Dict[str, List[Dict[str, Any]]]:
-        """BFS graph traversal finding upstream (callers) and downstream (callees) symbols."""
-        upstream = []
-        downstream = []
+    def get_transitive_closure(
+        self,
+        symbol: str,
+        max_depth: int = 4,
+        direction: str = "both",
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """BFS graph traversal finding upstream (callers) and/or downstream (callees) symbols."""
+        upstream: List[Dict[str, Any]] = []
+        downstream: List[Dict[str, Any]] = []
+        dir_norm = (direction or "both").lower()
 
-        visited = {symbol}
-        current_frontier = {symbol: [symbol]}
-        for depth in range(max_depth):
-            if not current_frontier:
-                break
-            nodes = list(current_frontier.keys())
-            rows = self._fetch_all(
-                "SELECT source, target, relation FROM edges WHERE target IN (SELECT UNNEST(?::VARCHAR[]))",
-                (nodes,),
-            )
-            next_frontier = {}
-            for r in rows:
-                caller, tgt, rel = r["source"], r["target"], r["relation"]
-                if caller not in visited:
-                    visited.add(caller)
-                    new_path = [caller] + current_frontier[tgt]
-                    upstream.append({"symbol": caller, "depth": depth + 1, "path": new_path, "relation": rel})
-                    next_frontier[caller] = new_path
-            current_frontier = next_frontier
+        if dir_norm in ("upstream", "both"):
+            visited = {symbol}
+            current_frontier = {symbol: [symbol]}
+            for depth in range(max_depth):
+                if not current_frontier:
+                    break
+                nodes = list(current_frontier.keys())
+                rows = self._fetch_all(
+                    "SELECT source, target, relation FROM edges WHERE target IN (SELECT UNNEST(?::VARCHAR[]))",
+                    (nodes,),
+                )
+                next_frontier = {}
+                for r in rows:
+                    caller, tgt, rel = r["source"], r["target"], r["relation"]
+                    if caller not in visited:
+                        visited.add(caller)
+                        new_path = [caller] + current_frontier[tgt]
+                        upstream.append({
+                            "symbol": caller,
+                            "parent": tgt,
+                            "depth": depth + 1,
+                            "path": new_path,
+                            "relation": rel,
+                        })
+                        next_frontier[caller] = new_path
+                current_frontier = next_frontier
 
-        visited = {symbol}
-        current_frontier = {symbol: [symbol]}
-        for depth in range(max_depth):
-            if not current_frontier:
-                break
-            nodes = list(current_frontier.keys())
-            rows = self._fetch_all(
-                "SELECT target, source, relation FROM edges WHERE source IN (SELECT UNNEST(?::VARCHAR[]))",
-                (nodes,),
-            )
-            next_frontier = {}
-            for r in rows:
-                callee, src, rel = r["target"], r["source"], r["relation"]
-                if callee not in visited:
-                    visited.add(callee)
-                    new_path = current_frontier[src] + [callee]
-                    downstream.append({"symbol": callee, "depth": depth + 1, "path": new_path, "relation": rel})
-                    next_frontier[callee] = new_path
-            current_frontier = next_frontier
+        if dir_norm in ("downstream", "both"):
+            visited = {symbol}
+            current_frontier = {symbol: [symbol]}
+            for depth in range(max_depth):
+                if not current_frontier:
+                    break
+                nodes = list(current_frontier.keys())
+                rows = self._fetch_all(
+                    "SELECT target, source, relation FROM edges WHERE source IN (SELECT UNNEST(?::VARCHAR[]))",
+                    (nodes,),
+                )
+                next_frontier = {}
+                for r in rows:
+                    callee, src, rel = r["target"], r["source"], r["relation"]
+                    if callee not in visited:
+                        visited.add(callee)
+                        new_path = current_frontier[src] + [callee]
+                        downstream.append({
+                            "symbol": callee,
+                            "parent": src,
+                            "depth": depth + 1,
+                            "path": new_path,
+                            "relation": rel,
+                        })
+                        next_frontier[callee] = new_path
+                current_frontier = next_frontier
 
         return {"upstream": upstream, "downstream": downstream}
 
@@ -116,3 +136,4 @@ class AnalyticsStore(BaseRepository):
             "definitions_count": def_row["cnt"] if def_row else 0,
             "references_count": totals["occurrences"],
         }
+

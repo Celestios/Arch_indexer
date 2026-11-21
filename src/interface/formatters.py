@@ -319,8 +319,6 @@ def format_lookup_symbol(
             entry["roles"].add("[Mutates]")
         if role & 8:
             entry["roles"].add("[Reads]")
-        if role & 0x20:
-            entry["roles"].add("[Test]")
 
     def _format_lines(line_tuples: List[Tuple[int, int]]) -> str:
         unique_ranges = []
@@ -334,7 +332,7 @@ def format_lookup_symbol(
         if "Definition" in role_set and len(role_set) == 1:
             return "Definition"
         is_ref = "Reference" in role_set or not role_set
-        tags = [t for t in ("[Mutates]", "[Reads]", "[Test]") if t in role_set]
+        tags = [t for t in ("[Mutates]", "[Reads]") if t in role_set]
         if "Definition" in role_set:
             tags.append("[Def]")
         tag_str = " ".join(tags)
@@ -487,3 +485,4 @@ def format_lookup_file(
         md.append("")
 
     return "\n".join(md)
+

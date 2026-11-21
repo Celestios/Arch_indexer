@@ -1,28 +1,56 @@
-from pathlib import Path
+import json
+import sys
+from pathlib import Path, PurePosixPath
 from typing import Set, Optional, List
 
-from utils.helpers import load_config
+from utils.arch_config import ArchConfig
+from utils.helpers import config_path_for, load_config
+
+
+def _load_scope_config(project_root: Path) -> Optional[ArchConfig]:
+    """Loads ArchConfig for directory/exclusion filtering without collapsing on rule-validation errors."""
+    config = load_config(project_root)
+    if config is not None and (config.prefixes or config.exclude):
+        return config
+
+    config_path = config_path_for(project_root)
+    if not config_path.exists():
+        return config
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        fallback = ArchConfig.from_dict(raw)
+        if fallback.prefixes or fallback.exclude:
+            print(
+                f"[Arch] Warning: {config_path} has validation errors; "
+                "using its directory prefixes and exclude patterns for indexing scope.",
+                file=sys.stderr,
+            )
+            return fallback
+    except Exception:
+        pass
+    return config
 
 
 def load_include_dirs(project_root: Path) -> Optional[Set[str]]:
     """Load included directories from .arch/config.json keys.
-    Each top-level key with a dictionary value represents a directory to index.
-    Returns None if config is empty or missing.
+    Returns None if no directory prefixes are configured.
     """
-    config = load_config(project_root)
-    if not config:
+    config = _load_scope_config(project_root)
+    if config is None:
         return None
     dirs = [k for k in config.prefixes.keys() if k != "."]
     return set(dirs) if dirs else None
 
 
 def load_exclude_patterns(project_root: Optional[Path]) -> List[str]:
-    """Load top-level exclusion patterns from .arch/config.json 'exclude' key.
-    Can be a list of strings (e.g. ['lib/src/**', '**/target/**']).
-    """
+    """Load top-level exclusion patterns from .arch/config.json 'exclude' key."""
     if not project_root:
         return []
-    config = load_config(project_root)
+    config = _load_scope_config(project_root)
+    if config is None:
+        return []
     return list(config.exclude)
 
 
@@ -33,17 +61,14 @@ DEFAULT_EXCLUDED_DIRS = {
 
 def matches_glob(rel_path: str, pattern: str) -> bool:
     """Matches a relative path against a glob pattern in a cross-platform way."""
-    from pathlib import PurePosixPath
     norm_path = rel_path.replace("\\", "/").strip("/")
     norm_pat = pattern.replace("\\", "/").strip("/")
 
-    # Handle recursive directory prefix pattern like "lib/src/**"
     if norm_pat.endswith("/**"):
         prefix = norm_pat[:-3]
         if norm_path == prefix or norm_path.startswith(prefix + "/"):
             return True
 
-    # If pattern has no wildcards, treat as exact or directory prefix match
     if not any(c in norm_pat for c in "*?[]"):
         if norm_path == norm_pat or norm_path.startswith(norm_pat + "/"):
             return True
@@ -85,8 +110,12 @@ def is_included(rel_path: str, include_dirs: Set[str], exclude_patterns: Optiona
     return False
 
 
-def filter_paths(paths, project_root: Path, include_dirs: Optional[Set[str]] = None,
-                 exclude_patterns: Optional[List[str]] = None):
+def filter_paths(
+    paths,
+    project_root: Path,
+    include_dirs: Optional[Set[str]] = None,
+    exclude_patterns: Optional[List[str]] = None,
+):
     """Filter paths, keeping only those within included directories and not excluded."""
     if include_dirs is None:
         include_dirs = load_include_dirs(project_root)
@@ -107,4 +136,3 @@ def filter_paths(paths, project_root: Path, include_dirs: Optional[Set[str]] = N
             continue
         if is_included(str(rel), include_dirs, exclude_patterns):
             yield p
-

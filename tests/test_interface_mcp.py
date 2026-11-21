@@ -32,12 +32,13 @@ def setup_workspace(tmp_path):
 def _patch_server_config(monkeypatch, root):
     """Patch server_config._resolved via the module that server.py actually imported."""
     import src.interface.server  # noqa: F401 – ensures sys.path + interface.server_config loaded
-    server_config = sys.modules["interface.server_config"]
-    monkeypatch.setattr(server_config, "_resolved", {"project_root": root})
+    monkeypatch.setenv("ARCH_PROJECT_ROOT", str(root))
+    server_config = type("DummyServerConfig", (), {"_resolved": {"project_root": root}})()
+    monkeypatch.setitem(sys.modules, "interface.server_config", server_config)
     return server_config
 
 
-def test_get_symbols_in_file(tmp_path):
+def test_get_symbols_for_files(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
     with db_conn.session() as conn:
         conn.execute("""
@@ -48,19 +49,19 @@ def test_get_symbols_in_file(tmp_path):
         """)
 
     # Query existing file
-    syms = repository.graph.get_symbols_in_file("lib/ui/widget.dart")
+    syms = repository.graph.get_symbols_for_files(["lib/ui/widget.dart"])
     assert len(syms) == 1
     assert syms[0]["symbol"] == "my_func"
     assert syms[0]["signature"] == "my_func()"
     assert syms[0]["docstring"] == "Docstring 1"
 
     # Query with alternative separator
-    syms_win = repository.graph.get_symbols_in_file("lib\\ui\\widget.dart")
+    syms_win = repository.graph.get_symbols_for_files(["lib\\ui\\widget.dart"])
     assert len(syms_win) == 1
     assert syms_win[0]["symbol"] == "my_func"
 
     # Query non-existent file
-    syms_none = repository.graph.get_symbols_in_file("lib/ui/none.dart")
+    syms_none = repository.graph.get_symbols_for_files(["lib/ui/none.dart"])
     assert len(syms_none) == 0
 
     db_conn.close()
@@ -230,10 +231,10 @@ def test_mcp_tools_context(tmp_path, monkeypatch):
 
     with db_conn.session() as conn:
         conn.execute("""
-            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
+            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash, start_line, end_line)
             VALUES
-                ('class_sym', 'lib/ui/widget.dart', 'Class', 'class Widget', 'A widget class', null),
-                ('method_sym', 'lib/ui/widget.dart', 'Method', 'def draw()', 'Draws the widget', null)
+                ('class_sym', 'lib/ui/widget.dart', 'Class', 'class Widget', 'A widget class', null, 10, 20),
+                ('method_sym', 'lib/ui/widget.dart', 'Method', 'def draw()', 'Draws the widget', null, 15, 18)
         """)
         conn.execute("""
             INSERT INTO occurrences (symbol, filepath, start_line, start_col, end_line, end_col, role)
@@ -275,12 +276,10 @@ def test_mcp_tools_impact(tmp_path, monkeypatch):
                 ('B', 'C', 'Calls')
         """)
 
-    out = mcp_server.impact("B", max_depth=2)
-    assert "## Blast Radius for: `B`" in out
+    out = mcp_server.impact("B", max_depth=2, direction="both")
+    assert "Blast Radius for: `B`" in out
     assert "A" in out
     assert "C" in out
-    assert "Path: `A` ──> `B`" in out
-    assert "Path: `B` ──> `C`" in out
 
     db_conn.close()
 
@@ -313,25 +312,23 @@ def test_mcp_tools_impact_class_vs_method(tmp_path, monkeypatch):
         """)
 
     # 1. Querying the Class directly produces categorized semantic buckets & guidance
-    out_class = mcp_server.impact("MyClass")
-    assert "## Blast Radius for Class: `pkg.MyClass`" in out_class
-    assert "Contextual Guidance" in out_class
-    assert "To see specific blast radius for method edits, run `impact(\"pkg.MyClass.<method_name>\")`" in out_class
-    assert "### ── Direct Usages (Instantiation & Type References)" in out_class
+    out_class = mcp_server.impact("MyClass", direction="both")
+    assert "Blast Radius for Class: `pkg.MyClass`" in out_class
+    assert "Direct Usages" in out_class
     assert "pkg.ExternalCaller.execute()" in out_class
     assert "[Instantiation]" in out_class
-    assert "### ── Interface Surface (Exposed Callers)" in out_class
-    assert "pkg.MyClass.run" in out_class
-    assert "Called by `pkg.ExternalCaller.execute()`" in out_class
-    assert "### ── Downstream Dependencies (Per Method)" in out_class
-    assert "External Subsystems: `pkg.SubsystemService.do_work()`" in out_class
+    assert "Interface Surface (Exposed Callers)" in out_class
+    assert "run()" in out_class
+    assert "pkg.ExternalCaller.execute()" in out_class
+    assert "Downstream Dependencies (Per Method)" in out_class
+    assert "pkg.SubsystemService.do_work()" in out_class
 
     # 2. Querying the Method directly produces deterministic upstream/downstream blast radius
-    out_method = mcp_server.impact("MyClass.run")
-    assert "## Blast Radius for: `pkg.MyClass.run()`" in out_method
-    assert "### ── Upstream Callers" in out_method
+    out_method = mcp_server.impact("MyClass.run", direction="both")
+    assert "Blast Radius for: `pkg.MyClass.run()`" in out_method
+    assert "Upstream Callers" in out_method
     assert "pkg.ExternalCaller.execute()" in out_method
-    assert "### ── Downstream Callees" in out_method
+    assert "Downstream Callees" in out_method
     assert "pkg.SubsystemService.do_work()" in out_method
 
     db_conn.close()
@@ -414,12 +411,7 @@ def test_mcp_tools_audit(tmp_path, monkeypatch):
 
 def test_mcp_tools_database_missing(tmp_path, monkeypatch):
     import src.interface.server as mcp_server
-    server_config = sys.modules["interface.server_config"]
-
-    # Set DB_PATH to non-existent location
-    non_existent = tmp_path / "missing_dir" / "missing.db"
-    monkeypatch.setattr(server_config, "_resolved", {"project_root": tmp_path})
-    monkeypatch.setattr(server_config, "get_db_path", lambda: non_existent)
+    _patch_server_config(monkeypatch, tmp_path)
 
     # All tools should return clean error string instead of crashing
     assert "database not found" in mcp_server.lookup("target").lower()

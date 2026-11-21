@@ -33,6 +33,7 @@ def _lookup_single(target: str, repository) -> str:
 
     if exact_symbol:
         sym_name = exact_symbol["symbol"]
+        focal_fp = (exact_symbol.get("filepath") or "").replace("\\", "/")
         occs = repository.graph.get_occurrences(symbol=sym_name)
         edges = repository.graph.get_edges(symbol=sym_name)
 
@@ -50,7 +51,21 @@ def _lookup_single(target: str, repository) -> str:
             meta_batch = repository.graph.get_symbols_by_ids(list(other_syms))
             sym_fp_map = {s: meta["filepath"] for s, meta in meta_batch.items() if meta.get("filepath")}
 
-        sym_md = format_lookup_symbol(exact_symbol, occs, edges, symbol_filepath_map=sym_fp_map)
+        # Keep test callers/references out of the main table; they are listed under Covered By Tests
+        filtered_occs = [
+            o for o in occs
+            if (o.get("filepath") or "").replace("\\", "/") == focal_fp
+            or not is_test_caller("", o.get("filepath"), o.get("role", 0))
+        ]
+        filtered_edges = []
+        for e in edges:
+            src, tgt = str(e["source"]), str(e["target"])
+            other = src if tgt == sym_name else tgt
+            if is_test_caller(other, sym_fp_map.get(other)):
+                continue
+            filtered_edges.append(e)
+
+        sym_md = format_lookup_symbol(exact_symbol, filtered_occs, filtered_edges, symbol_filepath_map=sym_fp_map)
         diags = repository.quality.get_diagnostics(symbol=sym_name)
         if diags:
             diag_lines = [
@@ -63,7 +78,7 @@ def _lookup_single(target: str, repository) -> str:
                 diag_lines.append(f"| L{d['line']}:{d['col']} | `{d['severity']}` | {code_str} | {d['message']} |")
             sym_md += "\n" + "\n".join(diag_lines) + "\n"
 
-        closure = repository.analytics.get_transitive_closure(sym_name, max_depth=3)
+        closure = repository.analytics.get_transitive_closure(sym_name, max_depth=3, direction="upstream")
         up_syms = [item["symbol"] for item in closure.get("upstream", [])]
         if up_syms:
             meta_batch = repository.graph.get_symbols_by_ids(up_syms)

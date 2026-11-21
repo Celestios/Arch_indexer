@@ -15,7 +15,7 @@ def _resolve_changed_and_deleted(
     parsed_data: Dict[str, Any],
     project_root: Optional[Path] = None,
     force: bool = False,
-) -> Tuple[List[str], List[str], List[str], List[str]]:
+) -> Tuple[List[str], List[str], List[str], List[str], bool]:
     """Resolves changed files, deleted files, unchanged files, and hashes."""
     files_to_register = set()
     for f in parsed_data.get("files", []):
@@ -89,7 +89,7 @@ def _resolve_changed_and_deleted(
                     "Refusing to overwrite. This might be due to a failed SCIP extraction. Pass force=True to override."
                 )
 
-    return file_list, changed_files, unchanged_files, deleted_files
+    return file_list, changed_files, unchanged_files, deleted_files, bool(db_files)
 
 
 def _ingest_files_table(
@@ -266,6 +266,7 @@ def _write_index_batches(
     staged_data: Dict[str, Any],
     changed_files: List[str],
     force: bool = False,
+    had_existing_files: bool = True,
 ):
     """Performs transactional cleanup and bulk writes for symbols, occurrences, diagnostics, and edges."""
     symbols_to_ingest = staged_data["symbols_to_ingest"]
@@ -294,12 +295,11 @@ def _write_index_batches(
         edges_to_ingest = staged_data["edges_to_ingest"]
         total_edges = len(edges_to_ingest)
         print(f"[SCIP Ingest] Ingesting {total_edges} edges from changed files...")
-        for idx in range(1, total_edges + 1):
-            if idx % 100 == 0 or idx == total_edges:
-                print_progress(idx, total_edges, prefix="[SCIP Ingest] Edges")
-        repository.graph.upsert_edges(edges_to_ingest)
+        for i in range(0, total_edges, chunk_size):
+            repository.graph.upsert_edges(edges_to_ingest[i:i + chunk_size])
+            print_progress(min(i + chunk_size, total_edges), total_edges, prefix="[SCIP Ingest] Edges")
 
-        if force:
+        if force and had_existing_files:
             orphaned_edges, orphaned_occurrences = repository.graph.delete_orphaned_records()
             if orphaned_edges or orphaned_occurrences:
                 print(f"[SCIP Ingest] Cleaned up {orphaned_edges} orphaned edges, {orphaned_occurrences} orphaned occurrences")
@@ -315,7 +315,7 @@ def ingest_index(
     force: bool = False,
 ):
     """Incrementally ingests parsed SCIP symbols, reference occurrences, diagnostics, and edges."""
-    file_list, changed_files, _, deleted_files = _resolve_changed_and_deleted(
+    file_list, changed_files, _, deleted_files, had_existing_files = _resolve_changed_and_deleted(
         repository, parsed_data, project_root, force
     )
     _ingest_files_table(repository, file_list, deleted_files, project_root)
@@ -325,5 +325,6 @@ def ingest_index(
         return
 
     staged_data = _reconcile_and_stage_symbols(repository, parsed_data, changed_files)
-    _write_index_batches(repository, staged_data, changed_files, force)
+    _write_index_batches(repository, staged_data, changed_files, force, had_existing_files=had_existing_files)
     print("[SCIP Ingest] Ingestion complete.")
+

@@ -1,7 +1,6 @@
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from engines.registry import LanguageRegistry
 from utils.exclusions import load_include_dirs, load_exclude_patterns, is_included, is_excluded
 from utils.helpers import infer_scip_kind, score_definition_candidate
 
@@ -105,38 +104,18 @@ def _detect_scip_run_dir(scip_file: Path, project_root: Path, metadata_uri: Opti
         except Exception:
             pass
 
-    # 2. Dynamic fallback via LanguageRegistry based on scip_file name and project_root structure
-    lang_key = scip_file.stem
-    if lang_key.startswith("index_"):
-        lang_key = lang_key[6:]
-    spec = LanguageRegistry.get_spec(lang_key)
-    if spec is None:
-        file_name_lower = scip_file.name.lower()
-        for s in LanguageRegistry.get_all_specs():
-            if s.name in file_name_lower:
-                spec = s
-                break
-
-    if spec and spec.manifest_names:
-        exclude_patterns = load_exclude_patterns(project_root)
-        skip_parts = {".dart_tool", "dart_analyzer", "target", ".arch"}
-        for manifest in spec.manifest_names:
-            if any(project_root.glob(manifest)):
-                return project_root
-
-            sub_dir = project_root / spec.name
-            if sub_dir.is_dir() and any(sub_dir.glob(manifest)):
-                return sub_dir
-
-            for p in project_root.rglob(manifest):
-                if any(part in p.parts for part in skip_parts):
-                    continue
-                try:
-                    rel_str = str(p.relative_to(project_root)).replace("\\", "/")
-                    if is_excluded(rel_str, exclude_patterns):
-                        continue
-                except ValueError:
-                    pass
+    # 2. Fallback based on scip_file name and project_root structure
+    if "rust" in scip_file.name:
+        if (project_root / "rust" / "Cargo.toml").exists():
+            return project_root / "rust"
+        for p in project_root.rglob("Cargo.toml"):
+            if "target" not in str(p) and ".arch" not in str(p):
+                return p.parent
+    elif "dart" in scip_file.name:
+        if (project_root / "pubspec.yaml").exists():
+            return project_root
+        for p in project_root.rglob("pubspec.yaml"):
+            if ".dart_tool" not in str(p) and "dart_analyzer" not in str(p):
                 return p.parent
 
     return project_root
@@ -301,7 +280,7 @@ def parse_index(
                 continue
             start_line, start_col, end_line, end_col = r_tuple
 
-            if not is_definition:
+            if not is_definition and symbol and not symbol.startswith("local "):
                 parsed_data["occurrences"].append({
                     "symbol": symbol,
                     "filepath": resolved_filepath,
@@ -436,7 +415,7 @@ def parse_index(
     # Ensure any symbol referenced in occurrences or edges exists in parsed_data["symbols"]
     for occ in parsed_data["occurrences"]:
         sym = occ["symbol"]
-        if sym not in parsed_data["symbols"] and not sym.startswith("local "):
+        if sym and sym not in parsed_data["symbols"] and not sym.startswith("local "):
             parsed_data["symbols"][sym] = {
                 "symbol": sym,
                 "filepath": None,
@@ -466,5 +445,6 @@ def parse_index(
                 }
 
     return parsed_data
+
 
 

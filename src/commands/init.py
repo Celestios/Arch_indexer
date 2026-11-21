@@ -10,6 +10,7 @@ from engines.sync_pipeline import sync_workspace
 from engines.registry import LanguageRegistry
 from utils.session import get_project_root
 
+
 def register(subparsers):
     p = subparsers.add_parser("init", help="Initialize workspace and index symbols")
     p.add_argument("project_root", nargs="?", default=".", help="Project root directory")
@@ -42,8 +43,12 @@ def _select_languages(languages):
         return languages
 
 
-def _select_include_dirs(project_root, arch_dir, force: bool = False):
-    """Interactively prompt user to select directories to index if not configured. Writes selection to config.json."""
+def _select_include_dirs(project_root: Path, arch_dir: Path, force: bool = False):
+    """
+    Reuses existing configured directories from .arch/config.json (never prompts on --force).
+    On first-time initialization with no configured directory prefixes, discovers real top-level
+    code directories and writes the selection to config.json.
+    """
     config_path = arch_dir / "config.json"
     existing_config = {}
     if config_path.exists():
@@ -53,12 +58,19 @@ def _select_include_dirs(project_root, arch_dir, force: bool = False):
         except Exception:
             existing_config = {}
 
-    # If directories are already defined in config.json and not forcing rebuild, reuse them
-    if not force and existing_config:
-        configured_dirs = [k.rstrip("/\\") for k, v in existing_config.items() if isinstance(v, dict) and k not in ("exclude", ".")]
-        if configured_dirs:
-            print(f"Using configured directories from {config_path.name}: {', '.join(configured_dirs)}")
-            return configured_dirs
+    configured_dirs = [
+        k.rstrip("/\\")
+        for k, v in existing_config.items()
+        if isinstance(v, dict) and k not in ("exclude", ".")
+    ]
+
+    if configured_dirs:
+        print(f"Using configured directories from {config_path.name}: {', '.join(configured_dirs)}")
+        return configured_dirs
+
+    if force and config_path.exists():
+        print(f"[Force] Preserving existing {config_path.name} (no directory prefixes configured; indexing workspace root).")
+        return []
 
     skip_dirs = {".git", ".arch", ".venv", "__pycache__", "node_modules", ".mypy_cache", ".pytest_cache", "build", "dist"}
     code_exts = LanguageRegistry.list_extensions()
@@ -70,8 +82,10 @@ def _select_include_dirs(project_root, arch_dir, force: bool = False):
                 rel = f.relative_to(project_root)
             except ValueError:
                 continue
+            if len(rel.parts) <= 1:
+                continue
             top = rel.parts[0]
-            if top not in skip_dirs and not top.startswith("."):
+            if top not in skip_dirs and not top.startswith(".") and (project_root / top).is_dir():
                 code_dirs.add(top)
 
     code_dirs = sorted(code_dirs, key=str.lower)
@@ -96,7 +110,6 @@ def _select_include_dirs(project_root, arch_dir, force: bool = False):
         except (KeyboardInterrupt, EOFError, ValueError):
             print("\nDefaulting to all directories.")
 
-    # Save selection into config.json
     try:
         for d in selected:
             d_key = f"{d}/"
@@ -114,9 +127,10 @@ def _select_include_dirs(project_root, arch_dir, force: bool = False):
 def cmd_init(args):
     """Initialize workspace and index symbols."""
     project_root = get_project_root(args)
+    force = getattr(args, "force", False)
 
     # 1. Workspace init
-    if getattr(args, 'force', False):
+    if force:
         arch_dir = project_root / ".arch"
         db_path = arch_dir / "arch.db"
         if db_path.exists():
@@ -125,6 +139,12 @@ def cmd_init(args):
         for f in arch_dir.glob("index_*.scip"):
             f.unlink()
             print(f"[Force] Deleted {f.name}")
+        config_path = arch_dir / "config.json"
+        if config_path.exists():
+            print(
+                f"[Force] Preserving existing {config_path}. "
+                "Edit .arch/config.json directly to change included or excluded directories."
+            )
 
     arch_dir = initialize_workspace(project_root)
     print(f"\nWorkspace folder initialized at {arch_dir}")
@@ -143,7 +163,7 @@ def cmd_init(args):
 
     # 3. User selections
     selected_languages = _select_languages(languages)
-    _select_include_dirs(project_root, arch_dir, force=getattr(args, 'force', False))
+    _select_include_dirs(project_root, arch_dir, force=force)
 
     # 4. Create shared repository for indexing and linking
     db_conn = DbConnection(arch_dir / "arch.db")
@@ -163,7 +183,7 @@ def cmd_init(args):
         repository,
         project_root,
         languages=selected_languages,
-        force=getattr(args, 'force', False),
+        force=force,
         run_ffi=True,
     )
     indexed_any = bool(sync_res["indexed_languages"] or sync_res["ast_symbol_count"] > 0)
@@ -175,7 +195,7 @@ def cmd_init(args):
 
     db_conn.close()
 
-    # 7. Summary
+    # 6. Summary
     if selected_languages:
         if indexed_any:
             print("\nIndexing completed successfully!")
@@ -187,4 +207,3 @@ def cmd_init(args):
     print("\n====================================================")
     print(" Arch setup is complete! Ready to start MCP Server. ")
     print("====================================================")
-

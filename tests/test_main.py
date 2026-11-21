@@ -73,17 +73,17 @@ def test_cmd_impact(tmp_path, capsys):
     args = type("Args", (), {
         "project_root": str(tmp_path),
         "symbol": "B",
-        "max_depth": 2
+        "max_depth": 2,
+        "direction": "both",
+        "max_nodes": 50,
     })()
 
     cmd_impact(args)
 
     captured = capsys.readouterr()
-    assert "=== Blast Radius for: B ===" in captured.out
+    assert "Blast Radius for: `B`" in captured.out
     assert "A" in captured.out
     assert "C" in captured.out
-    assert "Path: A ──> B" in captured.out
-    assert "Path: B ──> C" in captured.out
 
 
 def test_cmd_mcp(tmp_path):
