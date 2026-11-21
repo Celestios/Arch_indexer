@@ -49,7 +49,12 @@ def test_parse_index_path_normalization(mock_is_included, mock_load_include, moc
     mock_occ.symbol = "rust-analyzer cargo rust_lib_mycelium 0.3.0 crate/src/domain/contents.rs"
     mock_occ.symbol_roles = 1 # Definition
     mock_occ.range = [3, 0, 3, 61]
-    mock_doc.occurrences = [mock_occ]
+    
+    mock_occ_ref = MagicMock()
+    mock_occ_ref.symbol = "rust-analyzer cargo rust_lib_mycelium 0.3.0 crate/src/domain/contents.rs"
+    mock_occ_ref.symbol_roles = 0 # Reference
+    mock_occ_ref.range = [5, 4, 5, 20]
+    mock_doc.occurrences = [mock_occ, mock_occ_ref]
     
     mock_index.documents = [mock_doc]
     mock_index_cls.return_value = mock_index

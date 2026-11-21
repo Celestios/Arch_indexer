@@ -1,6 +1,6 @@
-import hashlib
 from typing import Optional
 from utils.session import resolve_filepath
+from utils.violation_id import ViolationId
 from auditor.analyzer import Auditor
 
 
@@ -27,8 +27,7 @@ def handle_set_status(
     repository.quality.delete_violations(filepath=resolved, origin="manual")
 
     if status_upper == "VIOLATION_DETECTED":
-        violation_text = f"manual_logical_audit_{resolved}_{justification}"
-        violation_id = hashlib.sha256(violation_text.encode("utf-8")).hexdigest()[:16]
+        violation_id = ViolationId.generate("manual_logical_audit", resolved, justification)
 
         repository.quality.add_violation(
             violation_id=violation_id,

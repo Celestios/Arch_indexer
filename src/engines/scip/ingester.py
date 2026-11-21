@@ -51,8 +51,8 @@ class IndexIngester:
         if not languages_in_index:
             if project_root:
                 try:
-                    from engines.scip.wrapper import ScipWrapper
-                    languages_in_index = set(ScipWrapper.detect_languages(project_root))
+                    from engines.scip.wrapper import detect_languages
+                    languages_in_index = set(detect_languages(project_root))
                 except Exception:
                     pass
             if not languages_in_index:
@@ -92,9 +92,8 @@ class IndexIngester:
                     unchanged_files.append(fp)
 
             if changed_files:
-                from change_tracker.invalidation import TransitiveInvalidation
-                invalidator = TransitiveInvalidation(repository, max_depth=1)
-                changed_files = list(invalidator.expand_changed_files(changed_files, new_symbols=parsed_data.get("symbols")))
+                from change_tracker.invalidation import expand_changed_files
+                changed_files = list(expand_changed_files(repository, changed_files, new_symbols=parsed_data.get("symbols"), max_depth=1))
                 print(f"[SCIP Ingest] Incremental: {len(changed_files)} to process (including dependents), {len(unchanged_files)} unchanged")
         else:
             changed_files = file_list
@@ -135,7 +134,7 @@ class IndexIngester:
         if deleted_files:
             for fp in deleted_files:
                 print(f"[SCIP Ingest] Cleaning up deleted file from database: {fp}")
-            repository.delete_files_bulk(deleted_files)
+            repository.delete_files(deleted_files)
 
         files_to_ingest = []
         for fp in file_list:
@@ -192,12 +191,20 @@ class IndexIngester:
                             line_to_existing_by_fp[fp][s_line] = sid
                             occs_by_fp[fp].append((sid, s_line))
 
-        # Map SCIP symbol definition lines from parsed occurrences
+        # Map SCIP symbol definition lines from parsed symbols and occurrences
         scip_def_lines = {}
+        for sym_id, sym_info in parsed_data.get("symbols", {}).items():
+            sym_fp = sym_info.get("filepath")
+            sym_line = sym_info.get("start_line")
+            if sym_fp and sym_line is not None:
+                fp_norm = sym_fp.replace("\\", "/")
+                scip_def_lines[(fp_norm, sym_id)] = sym_line
+
         for occ in parsed_data.get("occurrences", []):
             if (occ.get("role", 0) & 1) != 0 and occ.get("symbol") and occ.get("filepath"):
                 fp_norm = occ["filepath"].replace("\\", "/")
-                scip_def_lines[(fp_norm, occ["symbol"])] = occ["start_line"]
+                if (fp_norm, occ["symbol"]) not in scip_def_lines:
+                    scip_def_lines[(fp_norm, occ["symbol"])] = occ["start_line"]
 
         symbols_to_ingest = []
 
@@ -239,6 +246,7 @@ class IndexIngester:
                 or (sig and existing.get("signature") != sig)
                 or (doc and existing.get("docstring") != doc)
                 or (parent_sym and existing.get("parent_symbol") != parent_sym)
+                or (sym.get("start_line") is not None and existing.get("start_line") != sym.get("start_line"))
             ):
                 symbols_to_ingest.append({
                     "symbol": sym["symbol"],
@@ -249,6 +257,10 @@ class IndexIngester:
                     "docstring": doc,
                     "body_hash": effective_body_hash,
                     "parent_symbol": parent_sym,
+                    "start_line": sym.get("start_line"),
+                    "start_col": sym.get("start_col"),
+                    "end_line": sym.get("end_line"),
+                    "end_col": sym.get("end_col"),
                 })
 
         skipped = total_symbols - len(symbols_to_ingest)
@@ -302,18 +314,11 @@ class IndexIngester:
         changed_files: List[str],
         force: bool = False,
         staged_data: Optional[Dict[str, Any]] = None,
-        filtered_symbols: Optional[Dict[str, Any]] = None,
-        existing_symbols: Optional[Dict[str, Any]] = None,
-        superseded_ts_symbols: Optional[Any] = None,
     ):
         """Handles forced or incremental deletion of old symbols, occurrences, edges, and diagnostics."""
-        if staged_data:
-            if filtered_symbols is None:
-                filtered_symbols = staged_data.get("filtered_symbols")
-            if existing_symbols is None:
-                existing_symbols = staged_data.get("existing_symbols")
-
-        changed_set = {fp.replace("\\", "/") for fp in changed_files}
+        filtered_symbols = staged_data.get("filtered_symbols") if staged_data else None
+        existing_symbols = staged_data.get("existing_symbols") if staged_data else None
+        changed_set = staged_data.get("changed_set") if staged_data else {fp.replace("\\", "/") for fp in changed_files}
 
         if force:
             repository.graph.delete_edges_for_files(changed_files)
@@ -343,14 +348,17 @@ class IndexIngester:
         cls,
         repository,
         staged_data: Dict[str, Any],
+        changed_files: List[str],
         force: bool = False,
     ):
-        """Performs bulk writes for symbols, occurrences, diagnostics, and edges."""
+        """Performs transactional cleanup and bulk writes for symbols, occurrences, diagnostics, and edges."""
         symbols_to_ingest = staged_data["symbols_to_ingest"]
         print(f"[SCIP Ingest] Writing {len(symbols_to_ingest)} symbols to database...")
         sym_chunk = 10_000
 
         with repository.transaction():
+            cls._cleanup_superseded_records(repository, changed_files, force, staged_data)
+
             for i in range(0, len(symbols_to_ingest), sym_chunk):
                 chunk = symbols_to_ingest[i:i + sym_chunk]
                 repository.graph.upsert_symbols_bulk(chunk)
@@ -416,10 +424,7 @@ class IndexIngester:
         # 3. Reconcile symbols and stage records
         staged_data = cls._reconcile_and_stage_symbols(repository, parsed_data, changed_files)
 
-        # 4. Clean up superseded and removed records
-        cls._cleanup_superseded_records(repository, changed_files, force, staged_data)
-
-        # 5. Write index batches
-        cls._write_index_batches(repository, staged_data, force)
+        # 4. Write index batches (including transactional cleanup)
+        cls._write_index_batches(repository, staged_data, changed_files, force)
 
         print("[SCIP Ingest] Ingestion complete.")

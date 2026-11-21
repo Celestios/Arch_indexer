@@ -258,9 +258,9 @@ class GraphModel:
             line = def_info["start_line"] if def_info else None
             col = def_info["start_col"] if def_info else None
             end_line = def_info["end_line"] if def_info else None
-            code_text = s.get("code_block")
-            if not code_text and sym_filepath and line and end_line:
-                code_text = extract_code_slice(sym_filepath, line, end_line)
+            code_text = None
+            if sym_filepath and line and end_line:
+                code_text = extract_code_slice(sym_filepath, line, end_line, project_root=self.project_root)
 
             node_label = s["label"]
             if (parent_cls_id or ntype in (NodeType.METHOD, NodeType.CONSTRUCTOR)) and "#" in node_label:

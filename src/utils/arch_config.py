@@ -366,11 +366,29 @@ class ArchConfig(_MappingMixin):
 
         return cls.from_dict(data), val_result
 
-    @classmethod
-    def find_applicable_prefix(cls, filepath: str, config: Union["ArchConfig", Dict[str, Any]]) -> Optional[str]:
-        if isinstance(config, ArchConfig):
-            return config.get_applicable_prefix(filepath)
-        prefixes = config.get("prefixes", config) if isinstance(config, dict) else {}
+    def get_applicable_prefix(
+        self_or_filepath: Any,
+        filepath_or_config: Any = None,
+        maybe_config: Optional[Any] = None,
+    ) -> Optional[str]:
+        """Resolves the most specific directory prefix matching the filepath."""
+        if isinstance(self_or_filepath, ArchConfig):
+            target_config = maybe_config or self_or_filepath
+            filepath = filepath_or_config
+        else:
+            filepath = self_or_filepath
+            target_config = filepath_or_config
+
+        if not filepath:
+            return None
+
+        if isinstance(target_config, ArchConfig):
+            prefixes = target_config.prefixes
+        elif isinstance(target_config, dict):
+            prefixes = target_config.get("prefixes", target_config)
+        else:
+            prefixes = {}
+
         normalized_path = filepath.replace("\\", "/")
         matching = None
         for prefix in prefixes.keys():
@@ -382,48 +400,28 @@ class ArchConfig(_MappingMixin):
                     matching = prefix
         return matching
 
-    @classmethod
-    def find_applicable_config(cls, filepath: str, config: Union["ArchConfig", Dict[str, Any]]) -> Optional[Any]:
-        if isinstance(config, ArchConfig):
-            return config.get_applicable_config(filepath)
-        prefix = cls.find_applicable_prefix(filepath, config)
-        return config.get(prefix) if prefix and isinstance(config, dict) else None
-
-    def get_applicable_prefix(
-        self,
-        filepath: str,
-        config: Optional[Union["ArchConfig", Dict[str, Any]]] = None,
-    ) -> Optional[str]:
-        """Resolves the most specific directory prefix matching the filepath."""
-        if config is not None:
-            prefixes = config.prefixes if isinstance(config, ArchConfig) else config
-        else:
-            prefixes = self.prefixes
-
-        normalized_path = filepath.replace("\\", "/")
-        matching_prefix = None
-        for prefix in prefixes.keys():
-            if prefix == ".":
-                if matching_prefix is None:
-                    matching_prefix = "."
-            elif normalized_path.startswith(prefix):
-                if matching_prefix is None or len(prefix) > len(matching_prefix):
-                    matching_prefix = prefix
-        return matching_prefix
-
     def get_applicable_config(
-        self,
-        filepath: str,
-        config: Optional[Union["ArchConfig", Dict[str, Any]]] = None,
+        self_or_filepath: Any,
+        filepath_or_config: Any = None,
+        maybe_config: Optional[Any] = None,
     ) -> Optional[Any]:
         """Resolves the most specific directory prefix configuration matching the filepath."""
-        if config is not None:
-            prefixes = config.prefixes if isinstance(config, ArchConfig) else config
+        if isinstance(self_or_filepath, ArchConfig):
+            target_config = maybe_config or self_or_filepath
+            filepath = filepath_or_config
         else:
-            prefixes = self.prefixes
+            filepath = self_or_filepath
+            target_config = filepath_or_config
 
-        matching_prefix = self.get_applicable_prefix(filepath, prefixes)
-        return prefixes.get(matching_prefix) if matching_prefix else None
+        prefix = ArchConfig.get_applicable_prefix(filepath, target_config)
+        if not prefix:
+            return None
+        if isinstance(target_config, ArchConfig):
+            return target_config.prefixes.get(prefix)
+        elif isinstance(target_config, dict):
+            prefixes = target_config.get("prefixes", target_config)
+            return prefixes.get(prefix)
+        return None
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.prefixes.get(key, default)

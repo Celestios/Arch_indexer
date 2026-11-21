@@ -43,12 +43,12 @@ class TestArchConfigApplicable:
         result = config.get_applicable_config("src\\core\\utils.py")
         assert result.get("layer") == "core"
 
-    def test_find_applicable_config_on_dict(self):
+    def test_get_applicable_config_on_dict(self):
         raw = {
             "src/core/": {"layer": "core"},
             "src/": {"layer": "app"},
         }
-        res = ArchConfig.find_applicable_config("src/core/utils.py", raw)
+        res = ArchConfig.get_applicable_config("src/core/utils.py", raw)
         assert res == {"layer": "core"}
 
 

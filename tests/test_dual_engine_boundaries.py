@@ -1,12 +1,12 @@
 import pytest
-from engines.treesitter.loader import TreesitterLoader
+from engines.treesitter.loader import detect_language
 from engines.treesitter.extractor import TreesitterExtractor
 from engines.treesitter.folding import CodeFolder
 from engines.treesitter.metrics import MetricsCalculator
 
 
 def test_treesitter_loader_dart_extension():
-    lang = TreesitterLoader.detect_language("lib/main.dart")
+    lang = detect_language("lib/main.dart")
     assert lang == "dart"
 
 

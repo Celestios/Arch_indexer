@@ -143,6 +143,10 @@ class WorkspaceStore(BaseRepository):
 
     # ------------------ Co-changes Coupling Domain ------------------
 
+    def clear_co_changes(self):
+        """Clears all records from file_co_changes."""
+        self._execute("DELETE FROM file_co_changes")
+
     def record_co_changes(self, records: List[Any]):
         """Upserts a batch of CoChangeRecord tuples/objects into file_co_changes."""
         if not records:

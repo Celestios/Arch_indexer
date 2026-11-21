@@ -14,6 +14,14 @@ class LanguageSpec:
     ts_factory: Optional[str] = None
     scip_binary: Optional[str] = None
     ast_node_kinds: Optional[Dict[str, str]] = None
+    docstring_node_type: Optional[str] = None
+    container_node_types: Tuple[str, ...] = ("Class", "Interface", "Struct", "Trait")
+    impl_node_types: Tuple[str, ...] = ()
+    scip_command: Optional[Tuple[str, ...]] = None
+    scip_prerequisites: Tuple[str, ...] = ()
+    scip_index_subpath: Optional[str] = None
+    is_client_lang: bool = False
+    is_native_lang: bool = False
 
 
 class LanguageRegistry:
@@ -49,6 +57,14 @@ class LanguageRegistry:
                   ts_factory: Optional[str] = None,
                   scip_binary: Optional[str] = None,
                   ast_node_kinds: Optional[Dict[str, str]] = None,
+                  docstring_node_type: Optional[str] = None,
+                  container_node_types: Optional[Sequence[str]] = None,
+                  impl_node_types: Optional[Sequence[str]] = None,
+                  scip_command: Optional[Sequence[str]] = None,
+                  scip_prerequisites: Optional[Sequence[str]] = None,
+                  scip_index_subpath: Optional[str] = None,
+                  is_client_lang: bool = False,
+                  is_native_lang: bool = False,
                   **kwargs) -> None:
         """Register a language with its file extensions, manifests, tool names, and backend bindings."""
         if spec is None:
@@ -61,6 +77,14 @@ class LanguageRegistry:
                 ts_factory=ts_factory if ts_factory is not None else kwargs.get("ts_factory"),
                 scip_binary=scip_binary if scip_binary is not None else kwargs.get("scip_binary"),
                 ast_node_kinds=ast_node_kinds if ast_node_kinds is not None else kwargs.get("ast_node_kinds"),
+                docstring_node_type=docstring_node_type if docstring_node_type is not None else kwargs.get("docstring_node_type"),
+                container_node_types=tuple(container_node_types) if container_node_types is not None else kwargs.get("container_node_types", ("Class", "Interface", "Struct", "Trait")),
+                impl_node_types=tuple(impl_node_types or ()) if impl_node_types is not None else kwargs.get("impl_node_types", ()),
+                scip_command=tuple(scip_command) if scip_command is not None else kwargs.get("scip_command"),
+                scip_prerequisites=tuple(scip_prerequisites or ()) if scip_prerequisites is not None else kwargs.get("scip_prerequisites", ()),
+                scip_index_subpath=scip_index_subpath if scip_index_subpath is not None else kwargs.get("scip_index_subpath"),
+                is_client_lang=is_client_lang if is_client_lang is not None else kwargs.get("is_client_lang", False),
+                is_native_lang=is_native_lang if is_native_lang is not None else kwargs.get("is_native_lang", False),
             )
 
         cls._languages.add(language)
@@ -89,6 +113,29 @@ class LanguageRegistry:
     def list_extensions(cls) -> Set[str]:
         """List all registered file extensions."""
         return set(cls._extension_map.keys())
+
+    @classmethod
+    def get_client_extensions(cls) -> Set[str]:
+        """List file extensions for client-tier languages (e.g. Dart, TS, JS, Python)."""
+        exts = set()
+        for spec in cls._specs.values():
+            if spec.is_client_lang:
+                exts.update(spec.extensions)
+        return exts
+
+    @classmethod
+    def get_native_extensions(cls) -> Set[str]:
+        """List file extensions for native-tier languages (e.g. Rust, C, C++)."""
+        exts = set()
+        for spec in cls._specs.values():
+            if spec.is_native_lang:
+                exts.update(spec.extensions)
+        return exts
+
+    @classmethod
+    def get_all_specs(cls) -> List[LanguageSpec]:
+        """Returns all registered LanguageSpec descriptors."""
+        return list(cls._specs.values())
 
     @classmethod
     def get_manifest_for_language(cls, language: str) -> Optional[str]:
@@ -136,10 +183,14 @@ class LanguageRegistry:
             "rust",
             extensions=(".rs",),
             manifest_names=("Cargo.toml",),
-            tool_names=("Cargo.toml", "rust-analyzer"),
+            tool_names=("Cargo.toml", "rust-analyzer", "rustup"),
             ts_module="tree_sitter_rust",
             ts_factory="language",
             scip_binary="rust-analyzer",
+            impl_node_types=("impl_item",),
+            container_node_types=("Class", "Interface", "Struct", "Trait", "Enum"),
+            scip_command=("rust-analyzer", "scip", "."),
+            is_native_lang=True,
             ast_node_kinds={
                 "struct_item": "Struct",
                 "enum_item": "Enum",
@@ -156,6 +207,8 @@ class LanguageRegistry:
             ts_module="tree_sitter_dart",
             ts_factory="language",
             scip_binary="dart",
+            scip_command=("dart", "pub", "global", "run", "scip_dart", "."),
+            is_client_lang=True,
             ast_node_kinds={
                 "class_definition": "Class",
                 "function_signature": "Function",
@@ -170,6 +223,10 @@ class LanguageRegistry:
             ts_module="tree_sitter_python",
             ts_factory="language",
             scip_binary="scip-python",
+            docstring_node_type="expression_statement",
+            container_node_types=("Class", "Function", "Method", "Constructor"),
+            scip_command=("scip-python", "index"),
+            is_client_lang=True,
             ast_node_kinds={
                 "class_definition": "Class",
                 "function_definition": "Function",
@@ -183,6 +240,7 @@ class LanguageRegistry:
             ts_module="tree_sitter_go",
             ts_factory="language",
             scip_binary="scip-go",
+            scip_command=("scip-go",),
             ast_node_kinds={
                 "type_declaration": "Struct",
                 "function_declaration": "Function",
@@ -197,6 +255,8 @@ class LanguageRegistry:
             ts_module="tree_sitter_typescript",
             ts_factory="language_typescript",
             scip_binary="scip-typescript",
+            scip_command=("scip-typescript", "index"),
+            is_client_lang=True,
             ast_node_kinds={
                 "class_declaration": "Class",
                 "interface_declaration": "Interface",
@@ -214,6 +274,8 @@ class LanguageRegistry:
             ts_module="tree_sitter_typescript",
             ts_factory="language_tsx",
             scip_binary="scip-typescript",
+            scip_command=("scip-typescript", "index"),
+            is_client_lang=True,
             ast_node_kinds={
                 "class_declaration": "Class",
                 "function_declaration": "Function",
@@ -228,6 +290,7 @@ class LanguageRegistry:
             ts_module="tree_sitter_java",
             ts_factory="language",
             scip_binary="scip-java",
+            scip_command=("scip-java", "index"),
             ast_node_kinds={
                 "class_declaration": "Class",
                 "interface_declaration": "Interface",
@@ -240,6 +303,7 @@ class LanguageRegistry:
             manifest_names=("CMakeLists.txt",),
             ts_module="tree_sitter_cpp",
             ts_factory="language",
+            is_native_lang=True,
             ast_node_kinds={
                 "class_specifier": "Class",
                 "struct_specifier": "Struct",
@@ -251,6 +315,7 @@ class LanguageRegistry:
             extensions=(".c", ".h"),
             ts_module="tree_sitter_c",
             ts_factory="language",
+            is_native_lang=True,
             ast_node_kinds={
                 "struct_specifier": "Struct",
                 "function_definition": "Function",

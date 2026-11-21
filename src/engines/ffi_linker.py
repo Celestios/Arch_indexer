@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
+from engines.registry import LanguageRegistry
 
 @dataclass
 class FfiMatch:
@@ -130,8 +131,8 @@ class FfiLinker:
         if not rows:
             return 0
 
-        CLIENT_EXTS = {".dart", ".ts", ".tsx", ".js", ".jsx", ".py"}
-        NATIVE_EXTS = {".rs", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp"}
+        CLIENT_EXTS = LanguageRegistry.get_client_extensions()
+        NATIVE_EXTS = LanguageRegistry.get_native_extensions()
 
         client_symbols = []
         native_symbols = []

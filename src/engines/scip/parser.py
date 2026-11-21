@@ -283,15 +283,16 @@ class ScipParser:
                     continue
                 start_line, start_col, end_line, end_col = r_tuple
 
-                parsed_data["occurrences"].append({
-                    "symbol": symbol,
-                    "filepath": resolved_filepath,
-                    "start_line": start_line + 1,
-                    "start_col": start_col,
-                    "end_line": end_line + 1,
-                    "end_col": end_col,
-                    "role": occ.symbol_roles
-                })
+                if not is_definition:
+                    parsed_data["occurrences"].append({
+                        "symbol": symbol,
+                        "filepath": resolved_filepath,
+                        "start_line": start_line + 1,
+                        "start_col": start_col,
+                        "end_line": end_line + 1,
+                        "end_col": end_col,
+                        "role": occ.symbol_roles
+                    })
 
                 # Harvest compiler/analyzer diagnostics
                 for diag in getattr(occ, "diagnostics", []):
@@ -326,7 +327,9 @@ class ScipParser:
                         "docstring": docs,
                         "body_hash": None,
                         "start_line": start_line + 1,
+                        "start_col": start_col,
                         "end_line": end_line + 1,
+                        "end_col": end_col,
                         "parent_symbol": parent_sym,
                     }
 
@@ -352,16 +355,13 @@ class ScipParser:
 
         # 3. Second pass: Extract call & reference edges
         occurrences_by_file = {}
-        for occ in parsed_data["occurrences"]:
-            sym = occ["symbol"]
-            if (occ["role"] & 1) and sym in parsed_data["symbols"]:
-                # Exclude parameters and fields as enclosing callers
-                if sym.endswith(")") or (sym.endswith(".") and not sym.endswith("().")):
-                    continue
-                fp = occ["filepath"]
-                if fp not in occurrences_by_file:
-                    occurrences_by_file[fp] = []
-                occurrences_by_file[fp].append(occ)
+        for sym, sym_data in parsed_data["symbols"].items():
+            # Exclude parameters and fields as enclosing callers
+            if sym.endswith(")") or (sym.endswith(".") and not sym.endswith("().")):
+                continue
+            fp = sym_data.get("filepath")
+            if fp:
+                occurrences_by_file.setdefault(fp, []).append(sym_data)
 
         for fp, defs in occurrences_by_file.items():
             defs.sort(key=lambda d: d["end_line"] - d["start_line"])

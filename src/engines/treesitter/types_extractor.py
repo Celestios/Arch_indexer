@@ -4,19 +4,11 @@ Extracts syntactic parameter types and return type annotations from function/met
 """
 from typing import List, Dict, Any, Optional
 import tree_sitter
+from engines.registry import LanguageRegistry
 
 
 class TypesExtractor:
     """Extracts syntactic types from declaration nodes."""
-
-    _DISPATCH_TABLE = {
-        "python": "_extract_python",
-        "rust": "_extract_rust",
-        "typescript": "_extract_typescript",
-        "tsx": "_extract_typescript",
-        "javascript": "_extract_typescript",
-        "js": "_extract_typescript",
-    }
 
     @classmethod
     def extract_types(cls, node: tree_sitter.Node, code_bytes: bytes, language: str) -> Dict[str, Any]:
@@ -30,9 +22,10 @@ class TypesExtractor:
             "return_type": None,
         }
 
-        handler_name = cls._DISPATCH_TABLE.get(language.lower())
-        if handler_name:
-            handler = getattr(cls, handler_name)
+        spec = LanguageRegistry.get_spec(language)
+        lang_name = spec.name if spec else language.lower()
+        handler = getattr(cls, f"_extract_{lang_name}", None)
+        if handler:
             handler(node, code_bytes, result)
 
         return result
@@ -116,3 +109,5 @@ class TypesExtractor:
             if ret_str.startswith(":"):
                 ret_str = ret_str[1:].strip()
             result["return_type"] = ret_str
+
+    _extract_javascript = _extract_typescript

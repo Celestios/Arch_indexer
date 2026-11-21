@@ -8,9 +8,8 @@ from utils.arch_config import ArchConfig
 class FieldValidator:
     """Validates and resets manual fields based on config rules."""
 
-    def __init__(self, repository: Repository, config_loader: Optional[Any] = None):
+    def __init__(self, repository: Repository):
         self.repository = repository
-        self.config_loader = config_loader
 
     def reset_invalid_manual_fields(self, config: Dict[str, Any]):
         """Resets manual fields that are no longer valid or need resetting on file change."""
@@ -18,12 +17,7 @@ class FieldValidator:
         db_updated = False
 
         for filepath, meta in file_metadata.items():
-            if hasattr(config, "get_applicable_config"):
-                prefix_conf = config.get_applicable_config(filepath)
-            elif self.config_loader and hasattr(self.config_loader, "get_applicable_config"):
-                prefix_conf = self.config_loader.get_applicable_config(filepath, config)
-            else:
-                prefix_conf = ArchConfig.find_applicable_config(filepath, config)
+            prefix_conf = ArchConfig.get_applicable_config(filepath, config)
             if not prefix_conf:
                 continue
 

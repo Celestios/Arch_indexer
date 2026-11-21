@@ -454,7 +454,7 @@ class GraphStore(BaseRepository):
         return rows
 
     def get_definitions_map(self) -> Dict[str, Dict[str, Any]]:
-        """Fetches symbol definitions from symbols (where start_line IS NOT NULL) and occurrences (role & 1 != 0)."""
+        """Fetches symbol definitions from symbols table and definition occurrences."""
         rows = self._fetch_all(
             """SELECT symbol, filepath, start_line, start_col, end_line, end_col
                FROM symbols WHERE start_line IS NOT NULL

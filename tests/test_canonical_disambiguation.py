@@ -139,7 +139,3 @@ class TestCanonicalDisambiguationInParser:
         # The canonical symbol must resolve to src/lib.rs despite test doc being parsed first
         assert parsed["symbols"][crate_sym]["filepath"] == "src/lib.rs"
         assert parsed["symbols"][crate_sym]["docstring"] == "Primary crate root"
-
-        # Both occurrences are preserved
-        crate_occs = [o for o in parsed["occurrences"] if o["symbol"] == crate_sym]
-        assert len(crate_occs) == 2

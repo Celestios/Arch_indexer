@@ -18,7 +18,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import tree_sitter
 
 from engines.registry import LanguageRegistry
-from engines.treesitter.loader import TreesitterLoader
+from engines.treesitter.loader import detect_language, get_parser
 from engines.treesitter.annotations import AnnotationExtractor
 from engines.treesitter.metrics import MetricsCalculator
 
@@ -136,11 +136,11 @@ class TreesitterExtractor:
         else:
             code_bytes = source
 
-        language = TreesitterLoader.detect_language(fp)
+        language = detect_language(fp)
         if not language:
             return []
 
-        parser = TreesitterLoader.get_parser(language)
+        parser = get_parser(language)
         if not parser:
             return []
 
@@ -234,6 +234,9 @@ class TreesitterExtractor:
         symbols: List[SymbolDeclaration] = []
         spec = LanguageRegistry.get_spec(language)
         node_kinds = spec.ast_node_kinds if spec and spec.ast_node_kinds else {}
+        impl_types = spec.impl_node_types if spec and spec.impl_node_types else ()
+        container_types = spec.container_node_types if spec and spec.container_node_types else ("Class", "Interface", "Struct", "Trait")
+        has_doc_stmt = bool(spec and spec.docstring_node_type == "expression_statement")
 
         def visit(node: tree_sitter.Node, parent_scope: str, parent_clean: Optional[str]):
             actual_node = node
@@ -244,8 +247,8 @@ class TreesitterExtractor:
                         actual_node = child
                         break
 
-            # Handle Rust impl_item special case
-            if actual_node.type == "impl_item":
+            # Handle language-declared implementation item types (e.g. Rust impl_item)
+            if actual_node.type in impl_types:
                 type_node = actual_node.child_by_field_name("type")
                 body_node = actual_node.child_by_field_name("body")
                 impl_name = code_bytes[type_node.start_byte:type_node.end_byte].decode("utf-8", errors="replace") if type_node else ""
@@ -306,7 +309,7 @@ class TreesitterExtractor:
                         clean_sym = f"{parent_scope}.{item_name}" if parent_scope else item_name
 
                     # Signature & docstring extraction
-                    if language == "python":
+                    if has_doc_stmt:
                         sig_bytes = code_bytes[actual_node.start_byte:body_node.start_byte].strip() if body_node else code_bytes[actual_node.start_byte:actual_node.end_byte].strip()
                         sig = sig_bytes.decode("utf-8", errors="replace")
                         doc = cls._extract_python_docstring(body_node, code_bytes)
@@ -334,50 +337,17 @@ class TreesitterExtractor:
                     symbols.append(sym_decl)
 
                     # Recurse inside container bodies
-                    if body_node:
-                        if language == "python":
-                            if kind == "Class":
-                                for child in body_node.children:
-                                    visit(child, clean_sym, clean_sym)
-                                return
-                            elif kind in ("Function", "Method", "Constructor"):
-                                for child in body_node.children:
-                                    visit(child, clean_sym[:-2], clean_sym)
-                                return
-                        elif kind in ("Class", "Interface", "Struct", "Trait"):
-                            for child in body_node.children:
-                                visit(child, clean_sym, clean_sym)
-                            return
+                    if body_node and kind in container_types:
+                        scope_prefix = clean_sym[:-2] if (is_callable and clean_sym.endswith("()")) else clean_sym
+                        for child in body_node.children:
+                            visit(child, scope_prefix, clean_sym)
+                        return
 
             for child in node.children:
                 visit(child, parent_scope, parent_clean)
 
         visit(root, module_prefix, None)
         return symbols
-
-    @classmethod
-    def _extract_python(
-        cls, root: tree_sitter.Node, code_bytes: bytes, filepath: str, module_prefix: str, language: str = "python"
-    ) -> List[SymbolDeclaration]:
-        return cls._extract_ast(root, code_bytes, filepath, module_prefix, language)
-
-    @classmethod
-    def _extract_rust(
-        cls, root: tree_sitter.Node, code_bytes: bytes, filepath: str, module_prefix: str, language: str = "rust"
-    ) -> List[SymbolDeclaration]:
-        return cls._extract_ast(root, code_bytes, filepath, module_prefix, language)
-
-    @classmethod
-    def _extract_typescript(
-        cls, root: tree_sitter.Node, code_bytes: bytes, filepath: str, module_prefix: str, language: str = "typescript"
-    ) -> List[SymbolDeclaration]:
-        return cls._extract_ast(root, code_bytes, filepath, module_prefix, language)
-
-    @classmethod
-    def _extract_generic(
-        cls, root: tree_sitter.Node, code_bytes: bytes, filepath: str, module_prefix: str, language: str = "generic"
-    ) -> List[SymbolDeclaration]:
-        return cls._extract_ast(root, code_bytes, filepath, module_prefix, language)
 
     @classmethod
     def _extract_python_docstring(cls, body_node: tree_sitter.Node, code_bytes: bytes) -> str:

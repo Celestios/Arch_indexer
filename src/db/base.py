@@ -2,9 +2,9 @@ from typing import List, Any, Optional, Tuple, Dict
 from db.connection import DbConnection
 
 
-def normalize_path(filepath: Optional[str]) -> str:
+def normalize_path(filepath: Optional[str]) -> Optional[str]:
     """Canonical POSIX path normalization for database persistence."""
-    return filepath.replace("\\", "/") if filepath else ""
+    return filepath.replace("\\", "/") if filepath else None
 
 
 class BaseRepository:

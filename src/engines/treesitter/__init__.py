@@ -8,7 +8,7 @@ from typing import Dict, List, Any, Optional, Union, Set
 import hashlib
 import re
 
-from engines.treesitter.loader import TreesitterLoader
+from engines.treesitter.loader import detect_language
 from engines.treesitter.extractor import TreesitterExtractor, SymbolDeclaration
 from engines.treesitter.folding import CodeFolder
 from engines.treesitter.rules import StructuralRuleChecker
@@ -44,7 +44,7 @@ class TreesitterEngine:
     ) -> List[Dict[str, Any]]:
         """Check for structural anti-patterns (bare excepts, .unwrap(), etc.)."""
         fp = Path(filepath)
-        lang = TreesitterLoader.detect_language(fp)
+        lang = detect_language(fp)
         if not lang:
             return []
         if source is None:
@@ -94,7 +94,7 @@ class TreesitterEngine:
 
         # 1. Update file hash in files table
         sha256_hash = hashlib.sha256(code_bytes).hexdigest()
-        lang = TreesitterLoader.detect_language(fp) or "unknown"
+        lang = detect_language(fp) or "unknown"
 
         # 2. Get existing symbols in DB for this file to reconcile SCIP IDs
         query_paths = [norm_fp]
@@ -209,7 +209,7 @@ class TreesitterEngine:
                                     continue
                                 if include_dirs and not is_included(rel_str, include_dirs, exclude_patterns):
                                     continue
-                                lang = TreesitterLoader.detect_language(p)
+                                lang = detect_language(p)
                                 if languages and lang not in languages:
                                     continue
                                 target_files.append(p)

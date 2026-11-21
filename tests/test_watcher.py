@@ -2,7 +2,7 @@ import pytest
 from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
-from engines.scip.wrapper import ScipWrapper
+from engines.scip.wrapper import ingest_index
 
 def setup_workspace(tmp_path):
     initialize_workspace(tmp_path)
@@ -113,13 +113,13 @@ def test_shrink_guard(tmp_path):
     }
 
     try:
-        ScipWrapper.ingest_index(repository, parsed_data, project_root=root, force=False)
+        ingest_index(repository, parsed_data, project_root=root, force=False)
         assert False, "Should raise ValueError due to shrink guard"
     except ValueError as e:
         assert "Shrink Guard" in str(e)
 
     # 3. Try to ingest empty parsed data with force (should succeed and delete everything)
-    ScipWrapper.ingest_index(repository, parsed_data, project_root=root, force=True)
+    ingest_index(repository, parsed_data, project_root=root, force=True)
     
     # Verify no symbols left
     with db_conn.session() as conn:
@@ -146,7 +146,7 @@ def test_shrink_guard(tmp_path):
         "files": ["lib/a.dart"]
     }
     # This should succeed without raising ValueError
-    ScipWrapper.ingest_index(repository, parsed_data_99, project_root=root, force=False)
+    ingest_index(repository, parsed_data_99, project_root=root, force=False)
     
     with db_conn.session() as conn:
         count = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]

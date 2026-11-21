@@ -4,12 +4,12 @@ from pathlib import Path
 
 
 class TestIndexerBackendProtocol:
-    """Verify IndexerBackend protocol is satisfied by ScipWrapper."""
+    """Verify backend functions exist in engines.scip.wrapper."""
 
     def test_scip_wrapper_satisfies_protocol(self):
-        from engines.scip.wrapper import ScipWrapper
-        assert hasattr(ScipWrapper, 'detect_languages')
-        assert hasattr(ScipWrapper, 'run_indexer')
+        import engines.scip.wrapper as wrapper
+        assert hasattr(wrapper, 'detect_languages')
+        assert hasattr(wrapper, 'run_indexer')
 
 
 
@@ -41,19 +41,19 @@ class TestPathTracerProtocol:
 
 
 class TestViolationCheckerProtocol:
-    """Verify ViolationChecker protocol methods exist."""
+    """Verify ViolationChecker functions exist."""
 
     def test_dependency_checker_has_check(self):
-        from auditor.violation_checkers.dependency import DependencyViolationChecker
-        assert hasattr(DependencyViolationChecker, 'check')
+        from auditor.violation_checkers.dependency import check
+        assert callable(check)
 
     def test_naming_checker_has_check(self):
-        from auditor.violation_checkers.naming import NamingViolationChecker
-        assert hasattr(NamingViolationChecker, 'check')
+        from auditor.violation_checkers.naming import check
+        assert callable(check)
 
     def test_pending_checker_has_check(self):
-        from auditor.violation_checkers.pending import PendingAuditChecker
-        assert hasattr(PendingAuditChecker, 'check')
+        from auditor.violation_checkers.pending import check
+        assert callable(check)
 
 
 class TestRepositoryInterfaces:

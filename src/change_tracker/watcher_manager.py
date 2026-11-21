@@ -20,7 +20,7 @@ from change_tracker.watcher import (
 from db.connection import DbConnection
 from db.repository import Repository
 from engines.registry import LanguageRegistry
-from engines.scip.wrapper import ScipWrapper
+from engines.sync_pipeline import sync_workspace
 from engines.treesitter import TreesitterEngine
 from utils.exclusions import load_include_dirs
 
@@ -44,12 +44,21 @@ class ProjectWatcher:
         self._pending: bool = False
         self._changed_files: Set[Path] = set()
         self._lock = threading.Lock()
+        self._db_lock = threading.Lock()
 
         self._observer = None
         self._worker_thread: Optional[threading.Thread] = None
+        self._db_conn: Optional[DbConnection] = None
+        self._repository: Optional[Repository] = None
 
     def start(self) -> bool:
         if not self.db_path.exists():
+            return False
+
+        try:
+            self._db_conn = DbConnection(self.db_path)
+            self._repository = Repository(self._db_conn)
+        except Exception:
             return False
 
         try:
@@ -92,12 +101,10 @@ class ProjectWatcher:
                     watcher_self._changed_files.add(path)
 
                 # Tier 1: Fast Tree-sitter AST sync (< 2ms)
-                if path.exists() and path.is_file():
+                if path.exists() and path.is_file() and watcher_self._repository:
                     try:
-                        conn = DbConnection(watcher_self.db_path)
-                        repo = Repository(conn)
-                        TreesitterEngine.sync_file_to_db(repo, path)
-                        conn.close()
+                        with watcher_self._db_lock:
+                            TreesitterEngine.sync_file_to_db(watcher_self._repository, path)
                     except Exception:
                         pass
 
@@ -134,60 +141,56 @@ class ProjectWatcher:
                 print(f"[Arch Watcher] Error updating {self.project_root.name}: {e}", file=sys.stderr)
 
     def _run_scip_reindex(self, batch: list):
-        if not self.db_path.exists():
+        if not self.db_path.exists() or not self._repository:
             return
 
-        db_conn = DbConnection(self.db_path)
-        repository = Repository(db_conn)
+        repository = self._repository
 
-        try:
-            db_files = repository.workspace.get_all_files_metadata()
-            dirty_files: Set[str] = set()
-            for p in batch:
-                try:
-                    rel_fp = str(p.resolve().relative_to(self.project_root)).replace("\\", "/")
-                except ValueError:
-                    rel_fp = str(p).replace("\\", "/")
+        db_files = repository.workspace.get_all_files_metadata()
+        dirty_files: Set[str] = set()
+        for p in batch:
+            try:
+                rel_fp = str(p.resolve().relative_to(self.project_root)).replace("\\", "/")
+            except ValueError:
+                rel_fp = str(p).replace("\\", "/")
 
-                if not p.exists():
-                    dirty_files.add(rel_fp)
-                    continue
+            if not p.exists():
+                dirty_files.add(rel_fp)
+                continue
 
-                curr_hash = ChangeTracker.calculate_sha256(p)
-                db_hash = db_files.get(rel_fp, {}).get("sha256", "")
-                if curr_hash != db_hash:
-                    dirty_files.add(rel_fp)
+            curr_hash = ChangeTracker.calculate_sha256(p)
+            db_hash = db_files.get(rel_fp, {}).get("sha256", "")
+            if curr_hash != db_hash:
+                dirty_files.add(rel_fp)
 
-            if not dirty_files:
-                return
+        if not dirty_files:
+            return
 
-            package_targets = set()
-            for p in batch:
-                try:
-                    rel_fp = str(p.resolve().relative_to(self.project_root)).replace("\\", "/")
-                except ValueError:
-                    rel_fp = str(p).replace("\\", "/")
-                if rel_fp not in dirty_files:
-                    continue
-                lang = LanguageRegistry.detect_language(str(p))
-                if not lang:
-                    continue
-                pkg_root = _resolve_package_root(p, self.project_root, lang)
-                package_targets.add((lang, pkg_root))
+        package_targets = set()
+        for p in batch:
+            try:
+                rel_fp = str(p.resolve().relative_to(self.project_root)).replace("\\", "/")
+            except ValueError:
+                rel_fp = str(p).replace("\\", "/")
+            if rel_fp not in dirty_files:
+                continue
+            lang = LanguageRegistry.detect_language(str(p))
+            if not lang:
+                continue
+            pkg_root = _resolve_package_root(p, self.project_root, lang)
+            package_targets.add((lang, pkg_root))
 
-            if not package_targets:
-                languages = ScipWrapper.detect_languages(self.project_root)
-                package_targets = {(lang, self.project_root) for lang in languages}
+        has_ffi = _has_ffi_bridge_files(batch)
+        with self._db_lock:
+            sync_res = sync_workspace(
+                repository,
+                self.project_root,
+                dirty_files=dirty_files,
+                run_ffi=has_ffi,
+                package_targets=package_targets or None,
+            )
 
-            indexed_any = False
-            for lang, pkg_root in package_targets:
-                index_path = ScipWrapper.run_indexer(pkg_root, lang)
-                if index_path:
-                    parsed = ScipWrapper.parse_index(index_path, self.project_root, changed_files=dirty_files)
-                    ScipWrapper.ingest_index(repository, parsed, project_root=self.project_root)
-                    indexed_any = True
-
-            if indexed_any:
+            if sync_res["indexed_languages"]:
                 from auditor.analyzer import Auditor
                 auditor = Auditor(repository, self.project_root)
                 if len(dirty_files) == 1:
@@ -204,18 +207,8 @@ class ProjectWatcher:
                         for fp in dirty_files:
                             auditor.run_audit(filepath_filter=fp)
 
-            if _has_ffi_bridge_files(batch):
-                try:
-                    from engines.ffi_linker import FfiLinker
-                    linker = FfiLinker(repository)
-                    linker.link_scip_bridges()
-                except Exception:
-                    pass
-        finally:
-            db_conn.close()
-
     def stop(self):
-        """Stops the observer and worker thread."""
+        """Stops the observer, worker thread, and closes database connection."""
         self._stop_event.set()
         if self._observer is not None:
             try:
@@ -227,6 +220,13 @@ class ProjectWatcher:
         if self._worker_thread is not None:
             self._worker_thread.join(timeout=2.0)
             self._worker_thread = None
+        if self._db_conn is not None:
+            try:
+                self._db_conn.close()
+            except Exception:
+                pass
+            self._db_conn = None
+            self._repository = None
 
 
 class WatcherManager:

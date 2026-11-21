@@ -133,7 +133,7 @@ def test_scip_primitives_ingestion(tmp_path):
     assert closure["upstream"][0]["relation"] == "Implements"
 
     # 4. Cleanup diagnostics on delete
-    repo.quality.delete_diagnostics_for_file("pkg/bar.py")
+    repo.quality.delete_diagnostics_for_files(["pkg/bar.py"])
     assert len(repo.quality.get_diagnostics_for_file("pkg/bar.py")) == 0
 
     db_conn.close()

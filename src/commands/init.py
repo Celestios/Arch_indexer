@@ -5,9 +5,8 @@ from pathlib import Path
 from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
-from engines.scip.wrapper import ScipWrapper
-from engines.treesitter import TreesitterEngine
-from engines.ffi_linker import FfiLinker
+from engines.scip.wrapper import detect_languages, verify_environment
+from engines.sync_pipeline import sync_workspace
 from engines.registry import LanguageRegistry
 from utils.session import get_project_root
 
@@ -112,25 +111,6 @@ def _select_include_dirs(project_root, arch_dir, force: bool = False):
     return selected
 
 
-def _run_scip_indexer(project_root, repository, selected_languages, force):
-    """Run SCIP indexer for selected languages. Returns True if any language was indexed."""
-    if not selected_languages:
-        return False
-    print("\n--- Running Code Graph Indexer ---")
-    indexed_any = False
-    for lang in selected_languages:
-        index_path = ScipWrapper.run_indexer(project_root, lang)
-        if index_path:
-            print(f"  [{lang}] Index generated at {index_path}")
-            parsed = ScipWrapper.parse_index(index_path, project_root)
-            ScipWrapper.ingest_index(repository, parsed, project_root=project_root, force=force)
-            print(f"  [{lang}] {len(parsed['symbols'])} symbols ingested.")
-            indexed_any = True
-        else:
-            print(f"  [{lang}] Indexing failed. Verify environment settings.", file=sys.stderr)
-    return indexed_any
-
-
 def cmd_init(args):
     """Initialize workspace and index symbols."""
     project_root = get_project_root(args)
@@ -150,13 +130,13 @@ def cmd_init(args):
     print(f"\nWorkspace folder initialized at {arch_dir}")
 
     # 2. Auto-recognition
-    languages = ScipWrapper.detect_languages(project_root)
+    languages = detect_languages(project_root)
     print("\n[Auto-Recognition] System Status:")
     if not languages:
         print("  - Languages: No supported languages detected.")
     else:
         print(f"  - Detected languages: {', '.join(languages)}")
-        env_status = ScipWrapper.verify_environment(languages)
+        env_status = verify_environment(languages)
         for lang, available in env_status.items():
             status_str = "Available" if available else "NOT found on PATH"
             print(f"    * {lang.capitalize()} Toolchain: {status_str}")
@@ -180,30 +160,21 @@ def cmd_init(args):
         except Exception as e:
             print(f"Warning: Failed to sync compliance rules: {e}", file=sys.stderr)
 
-    # 5a. Run Tree-sitter AST Indexer (Stage 1: Declarations, Signatures, Docstrings, Metrics)
-    print("\n--- Running Tree-sitter AST Indexer ---")
-    from engines.treesitter.loader import TreesitterLoader
-    for lang in selected_languages:
-        if not TreesitterLoader.get_parser(lang):
-            print(f"  Note: Tree-sitter parser for '{lang}' not available; semantic indexing will run via SCIP.")
-    try:
-        ast_sym_count = TreesitterEngine.sync_project_to_db(repository, project_root, languages=selected_languages)
-        print(f"  Tree-sitter: Extracted {ast_sym_count} symbols with exact signatures and docstrings.")
-    except Exception as ast_e:
-        print(f"  Warning: Tree-sitter extraction encountered an issue: {ast_e}", file=sys.stderr)
-
-    # 5b. Run SCIP Semantic Indexer (Stage 2: Cross-File Graph, Occurrences, Diagnostics)
-    indexed_any = _run_scip_indexer(project_root, repository, selected_languages, getattr(args, 'force', False))
-
-    # 6. FFI linking
-    if len(selected_languages) > 1 or ("dart" in selected_languages and "rust" in selected_languages):
-        print("\n--- Running FFI Bridge Linker ---")
-        try:
-            linker = FfiLinker(repository)
-            edges_created = linker.link_scip_bridges()
-            print(f"  Bridge linking complete: {edges_created} cross-language edges created.")
-        except Exception as e:
-            print(f"  Warning: Bridge linking failed: {e}")
+    # 5. Run Unified Synchronization Pipeline (Tree-sitter AST, SCIP Semantic, and FFI)
+    print("\n--- Running Workspace Synchronization Pipeline ---")
+    sync_res = sync_workspace(
+        repository,
+        project_root,
+        languages=selected_languages,
+        force=getattr(args, 'force', False),
+        run_ffi=True,
+    )
+    indexed_any = bool(sync_res["indexed_languages"] or sync_res["ast_symbol_count"] > 0)
+    print(f"  Tree-sitter: Extracted {sync_res['ast_symbol_count']} symbols.")
+    if sync_res["indexed_languages"]:
+        print(f"  SCIP: Indexed {', '.join(sync_res['indexed_languages'])}.")
+    if sync_res["ffi_edges_created"]:
+        print(f"  FFI: Created {sync_res['ffi_edges_created']} cross-language edges.")
 
     db_conn.close()
 

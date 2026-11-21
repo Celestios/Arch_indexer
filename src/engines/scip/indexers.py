@@ -6,6 +6,7 @@ from typing import Optional
 
 from utils.exclusions import load_include_dirs, is_included
 from utils.helpers import IS_WINDOWS
+from engines.registry import LanguageRegistry
 from engines.scip.utils import run_with_scroll
 
 
@@ -171,22 +172,38 @@ def index_python(project_dir: Path) -> Optional[Path]:
 
 
 def index_generic(project_dir: Path, language: str) -> Optional[Path]:
-    """Indexer for languages with simple `tool [subcommand]` invocations."""
-    tool_map = {
-        "go": ("scip-go", []),
-        "typescript": ("scip-typescript", ["index"]),
-        "java": ("scip-java", ["index"]),
-    }
-    tool_name, extra_args = tool_map.get(language, (f"scip-{language}", []))
+    """Indexer for languages driven by LanguageSpec in LanguageRegistry."""
+    spec = LanguageRegistry.get_spec(language)
+    if spec and spec.scip_command:
+        cmd = list(spec.scip_command)
+    else:
+        tool_name = spec.scip_binary if spec and spec.scip_binary else f"scip-{language}"
+        cmd = [tool_name]
+    tool_name = cmd[0]
     print(f"[SCIP] Indexing {language.capitalize()} project under {project_dir}...")
     if not shutil.which(tool_name):
         print(f"Error: {tool_name} CLI is not on the system PATH.", file=sys.stderr)
         return None
     try:
-        rc = run_with_scroll([tool_name] + extra_args, cwd=str(project_dir), shell=IS_WINDOWS)
+        rc = run_with_scroll(cmd, cwd=str(project_dir), shell=IS_WINDOWS)
         if rc != 0:
             raise subprocess.CalledProcessError(rc, tool_name)
         return _move_index_to_arch(project_dir, language)
     except subprocess.CalledProcessError as e:
         print(f"Error executing {tool_name}: {e}", file=sys.stderr)
         return None
+
+
+_INDEXERS = {
+    "dart": index_dart,
+    "rust": index_rust,
+    "python": index_python,
+}
+
+
+def run_indexer(project_dir: Path, language: str) -> Optional[Path]:
+    """Executes the appropriate indexer for a language."""
+    indexer = _INDEXERS.get(language)
+    if indexer:
+        return indexer(project_dir)
+    return index_generic(project_dir, language)

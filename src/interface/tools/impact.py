@@ -52,8 +52,8 @@ def handle_impact(symbol: str, max_depth: int, repository) -> str:
     sym_record = repository.graph.get_symbol(db_symbol)
     focal_fp = sym_record.get("filepath") if sym_record else None
     if focal_fp:
-        from change_tracker.git_coupling import GitCouplingMiner
-        co_changes = GitCouplingMiner.get_co_changed_files(repository, focal_fp, min_frequency=0.20)
+        from change_tracker.git_coupling import get_co_changed_files
+        co_changes = get_co_changed_files(repository, focal_fp, min_frequency=0.20)
         if co_changes:
             co_md = [
                 "### ── Historical Git Co-Change Coupling",

@@ -464,12 +464,6 @@ async def clear_pending(justification: str, project_root: str, ctx: Context = No
 
 
 @_tool()
-async def clear_pending_audits(project_root: str, justification: str = "Manual clear", ctx: Context = None) -> str:
-    """Alias for clear_pending."""
-    return clear_pending(justification=justification, project_root=project_root, ctx=ctx)
-
-
-@_tool()
 async def map(
     project_root: str,
     targets: Optional[Union[List[Dict[str, Any]], str]] = None,
@@ -549,15 +543,6 @@ async def update(
         return f"Error: {e}"
     except Exception as e:
         return f"Error updating workspace: {e}"
-
-
-# Backward compatibility aliases for internal python calls
-def reindex(filepaths: Optional[Union[List[str], str]] = None, force: bool = False, project_root: Optional[str] = None) -> str:
-    return update(filepaths=filepaths, force=force, project_root=project_root)
-
-
-def index(filepaths: Optional[Union[List[str], str]] = None, force: bool = False, project_root: Optional[str] = None) -> str:
-    return update(filepaths=filepaths, force=force, project_root=project_root)
 
 
 def run_server(port: int = 0):

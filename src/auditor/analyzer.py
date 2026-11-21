@@ -9,9 +9,9 @@ from auditor.path_tracer import PathTracer
 from auditor.field_validator import FieldValidator
 from engines.edge_weights import EdgeWeightUpdater
 from auditor.snapshot import AuditSnapshot
-from auditor.violation_checkers.dependency import DependencyViolationChecker
-from auditor.violation_checkers.naming import NamingViolationChecker
-from auditor.violation_checkers.pending import PendingAuditChecker
+from auditor.violation_checkers.dependency import check as check_dependency_violations
+from auditor.violation_checkers.naming import check as check_naming_violations
+from auditor.violation_checkers.pending import check as check_pending_violations
 from utils.helpers import config_path_for, load_config
 from utils.arch_config import ArchConfig
 
@@ -28,17 +28,16 @@ class Auditor:
         self.project_root = project_root
         self.config_path = config_path_for(project_root)
 
-        self.config_loader = None
         self.classifier = SymbolClassifier(repository)
         self.propagator = MetadataPropagator()
         self.tracer = PathTracer(repository)
-        self.field_validator = FieldValidator(repository, self.config_loader)
+        self.field_validator = FieldValidator(repository)
         self.edge_weight_updater = EdgeWeightUpdater(repository)
 
         self.checkers = [
-            DependencyViolationChecker(repository, self.tracer, self.config_loader),
-            NamingViolationChecker(repository, self.tracer),
-            PendingAuditChecker(repository),
+            check_dependency_violations,
+            check_naming_violations,
+            check_pending_violations,
         ]
 
     def load_config(self) -> Dict[str, Any]:
@@ -51,7 +50,7 @@ class Auditor:
         Resolves symbols classifications, checks dependency rules, and saves violations.
         If filepath_filter is provided, only audits files matching that path prefix.
         """
-        config = self.config_loader.load_config() if self.config_loader else self.load_config()
+        config = self.load_config()
         if not config:
             print("No architectural rules found in .arch/config.json. Skipping audit.", file=sys.stderr)
             return []
@@ -75,12 +74,12 @@ class Auditor:
 
         violations = []
         for checker in self.checkers:
-            violations.extend(checker.check(
+            violations.extend(checker(
                 snapshot=snapshot,
                 symbol_classifications=symbol_classifications,
+                propagation_sources=propagation_sources,
                 config=config,
                 filepath_filter=filepath_filter,
-                propagation_sources=propagation_sources,
             ))
 
         self.repository.quality.record_violations_bulk(violations)
@@ -109,12 +108,7 @@ class Auditor:
             filepath = sym.get("filepath")
             if not filepath:
                 continue
-            if self.config_loader and hasattr(self.config_loader, "get_applicable_config"):
-                prefix_conf = self.config_loader.get_applicable_config(filepath, config)
-            elif hasattr(config, "get_applicable_config"):
-                prefix_conf = config.get_applicable_config(filepath)
-            else:
-                prefix_conf = ArchConfig.find_applicable_config(filepath, config)
+            prefix_conf = ArchConfig.get_applicable_config(filepath, config)
             if not prefix_conf:
                 continue
             outgoing = outgoing_map.get(sym["symbol"], [])

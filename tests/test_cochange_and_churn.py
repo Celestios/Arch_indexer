@@ -2,7 +2,7 @@ import pytest
 from pathlib import Path
 from db.connection import DbConnection
 from db.repository import Repository
-from change_tracker.git_coupling import GitCouplingMiner
+from change_tracker.git_coupling import get_co_changed_files
 from interface.tools.impact import handle_impact
 from interface.tools.lookup import handle_lookup
 from setup.initializer import initialize_workspace
@@ -27,7 +27,7 @@ def test_git_co_change_and_churn(tmp_path):
         """)
 
     # Verify get_co_changed_files
-    co_files = GitCouplingMiner.get_co_changed_files(repo, "src/parser.py", min_frequency=0.20)
+    co_files = get_co_changed_files(repo, "src/parser.py", min_frequency=0.20)
     assert len(co_files) == 1
     assert co_files[0]["filepath"] == "src/scip.proto"
     assert round(co_files[0]["frequency"], 2) == 0.92

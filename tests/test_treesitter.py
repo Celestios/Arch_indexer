@@ -4,7 +4,7 @@ Unit and integration tests for the Tree-sitter AST engine.
 from pathlib import Path
 import pytest
 
-from engines.treesitter.loader import TreesitterLoader
+from engines.treesitter.loader import get_parser, get_language
 from engines.treesitter.extractor import TreesitterExtractor
 from engines.treesitter.folding import CodeFolder
 from engines.treesitter.metrics import MetricsCalculator
@@ -14,11 +14,11 @@ from engines.treesitter import TreesitterEngine
 
 
 def test_treesitter_loader():
-    """Verify that TreesitterLoader successfully loads installed parsers."""
+    """Verify that loader functions successfully load installed parsers."""
     for lang in ("python", "rust", "typescript", "javascript"):
-        parser = TreesitterLoader.get_parser(lang)
+        parser = get_parser(lang)
         assert parser is not None, f"Failed to get parser for {lang}"
-        language = TreesitterLoader.get_language(lang)
+        language = get_language(lang)
         assert language is not None, f"Failed to get language for {lang}"
 
 
@@ -172,7 +172,7 @@ def test_metrics_calculator():
         return False
     return None
 '''
-    parser = TreesitterLoader.get_parser("python")
+    parser = get_parser("python")
     tree = parser.parse(python_code.encode("utf-8"))
     fn_node = tree.root_node.children[0]
     metrics = MetricsCalculator.calculate_metrics(fn_node, python_code.encode("utf-8"))

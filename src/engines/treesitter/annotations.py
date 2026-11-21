@@ -4,24 +4,11 @@ Extracts decorators, attributes, visibility modifiers, and compiler tags from de
 """
 from typing import List, Dict, Any, Optional
 import tree_sitter
+from engines.registry import LanguageRegistry
 
 
 class AnnotationExtractor:
     """Extracts decorators, attributes, and visibility modifiers from AST nodes."""
-
-    _DISPATCH_TABLE = {
-        "python": "_extract_python",
-        "rust": "_extract_rust",
-        "typescript": "_extract_typescript",
-        "tsx": "_extract_typescript",
-        "javascript": "_extract_typescript",
-        "js": "_extract_typescript",
-        "go": "_extract_go",
-        "java": "_extract_csharp_java",
-        "csharp": "_extract_csharp_java",
-        "c_sharp": "_extract_csharp_java",
-        "cs": "_extract_csharp_java",
-    }
 
     @staticmethod
     def extract_annotations(node: tree_sitter.Node, code_bytes: bytes, language: str) -> Dict[str, Any]:
@@ -41,9 +28,14 @@ class AnnotationExtractor:
             "is_abstract": False,
         }
 
-        handler_name = AnnotationExtractor._DISPATCH_TABLE.get(language.lower())
-        if handler_name:
-            handler = getattr(AnnotationExtractor, handler_name)
+        spec = LanguageRegistry.get_spec(language)
+        lang_name = spec.name if spec else language.lower()
+        if lang_name in ("java", "csharp"):
+            handler = AnnotationExtractor._extract_csharp_java
+        else:
+            handler = getattr(AnnotationExtractor, f"_extract_{lang_name}", None)
+
+        if handler:
             handler(node, code_bytes, result)
 
         return result
@@ -136,6 +128,8 @@ class AnnotationExtractor:
         parent = node.parent
         if parent and parent.type in ("export_statement", "export_declaration"):
             result["visibility"] = "public"
+
+    _extract_javascript = _extract_typescript
 
     @staticmethod
     def _extract_go(node: tree_sitter.Node, code_bytes: bytes, result: Dict[str, Any]):

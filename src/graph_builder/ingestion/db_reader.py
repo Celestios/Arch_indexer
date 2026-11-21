@@ -22,8 +22,8 @@ class DatabaseReader:
     def __init__(self, db_path: str = ".arch/arch.db", repository: Optional[Repository] = None, db_conn: Optional[DbConnection] = None):
         if repository is not None:
             self.repository = repository
-            self.db_conn = repository._db_conn
-            self.db_path = str(self.db_conn.db_path)
+            self.db_conn = db_conn
+            self.db_path = str(db_path)
             self._own_conn = False
         elif db_conn is not None:
             self.db_conn = db_conn

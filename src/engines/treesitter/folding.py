@@ -5,7 +5,8 @@ decorators, and type definitions.
 """
 from typing import Optional, List, Tuple
 import tree_sitter
-from engines.treesitter.loader import TreesitterLoader
+from engines.registry import LanguageRegistry
+from engines.treesitter.loader import get_parser
 
 
 class CodeFolder:
@@ -31,7 +32,7 @@ class CodeFolder:
         else:
             code_bytes = source
 
-        parser = TreesitterLoader.get_parser(language)
+        parser = get_parser(language)
         if not parser:
             return code_bytes.decode("utf-8", errors="replace")
 
@@ -85,13 +86,14 @@ class CodeFolder:
 
         # Check for initial docstring
         doc_node: Optional[tree_sitter.Node] = None
-        if lang == "python":
-            # In Python, body_node is 'block'
-            if body_node.children:
-                first_child = body_node.children[0]
-                if first_child.type == "expression_statement" and first_child.children:
-                    if first_child.children[0].type == "string":
-                        doc_node = first_child
+        spec = LanguageRegistry.get_spec(lang)
+        has_doc_stmt = bool(spec and spec.docstring_node_type == "expression_statement")
+
+        if has_doc_stmt and body_node.children:
+            first_child = body_node.children[0]
+            if first_child.type == "expression_statement" and first_child.children:
+                if first_child.children[0].type == "string":
+                    doc_node = first_child
 
         if doc_node:
             # Replace everything from end of docstring statement to end of body
@@ -101,8 +103,8 @@ class CodeFolder:
             repl = f"\n{indent}..."
             replacements.append((repl_start, end_byte, repl))
         else:
-            if lang == "python":
-                # In tree-sitter-python, body_node starts after the newline and indentation
+            if has_doc_stmt:
+                # In block-based languages without braces, body_node starts after the newline and indentation
                 repl = "..."
                 replacements.append((start_byte, end_byte, repl))
             else:

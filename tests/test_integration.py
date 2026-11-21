@@ -43,8 +43,7 @@ class TestAuditPipeline:
         with patch.object(Path, "exists", return_value=True):
             auditor = Auditor(repo, project_root)
         
-        auditor.config_loader = MagicMock()
-        auditor.config_loader.load_config.return_value = {}
+        auditor.load_config = MagicMock(return_value={})
         
         violations = auditor.run_audit()
         assert violations == []
@@ -78,9 +77,7 @@ class TestAuditPipeline:
         with patch.object(Path, "exists", return_value=True):
             auditor = Auditor(repo, project_root)
         
-        auditor.config_loader = MagicMock()
-        auditor.config_loader.load_config.return_value = config
-        auditor.config_loader.get_applicable_config.return_value = config["src/"]
+        auditor.load_config = MagicMock(return_value=config)
         
         repo.graph.get_all_symbols_with_metadata.return_value = symbols
         repo.graph.get_outgoing_edges.return_value = []

@@ -197,7 +197,3 @@ class QualityStore(BaseRepository):
     def delete_diagnostics_for_files(self, filepaths: List[str]):
         """Deletes diagnostics for multiple files."""
         self._delete_by_filepaths("diagnostics", filepaths)
-
-    def delete_diagnostics_for_file(self, filepath: str):
-        """Deletes diagnostics for a single file."""
-        self.delete_diagnostics_for_files([filepath])

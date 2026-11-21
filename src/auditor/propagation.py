@@ -26,7 +26,7 @@ class MetadataPropagator:
                         "direction": field_conf.get("propagation_direction", "upstream"),
                         "weights": field_conf.get("weights") or {},
                         "barriers": set(field_conf.get("barriers") or []),
-                        "barrier_field": field_conf.get("barrier_field", "architectural_role") or "architectural_role",
+                        "barrier_field": field_conf.get("barrier_field") or field_name,
                         "values": field_conf.get("values") or [],
                         "default": field_conf.get("default")
                     }

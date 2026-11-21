@@ -3,8 +3,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Union
 
 from setup.initializer import initialize_workspace, sync_rules_to_db
-from engines.scip.wrapper import ScipWrapper
-from engines.treesitter import TreesitterEngine
+from engines.sync_pipeline import sync_workspace
 from auditor.analyzer import Auditor
 from utils.helpers import demangle_scip_symbol
 
@@ -58,35 +57,20 @@ def handle_update(
                 rel = str(fp).replace("\\", "/")
             dirty_files.add(rel)
 
-    languages = ScipWrapper.detect_languages(project_root)
+    sync_res = sync_workspace(
+        repository,
+        project_root,
+        dirty_files=dirty_files,
+        force=force,
+        run_ffi=True,
+    )
+    languages = sync_res["languages"]
     if not languages:
         return "## Workspace Update\n\nNo supported languages (Dart, Rust, Go, TypeScript, Java, Python) detected in workspace."
 
-    # Stage 1: Fast Tree-sitter AST Sync (Exact signatures, docstrings, metrics)
-    try:
-        TreesitterEngine.sync_project_to_db(repository, project_root, filepaths=dirty_files, languages=languages)
-    except Exception:
-        pass
-
-    indexed_langs = []
-    failed_langs = []
-    for lang in languages:
-        index_path = ScipWrapper.run_indexer(project_root, lang)
-        if index_path:
-            parsed = ScipWrapper.parse_index(index_path, project_root, changed_files=dirty_files)
-            ScipWrapper.ingest_index(repository, parsed, project_root=project_root, force=force)
-            indexed_langs.append(lang)
-        else:
-            failed_langs.append(lang)
-
-    bridge_edges = 0
-    if len(languages) > 1 or ("dart" in languages and "rust" in languages):
-        try:
-            from engines.ffi_linker import FfiLinker
-            linker = FfiLinker(repository)
-            bridge_edges = linker.link_scip_bridges() or 0
-        except Exception:
-            pass
+    indexed_langs = sync_res["indexed_languages"]
+    failed_langs = sync_res["failed_languages"]
+    bridge_edges = sync_res["ffi_edges_created"]
 
     # Run compliance audit check
     auditor = Auditor(repository, project_root)

@@ -5,20 +5,12 @@ Detects syntactic code smells like bare excepts, unparameterized SQL calls, and 
 from typing import List, Dict, Any
 from pathlib import Path
 import tree_sitter
-from engines.treesitter.loader import TreesitterLoader
+from engines.registry import LanguageRegistry
+from engines.treesitter.loader import get_parser
 
 
 class StructuralRuleChecker:
     """Checks source code AST for syntactic anti-patterns."""
-
-    _DISPATCH_TABLE = {
-        "python": "_check_python",
-        "rust": "_check_rust",
-        "typescript": "_check_typescript",
-        "tsx": "_check_typescript",
-        "javascript": "_check_typescript",
-        "js": "_check_typescript",
-    }
 
     @classmethod
     def check_file(cls, filepath: str | Path, source: str | bytes, language: str) -> List[Dict[str, Any]]:
@@ -28,7 +20,7 @@ class StructuralRuleChecker:
         else:
             code_bytes = source
 
-        parser = TreesitterLoader.get_parser(language)
+        parser = get_parser(language)
         if not parser:
             return []
 
@@ -39,9 +31,10 @@ class StructuralRuleChecker:
         violations: List[Dict[str, Any]] = []
         fp_str = str(filepath).replace("\\", "/")
 
-        handler_name = cls._DISPATCH_TABLE.get(language.lower())
-        if handler_name:
-            handler = getattr(cls, handler_name)
+        spec = LanguageRegistry.get_spec(language)
+        lang_name = spec.name if spec else language.lower()
+        handler = getattr(cls, f"_check_{lang_name}", None)
+        if handler:
             handler(tree.root_node, code_bytes, fp_str, violations)
 
         return violations
@@ -136,3 +129,5 @@ class StructuralRuleChecker:
                 visit(child)
 
         visit(root)
+
+    _check_javascript = _check_typescript

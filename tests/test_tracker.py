@@ -4,7 +4,7 @@ from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
 from change_tracker.tracker import ChangeTracker
-from engines.scip.wrapper import ScipWrapper
+from engines.scip.wrapper import ingest_index
 
 def setup_workspace(tmp_path):
     initialize_workspace(tmp_path)
@@ -150,7 +150,7 @@ def test_deleted_file_cleanup(tmp_path):
     widget_path.parent.mkdir(parents=True, exist_ok=True)
     widget_path.write_text("class Widget {}")
 
-    ScipWrapper.ingest_index(repository, parsed_data, project_root=root)
+    ingest_index(repository, parsed_data, project_root=root)
 
     # Verify widget.dart and main.rs exist, but button.dart was cleaned up
     assert repository.workspace.get_file('lib/ui/widget.dart') is not None
@@ -161,7 +161,7 @@ def test_deleted_file_cleanup(tmp_path):
 
 
 def test_transitive_invalidation(tmp_path):
-    from change_tracker.invalidation import TransitiveInvalidation
+    from change_tracker.invalidation import expand_changed_files
     repository, db_conn, root = setup_workspace(tmp_path)
 
     # Insert symbols across two files: util.dart defines helper, main.dart calls helper
@@ -184,8 +184,6 @@ def test_transitive_invalidation(tmp_path):
     # Edge: main calls util
     repository.graph.add_edge(source="pkg::main::run()", target="pkg::util::helper()", relation="Calls")
 
-    invalidator = TransitiveInvalidation(repository, max_depth=1)
-
     # Case 1: Interface (signature) did not change -> no expansion
     new_symbols_same = {
         "pkg::util::helper()": {
@@ -194,7 +192,7 @@ def test_transitive_invalidation(tmp_path):
             "signature": "void helper()"
         }
     }
-    expanded = invalidator.expand_changed_files(["lib/util.dart"], new_symbols=new_symbols_same)
+    expanded = expand_changed_files(repository, ["lib/util.dart"], new_symbols=new_symbols_same, max_depth=1)
     assert expanded == {"lib/util.dart"}
 
     # Case 2: Interface (signature) changed -> invalidates lib/main.dart
@@ -205,11 +203,11 @@ def test_transitive_invalidation(tmp_path):
             "signature": "int helper(int x)"
         }
     }
-    expanded = invalidator.expand_changed_files(["lib/util.dart"], new_symbols=new_symbols_changed)
+    expanded = expand_changed_files(repository, ["lib/util.dart"], new_symbols=new_symbols_changed, max_depth=1)
     assert expanded == {"lib/util.dart", "lib/main.dart"}
 
     # Case 3: Calling without new_symbols defaults to invalidating dependents
-    expanded_direct = invalidator.expand_changed_files(["lib/util.dart"])
+    expanded_direct = expand_changed_files(repository, ["lib/util.dart"], max_depth=1)
     assert expanded_direct == {"lib/util.dart", "lib/main.dart"}
 
     db_conn.close()

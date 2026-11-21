@@ -85,10 +85,6 @@ def extract_code_slice(
         return "".join(lines[s_idx:e_idx]).rstrip()
     except Exception:
         return None
-    if not filepath_filter:
-        return True
-    normalized = filepath.replace("\\", "/")
-    return normalized.startswith(filepath_filter.replace("\\", "/"))
 
 
 def find_definition_line(repository, symbol: str, filepath: str) -> int:

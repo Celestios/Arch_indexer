@@ -62,5 +62,3 @@ class Repository:
     def delete_file(self, filepath: str):
         """Atomic cross-domain cascade delete for a single file."""
         self.delete_files([filepath])
-
-    delete_files_bulk = delete_files
