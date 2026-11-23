@@ -154,7 +154,7 @@ def _handle_foreground(args, project_root, global_arch_dir, req_port, cmd_prefix
     print(f"  URL:       {url}", file=out_dest)
     print(f"  PID:       {os.getpid()}", file=out_dest)
     print(f"  Transport: {'SSE' if port > 0 else 'stdio'}", file=out_dest)
-    print("  Tools:     lookup, context, impact, audit, history, compile_context, map, graph, analyze, update, set_status, set_fields, clear_pending", file=out_dest)
+    print("  Tools:     lookup, context, impact, audit, history, compile_context, map, graph, analyze, update, set_status, set_fields, clear_pending, clusters, query", file=out_dest)
     print("Press Ctrl+C to terminate.\n", file=out_dest, flush=True)
 
     from interface.server import run_server

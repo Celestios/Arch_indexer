@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Union
 from db.base import BaseRepository, normalize_path
 from engines.polymorphism import (
     POLYMORPHIC_KINDS,
@@ -267,3 +267,62 @@ class AnalyticsStore(BaseRepository):
             "definitions_count": int(def_row["cnt"]) if def_row else 0,
             "references_count": totals["occurrences"],
         }
+
+    def get_cluster_graph_data(
+        self,
+        language: Optional[str] = None,
+        scope_prefixes: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Executes a read-only DuckDB projection over symbols, files, and edges
+        for parameter-free hierarchical clustering.
+        """
+        norm_prefixes = (
+            [p.replace("\\", "/").rstrip("/") for p in scope_prefixes if p]
+            if scope_prefixes
+            else None
+        )
+
+        symbols_sql = """
+            SELECT
+                s.symbol,
+                s.clean_symbol,
+                s.filepath,
+                s.kind,
+                s.parent_symbol,
+                s.start_line,
+                f.language
+            FROM symbols s
+            JOIN files f ON s.filepath = f.filepath
+            WHERE s.filepath IS NOT NULL
+              AND NOT starts_with(s.symbol, 'local ')
+              AND COALESCE(s.kind, '') NOT IN ('Parameter', 'Module', 'Package', 'TypeParameter')
+              AND (? IS NULL OR f.language = ?)
+              AND (?::VARCHAR[] IS NULL OR EXISTS (
+                    SELECT 1 FROM UNNEST(?::VARCHAR[]) AS p(prefix)
+                    WHERE s.filepath = p.prefix OR starts_with(s.filepath, p.prefix || '/')
+                  ))
+        """
+        symbols = self._fetch_all(symbols_sql, (language, language, norm_prefixes, norm_prefixes))
+
+        edges_sql = """
+            SELECT
+                e.source,
+                e.target,
+                e.relation,
+                e.weight,
+                s_src.filepath AS src_filepath,
+                s_tgt.filepath AS tgt_filepath,
+                s_tgt.clean_symbol AS tgt_clean_symbol,
+                s_tgt.kind AS tgt_kind
+            FROM edges e
+            JOIN symbols s_src ON e.source = s_src.symbol
+            JOIN symbols s_tgt ON e.target = s_tgt.symbol
+            WHERE e.source <> e.target
+              AND NOT starts_with(e.source, 'local ')
+              AND NOT starts_with(e.target, 'local ')
+              AND s_src.filepath IS NOT NULL
+              AND s_tgt.filepath IS NOT NULL
+        """
+        edges = self._fetch_all(edges_sql)
+        return {"symbols": symbols, "edges": edges}

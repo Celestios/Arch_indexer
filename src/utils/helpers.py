@@ -2,7 +2,7 @@
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from utils.arch_config import ArchConfig
 from engines.registry import LanguageRegistry
@@ -23,6 +23,34 @@ def ext_to_lang(ext: str) -> str:
     if not ext.startswith("."):
         ext = "." + ext
     return LanguageRegistry.detect_language(ext) or "unknown"
+
+
+def normalize_scopes(scope: Optional[Union[str, List[str]]]) -> Optional[List[str]]:
+    """Normalizes comma-separated, JSON array, or list scopes to clean POSIX path prefixes."""
+    if scope is None:
+        return None
+    if isinstance(scope, str):
+        stripped = scope.strip()
+        if stripped.startswith("["):
+            try:
+                loaded = json.loads(stripped)
+                if isinstance(loaded, list):
+                    raw_items = [str(s).strip() for s in loaded if str(s).strip()]
+                else:
+                    raw_items = [stripped]
+            except Exception:
+                raw_items = [s.strip() for s in stripped.split(",") if s.strip()]
+        else:
+            raw_items = [s.strip() for s in stripped.split(",") if s.strip()]
+    else:
+        raw_items = [str(s).strip() for s in scope if str(s).strip()]
+
+    cleaned = [
+        p.replace("\\", "/").rstrip("/")
+        for p in raw_items
+        if p and p.replace("\\", "/").rstrip("/") not in (".", "./", "*", "all", "")
+    ]
+    return cleaned or None
 
 
 def resolve_filepath(repository, raw_path: str) -> Optional[str]:

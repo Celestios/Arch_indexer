@@ -38,6 +38,8 @@
 
 ## E
 
+- [emergent-clustering-architecture.md](emergent-clustering-architecture.md) — Standalone parameter-free hierarchical clustering package, sparse O(E) Louvain modularity with internal self-loop preservation, and boundary-aware architectural drift diagnostics
+
 ## F
 
 ## G

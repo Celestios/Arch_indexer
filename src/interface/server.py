@@ -31,7 +31,14 @@ from interface.tools.analyze import handle_analyze
 from interface.tools.set_fields import handle_set_fields
 from interface.tools.clear_pending import handle_clear_pending
 from interface.tools.query import handle_query
-from interface.validators import validate_direction, validate_resolution, validate_sections
+from interface.tools.clusters import handle_clusters
+from interface.validators import (
+    validate_direction,
+    validate_resolution,
+    validate_sections,
+    validate_cluster_view,
+    validate_cluster_unit,
+)
 
 mcp = FastMCP("arch")
 _explicit_project_root = contextvars.ContextVar("_explicit_project_root", default=None)
@@ -588,6 +595,72 @@ async def query(
         return f"Error: {e}"
     except Exception as e:
         return f"Error executing query: {e}"
+
+
+@_tool()
+async def clusters(
+    project_root: str,
+    cluster: Optional[str] = None,
+    depth: int = 2,
+    unit: str = "symbol",
+    view: str = "both",
+    scope: Optional[Union[str, List[str]]] = None,
+    language: Optional[str] = None,
+    include_tests: bool = False,
+    include_drift: bool = True,
+    ctx: Context = None,
+) -> str:
+    """
+    Performs parameter-free hierarchical graph clustering, containment scoring, and architectural drift diagnostics.
+    Decomposes the workspace graph bottom-up into a multi-level dendrogram with dominance-gated hub ejection (LCA invariant).
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
+    cluster: Cluster ID (e.g. 'c1', 'c2.1'), target symbol/file to inspect, 'unreferenced', or None for root overview.
+    depth: Hierarchy expansion depth below focal cluster (default: 2).
+    unit: Analysis unit: 'symbol' (default) or 'file'.
+    view: Output view: 'both' (default), 'tree', or 'mermaid'.
+    scope: Directory prefix or list of prefixes to constrain workspace analysis.
+    language: Target programming language filter.
+    include_tests: Include test files and symbols (default: False).
+    include_drift: Append split-brain file/class and misplaced symbol diagnostics (default: True).
+    """
+    ok_v, view_or_err = validate_cluster_view(view)
+    if not ok_v:
+        return f"Error: {view_or_err}"
+
+    ok_u, unit_or_err = validate_cluster_unit(unit)
+    if not ok_u:
+        return f"Error: {unit_or_err}"
+
+    try:
+        depth_val = int(depth)
+        if depth_val < 1:
+            return "Error: Depth must be an integer >= 1."
+    except (ValueError, TypeError):
+        return f"Error: Invalid depth value: '{depth}'. Must be an integer >= 1."
+
+    try:
+        filepath_hint = (
+            cluster
+            if isinstance(cluster, str) and ("/" in cluster or "\\" in cluster or cluster.endswith(".dart") or cluster.endswith(".py") or cluster.endswith(".rs") or cluster.endswith(".go") or cluster.endswith(".ts") or cluster.endswith(".js"))
+            else None
+        )
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
+        return handle_clusters(
+            repository=repository,
+            project_root=resolved_root,
+            cluster=cluster,
+            depth=depth_val,
+            unit=unit_or_err,
+            view=view_or_err,
+            scope=scope,
+            language=language,
+            include_tests=include_tests,
+            include_drift=include_drift,
+        )
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error running cluster analysis: {e}"
 
 
 def run_server(port: int = 0):

@@ -9,6 +9,7 @@ from commands.impact import cmd_impact
 from commands.set_status import cmd_set_status
 from commands.set_fields import cmd_set_fields
 from commands.clear_pending import cmd_clear_pending
+from commands.clusters import cmd_clusters
 from commands.graph import cmd_graph
 from commands.mcp import cmd_mcp
 
@@ -17,6 +18,7 @@ COMMANDS = [
     "analyze",
     "audit",
     "clear_pending",
+    "clusters",
     "graph",
     "history",
     "impact",
@@ -40,6 +42,7 @@ __all__ = [
     "register_all",
     "cmd_init",
     "cmd_audit",
+    "cmd_clusters",
     "cmd_history",
     "cmd_watch",
     "cmd_analyze",

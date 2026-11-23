@@ -83,3 +83,23 @@ def validate_sections(
         )
 
     return True, deduped
+
+
+VALID_CLUSTER_VIEWS = ("tree", "mermaid", "both")
+VALID_CLUSTER_UNITS = ("symbol", "file")
+
+
+def validate_cluster_view(view: Optional[str]) -> Tuple[bool, str]:
+    """Validate cluster view parameter ('tree', 'mermaid', 'both'). Returns (is_valid, value_or_error)."""
+    v = (view or "both").strip().lower()
+    if v not in VALID_CLUSTER_VIEWS:
+        return False, f"Invalid view: '{view}'. Allowed: {', '.join(VALID_CLUSTER_VIEWS)}."
+    return True, v
+
+
+def validate_cluster_unit(unit: Optional[str]) -> Tuple[bool, str]:
+    """Validate cluster unit parameter ('symbol', 'file'). Returns (is_valid, value_or_error)."""
+    u = (unit or "symbol").strip().lower()
+    if u not in VALID_CLUSTER_UNITS:
+        return False, f"Invalid unit: '{unit}'. Allowed: {', '.join(VALID_CLUSTER_UNITS)}."
+    return True, u
