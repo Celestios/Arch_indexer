@@ -28,7 +28,7 @@ def _resolve_package_root(file_path: Path, project_root: Path, lang: str) -> Pat
     return project_root
 
 
-_FFI_BRIDGE_INDICATORS = ("frb_generated", "bridge", "ffi", "_generated")
+_FFI_BRIDGE_INDICATORS = ("bridge", "ffi")
 
 
 def _has_ffi_bridge_files(files) -> bool:
@@ -53,3 +53,4 @@ def start_watcher(project_root: Path, debounce: float = 3.0):
         print("\n[arch watch] Stopped.")
     finally:
         watcher.stop()
+

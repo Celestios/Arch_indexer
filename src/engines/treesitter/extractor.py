@@ -246,6 +246,12 @@ def _extract_ast(
                 elif decl:
                     name_node = decl.child_by_field_name("declarator") or decl
 
+            if not name_node:
+                for ch in actual_node.children:
+                    if ch.type in ("identifier", "type_identifier"):
+                        name_node = ch
+                        break
+
             body_node = actual_node.child_by_field_name("body")
             if name_node:
                 item_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
@@ -343,3 +349,111 @@ def extract_symbols_from_file(
         return []
 
     return _extract_ast(tree.root_node, code_bytes, norm_fp, _derive_module_prefix(norm_fp), language)
+
+
+_DI_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+_DI_TYPE_ARG_RE = re.compile(r"<\s*([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _find_enclosing_declaration(line: int, sorted_decls: List[SymbolDeclaration]) -> Optional[SymbolDeclaration]:
+    """Finds the narrowest enclosing declaration containing the given 1-based line."""
+    for decl in sorted_decls:
+        if decl.start_line <= line <= decl.end_line:
+            return decl
+    return None
+
+
+def extract_di_edges(
+    filepath: Union[str, Path],
+    source: Optional[Union[str, bytes]] = None,
+    project_root: Optional[Path] = None,
+    declarations: Optional[List[SymbolDeclaration]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Declaratively scans AST call expressions matching LanguageSpec.di_call_patterns
+    and returns raw DI dependency records: {source, target_name, call_line}.
+    Returns [] immediately for languages without configured di_call_patterns.
+    """
+    fp = Path(filepath)
+    language = detect_language(fp)
+    if not language:
+        return []
+
+    spec = LanguageRegistry.get_spec(language)
+    if not spec or not spec.di_call_patterns:
+        return []
+
+    if source is None:
+        if not fp.exists():
+            return []
+        code_bytes = fp.read_bytes()
+    elif isinstance(source, str):
+        code_bytes = source.encode("utf-8")
+    else:
+        code_bytes = source
+
+    parser = get_parser(language)
+    if not parser:
+        return []
+    tree = parser.parse(code_bytes)
+    if not tree or not tree.root_node:
+        return []
+
+    decls = declarations if declarations is not None else extract_symbols_from_file(fp, code_bytes, project_root=project_root)
+    if not decls:
+        return []
+    # Narrowest span first so inner methods win over enclosing classes
+    sorted_decls = sorted(decls, key=lambda d: (d.end_line - d.start_line, d.start_line))
+
+    patterns = spec.di_call_patterns
+    pattern_regexes = [
+        (pat, re.compile(rf"(?:^|[^A-Za-z0-9_]){re.escape(pat)}(?:\s*<\s*([A-Za-z_][A-Za-z0-9_]*)\s*>)?\s*\(([^()]*)\)"))
+        for pat in patterns
+    ]
+
+    di_edges: List[Dict[str, Any]] = []
+    seen = set()
+
+    def visit(node: tree_sitter.Node):
+        # Match call/selector/expression nodes without hardcoding language-specific grammar names
+        if "call" in node.type or "selector" in node.type or node.type in ("expression_statement", "initialized_variable_definition", "return_statement", "assignment_expression"):
+            text = code_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+            for pat, regex in pattern_regexes:
+                if pat not in text:
+                    continue
+                for match in regex.finditer(text):
+                    type_arg = match.group(1)
+                    arg_body = (match.group(2) or "").strip()
+                    target_name = type_arg
+                    if not target_name and arg_body:
+                        m_type = _DI_TYPE_ARG_RE.search(arg_body)
+                        if m_type:
+                            target_name = m_type.group(1)
+                        else:
+                            first_arg = arg_body.split(",", 1)[0].strip()
+                            # Strip trailing selector like .notifier or .future
+                            base_arg = first_arg.split(".", 1)[0].strip()
+                            m_ident = _DI_IDENT_RE.search(base_arg)
+                            if m_ident:
+                                target_name = m_ident.group(1)
+                    if not target_name:
+                        continue
+                    line_offset = text[:match.start()].count("\n")
+                    call_line = node.start_point.row + 1 + line_offset
+                    enclosing = _find_enclosing_declaration(call_line, sorted_decls)
+                    if not enclosing:
+                        continue
+                    key = (enclosing.symbol, target_name, call_line)
+                    if key not in seen:
+                        seen.add(key)
+                        di_edges.append({
+                            "source": enclosing.symbol,
+                            "target_name": target_name,
+                            "call_line": call_line,
+                        })
+
+        for child in node.children:
+            visit(child)
+
+    visit(tree.root_node)
+    return di_edges

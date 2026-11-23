@@ -1,5 +1,6 @@
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 from utils.helpers import demangle_scip_symbol, resolve_symbol_in_repo, is_test_caller, detect_entry_point
 
 
@@ -37,11 +38,13 @@ def handle_impact(
     repository,
     direction: str = "upstream",
     max_nodes: int = 50,
+    project_root: Optional[Union[str, Path]] = None,
 ) -> str:
     """
     Blast radius analysis for a symbol or class.
     For methods/functions: compact indented call tree for the requested direction ('upstream', 'downstream', or 'both').
     For classes: direct usages & interface callers (upstream) and per-method dependencies (downstream).
+    Enriches focal file with live Git hotspot risk and Lift-ranked temporal co-change coupling.
     """
     dir_norm = (direction or "upstream").lower()
     resolved = resolve_symbol_in_repo(repository, symbol)
@@ -63,18 +66,34 @@ def handle_impact(
         )
 
     focal_fp = sym_record.get("filepath") if sym_record else None
-    if focal_fp:
-        from change_tracker.git_coupling import get_co_changed_files
-        co_changes = get_co_changed_files(repository, focal_fp, min_frequency=0.20)
-        if co_changes:
-            co_md = [
-                "### Historical Git Co-Change Coupling",
-                f"> Modifying `{focal_fp}` historically correlates with changes in:",
-            ]
-            for c in co_changes:
-                pct = round(c["frequency"] * 100, 1)
-                co_md.append(f"- `{c['filepath']}` ({pct}% over {c['co_change_count']} commits)")
-            res_md += "\n" + "\n".join(co_md) + "\n"
+    if focal_fp and project_root:
+        from engines.git_analyzer import get_file_impact_telemetry
+        telemetry = get_file_impact_telemetry(
+            repository,
+            Path(project_root),
+            focal_fp,
+            commits=100,
+            coupling_limit=5,
+        )
+        hotspot = telemetry.get("hotspot")
+        co_changes = telemetry.get("co_changes") or []
+        if hotspot or co_changes:
+            git_md = ["### Git Hotspot & Temporal Coupling"]
+            if hotspot:
+                git_md.append(
+                    f"> **File Hotspot Risk**: `{hotspot['risk_tier']}` "
+                    f"(risk={hotspot['risk_score']} | {hotspot['touches']} touches, "
+                    f"{hotspot['bursts']} bursts, {hotspot['rework_pct']}% rework, "
+                    f"fan-in={hotspot['fan_in']}, cx={hotspot['max_complexity']})"
+                )
+            if co_changes:
+                git_md.append(f"> Modifying `{focal_fp}` historically co-changes with:")
+                for c in co_changes:
+                    git_md.append(
+                        f"- [{c['coupling_type']}] `{c['filepath']}` "
+                        f"({c['co_commits']} co-commits, conf={c['confidence_pct']}%, lift={c['lift']}x)"
+                    )
+            res_md += "\n" + "\n".join(git_md) + "\n"
 
     return res_md
 
@@ -261,9 +280,9 @@ def _handle_symbol_impact(
         sym_record = repository.graph.get_symbol(db_symbol)
     change_count = sym_record.get("change_count", 1) if sym_record else 1
     if change_count >= 3:
-        md.append(f"> **Change Risk**: High-Churn Hotspot ({change_count} modifications)\n")
+        md.append(f"> **Symbol Churn**: High-Churn Hotspot ({change_count} indexed edits)\n")
     else:
-        md.append(f"> **Stability**: Stable ({change_count} edits)\n")
+        md.append(f"> **Symbol Churn**: Stable ({change_count} indexed edits)\n")
 
     if direction in ("upstream", "both"):
         raw_upstream = [item for item in closure.get("upstream", []) if not is_noisy_symbol(item.get("symbol", ""))]

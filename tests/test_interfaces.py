@@ -90,7 +90,7 @@ class TestRepositoryInterfaces:
     def test_analytics_store_has_required_methods(self):
         from db.store_analytics import AnalyticsStore
         required = ['get_symbol_counts_by_kind', 'get_repo_totals',
-                    'get_symbols_by_file_prefix', 'get_transitive_closure']
+                    'get_compliance_summary', 'get_transitive_closure']
         for method in required:
             assert hasattr(AnalyticsStore, method), f"Missing: {method}"
 

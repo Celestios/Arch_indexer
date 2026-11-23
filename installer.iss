@@ -29,16 +29,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "addtopath"; Description: "Add Arch to system PATH (enables 'arch' in terminal)"; GroupDescription: "Terminal Configuration:"; Flags: checkedonce
-Name: "registerantigravity"; Description: "Register Arch MCP in Antigravity (mcp_config.json)"; GroupDescription: "IDE Integration:"; Flags: checkedonce
+Name: "registerantigravity"; Description: "Register Arch MCP and skill in Antigravity (mcp_config.json & global skill)"; GroupDescription: "IDE Integration:"; Flags: checkedonce
 
 [Files]
 Source: "dist\arch.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "scripts\register_mcp.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "resources\arch\*"; DestDir: "{app}\resources\arch"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Run]
 Filename: "powershell.exe"; \
-    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register_mcp.ps1"" -Install -AppPath ""{app}\{#MyAppExeName}"""; \
-    StatusMsg: "Registering Arch MCP in Antigravity configuration..."; \
+    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register_mcp.ps1"" -Install -AppPath ""{app}\{#MyAppExeName}"" -SkillSourceDir ""{app}\resources\arch"""; \
+    StatusMsg: "Registering Arch MCP and skill in Antigravity configuration..."; \
     Flags: runhidden; \
     Tasks: registerantigravity
 

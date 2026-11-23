@@ -33,8 +33,8 @@
 
 ## D
 
-- [dual-engine-architecture.md](dual-engine-architecture.md) — Dual-engine division of responsibility between Tree-sitter AST engine and SCIP semantic compiler, two-tier watcher, and range normalizer fix
-- [duckdb-resilience.md](duckdb-resilience.md) — Automatic quarantine and recovery for unreplayable DuckDB WAL assertion failures
+- [dual-engine-architecture.md](dual-engine-architecture.md) — Dual-engine division of responsibility between Tree-sitter AST engine and SCIP semantic compiler, two-tier watcher, AST hash decoupling, Injects edge remapping, and range normalizer fix
+- [duckdb-resilience.md](duckdb-resilience.md) — Automatic quarantine and recovery for unreplayable DuckDB WAL assertion failures, zero-boxing C++ read_csv bulk staging, and linear semi-join edge deletions
 
 ## E
 

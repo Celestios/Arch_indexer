@@ -208,6 +208,7 @@ class ArchConfig(_MappingMixin):
 
     prefixes: Dict[str, PrefixConfig] = field(default_factory=dict)
     exclude: List[str] = field(default_factory=list)
+    ffi_bindings: Dict[str, str] = field(default_factory=dict)
     extra: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -217,17 +218,21 @@ class ArchConfig(_MappingMixin):
 
         prefixes: Dict[str, PrefixConfig] = {}
         exclude: List[str] = []
+        ffi_bindings: Dict[str, str] = {}
         extra: Dict[str, Any] = {}
 
         for key, value in raw.items():
             if key == "exclude":
                 exclude = _normalize_exclude(value)
+            elif key == "ffi_bindings":
+                if isinstance(value, dict):
+                    ffi_bindings = {str(k): str(v) for k, v in value.items() if k and v}
             elif isinstance(value, dict):
                 prefixes[key] = PrefixConfig.from_dict(key, value)
             else:
                 extra[key] = value
 
-        return cls(prefixes=prefixes, exclude=exclude, extra=extra)
+        return cls(prefixes=prefixes, exclude=exclude, ffi_bindings=ffi_bindings, extra=extra)
 
     @classmethod
     def validate_dict(cls, config: Any) -> Dict[str, Any]:
@@ -243,6 +248,15 @@ class ArchConfig(_MappingMixin):
             if prefix == "exclude":
                 if not isinstance(prefix_conf, (list, str)):
                     errors.append("'exclude' must be a list of glob patterns or a string")
+                continue
+
+            if prefix == "ffi_bindings":
+                if not isinstance(prefix_conf, dict):
+                    errors.append("'ffi_bindings' must be a JSON object mapping client symbols to native symbols")
+                else:
+                    for client_sym, native_sym in prefix_conf.items():
+                        if not isinstance(client_sym, str) or not client_sym.strip() or not isinstance(native_sym, str) or not native_sym.strip():
+                            errors.append(f"'ffi_bindings' entry '{client_sym}' -> '{native_sym}' must map non-empty strings")
                 continue
 
             if not isinstance(prefix_conf, dict):
@@ -436,8 +450,11 @@ class ArchConfig(_MappingMixin):
         result: Dict[str, Any] = {}
         if self.exclude:
             result["exclude"] = list(self.exclude)
+        if self.ffi_bindings:
+            result["ffi_bindings"] = dict(self.ffi_bindings)
         for name, prefix_conf in self.prefixes.items():
             result[name] = prefix_conf.to_dict()
         result.update(self.extra)
         return result
+
 

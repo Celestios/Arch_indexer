@@ -21,7 +21,7 @@ def register(subparsers):
 
 def cmd_impact(args):
     """Performs blast radius analysis for a symbol or class."""
-    with workspace_session(args) as (_, _, repository):
+    with workspace_session(args) as (project_root, _, repository):
         try:
             print(
                 handle_impact(
@@ -30,6 +30,7 @@ def cmd_impact(args):
                     repository,
                     direction=getattr(args, "direction", "upstream"),
                     max_nodes=getattr(args, "max_nodes", 50),
+                    project_root=project_root,
                 )
             )
         except Exception as e:

@@ -54,23 +54,24 @@ class Auditor:
         propagation_sources = self.propagator.run_propagation(
             symbol_classifications, snapshot.all_edges, config
         )
-        update_edge_weights(self.repository, snapshot.all_edges, symbol_classifications, config)
+        with self.repository.transaction():
+            update_edge_weights(self.repository, snapshot.all_edges, symbol_classifications, config)
 
-        classification_updates = {sym: data["fields"] for sym, data in symbol_classifications.items()}
-        self.repository.graph.update_symbols_classification(classification_updates)
+            classification_updates = {sym: data["fields"] for sym, data in symbol_classifications.items()}
+            self.repository.graph.update_symbols_classification(classification_updates)
 
-        violations = []
-        for checker in self.checkers:
-            violations.extend(checker(
-                snapshot=snapshot,
-                symbol_classifications=symbol_classifications,
-                propagation_sources=propagation_sources,
-                config=config,
-                filepath_filter=filepath_filter,
-            ))
+            violations = []
+            for checker in self.checkers:
+                violations.extend(checker(
+                    snapshot=snapshot,
+                    symbol_classifications=symbol_classifications,
+                    propagation_sources=propagation_sources,
+                    config=config,
+                    filepath_filter=filepath_filter,
+                ))
 
-        self.repository.quality.upsert_violations(violations)
-        self._recompute_file_statuses(violations, snapshot.all_files, filepath_filter)
+            self.repository.quality.upsert_violations(violations)
+            self._recompute_file_statuses(violations, snapshot.all_files, filepath_filter)
         print(f"[Auditor] Completed audit. Found {len(violations)} architectural violations.", file=sys.stderr)
         return violations
 

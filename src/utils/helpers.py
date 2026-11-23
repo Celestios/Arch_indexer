@@ -306,8 +306,9 @@ def detect_entry_point(sym: str, filepath: Optional[str] = None, incoming_count:
         return "System Entry: `main()`"
     if "interface/tools" in fp or "interface.tools" in clean or "interface/server" in fp:
         return "MCP Tool Endpoint"
-    if "bridge" in fp or "ffi" in fp or "frb_generated" in fp:
+    if "bridge" in fp or "ffi" in fp:
         return "FFI Export / Bridge"
     if incoming_count == 0 and not is_test_caller(sym, filepath):
         return "Root Caller (No Upstream)"
     return None
+

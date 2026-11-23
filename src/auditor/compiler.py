@@ -15,6 +15,7 @@ from utils.helpers import (
     extract_code_slice,
 )
 from engines.registry import LanguageRegistry
+from engines.polymorphism import IMPLEMENTS_RELATION, expand_virtual_neighbors
 
 
 class ContextCompiler:
@@ -49,10 +50,14 @@ class ContextCompiler:
             neighbor_edges = []
             if direction in ("upstream", "both"):
                 for edge in self.repository.graph.get_edges(target=curr):
-                    neighbor_edges.append((edge["source"], edge.get("weight", 1.0)))
+                    if edge.get("relation") != IMPLEMENTS_RELATION:
+                        neighbor_edges.append((edge["source"], edge.get("weight", 1.0)))
             if direction in ("downstream", "both"):
                 for edge in self.repository.graph.get_edges(source=curr):
-                    neighbor_edges.append((edge["target"], edge.get("weight", 1.0)))
+                    if edge.get("relation") != IMPLEMENTS_RELATION:
+                        neighbor_edges.append((edge["target"], edge.get("weight", 1.0)))
+            for v_neighbor, v_weight, _ in expand_virtual_neighbors(self.repository, curr, direction):
+                neighbor_edges.append((v_neighbor, v_weight))
 
             for neighbor, weight in neighbor_edges:
                 new_cost = cum_cost + 1.0 / max(weight, 0.01)
@@ -294,3 +299,4 @@ class ContextCompiler:
                 md_content = f"> [!WARNING]\n> Failed to write context to file: {e}\n\n" + md_content
 
         return md_content
+

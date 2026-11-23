@@ -1,7 +1,13 @@
 import uuid
 import logging
 from typing import Dict, List, Any, Optional
-from db.base import BaseRepository, UPSERT_VIOLATION_SQL, normalize_path
+from db.base import (
+    BaseRepository,
+    UPSERT_VIOLATION_SQL,
+    UPSERT_VIOLATIONS_VECTORIZED_SQL,
+    UPSERT_DIAGNOSTICS_VECTORIZED_SQL,
+    normalize_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,22 +55,20 @@ class QualityStore(BaseRepository):
         return violation_id
 
     def upsert_violations(self, violations: List[Dict[str, Any]]):
-        """Bulk upserts compliance violations."""
+        """Bulk upserts compliance violations using vectorized UNNEST."""
         if not violations:
             return
-        data = [
-            (
-                v.get("violation_id") or f"viol_{uuid.uuid4().hex[:12]}",
-                v.get("rule_id"),
-                v.get("symbol"),
-                normalize_path(v["filepath"]),
-                v["line"],
-                v["message"],
-                v.get("origin", "automatic"),
-            )
-            for v in violations
-        ]
-        self._executemany(UPSERT_VIOLATION_SQL, data)
+        v_ids = [v.get("violation_id") or f"viol_{uuid.uuid4().hex[:12]}" for v in violations]
+        r_ids = [v.get("rule_id") for v in violations]
+        syms = [v.get("symbol") for v in violations]
+        fps = [normalize_path(v["filepath"]) for v in violations]
+        lines = [int(v["line"]) for v in violations]
+        msgs = [v["message"] for v in violations]
+        origins = [v.get("origin", "automatic") for v in violations]
+        self._execute(
+            UPSERT_VIOLATIONS_VECTORIZED_SQL,
+            (v_ids, r_ids, syms, fps, lines, msgs, origins),
+        )
 
     def get_violations(
         self,
@@ -130,25 +134,20 @@ class QualityStore(BaseRepository):
     # ------------------ Diagnostics Domain ------------------
 
     def upsert_diagnostics(self, diagnostics_list: List[Dict[str, Any]]):
-        """Bulk inserts compiler/analyzer diagnostics."""
+        """Bulk inserts compiler/analyzer diagnostics using vectorized UNNEST."""
         if not diagnostics_list:
             return
-        data = [
-            (
-                normalize_path(diag["filepath"]),
-                diag.get("symbol"),
-                diag["line"],
-                diag.get("col", 0),
-                diag.get("severity", "Error"),
-                diag.get("code"),
-                diag.get("message", ""),
-                diag.get("tags"),
-            )
-            for diag in diagnostics_list
-        ]
-        self._executemany(
-            "INSERT INTO diagnostics (filepath, symbol, line, col, severity, code, message, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            data,
+        fps = [normalize_path(diag["filepath"]) for diag in diagnostics_list]
+        syms = [diag.get("symbol") for diag in diagnostics_list]
+        lines = [int(diag.get("line", 1)) for diag in diagnostics_list]
+        cols = [int(diag.get("col", 0)) for diag in diagnostics_list]
+        sevs = [diag.get("severity", "Error") for diag in diagnostics_list]
+        codes = [diag.get("code") for diag in diagnostics_list]
+        msgs = [diag.get("message", "") for diag in diagnostics_list]
+        tags = [diag.get("tags") for diag in diagnostics_list]
+        self._execute(
+            UPSERT_DIAGNOSTICS_VECTORIZED_SQL,
+            (fps, syms, lines, cols, sevs, codes, msgs, tags),
         )
 
     def get_diagnostics(

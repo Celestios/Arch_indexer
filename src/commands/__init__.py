@@ -2,7 +2,7 @@ import importlib
 
 from commands.init import cmd_init
 from commands.audit import cmd_audit
-from commands.report import cmd_report
+from commands.history import cmd_history
 from commands.watch import cmd_watch
 from commands.analyze import cmd_analyze
 from commands.impact import cmd_impact
@@ -18,10 +18,10 @@ COMMANDS = [
     "audit",
     "clear_pending",
     "graph",
+    "history",
     "impact",
     "init",
     "mcp",
-    "report",
     "set_fields",
     "set_status",
     "watch",
@@ -40,7 +40,7 @@ __all__ = [
     "register_all",
     "cmd_init",
     "cmd_audit",
-    "cmd_report",
+    "cmd_history",
     "cmd_watch",
     "cmd_analyze",
     "cmd_impact",

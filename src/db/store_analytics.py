@@ -1,8 +1,14 @@
 import logging
 from typing import Dict, List, Any
 from db.base import BaseRepository, normalize_path
+from engines.polymorphism import (
+    POLYMORPHIC_KINDS,
+    IMPLEMENTS_RELATION,
+    VIRTUAL_DISPATCH_RELATION,
+)
 
 logger = logging.getLogger(__name__)
+_POLY_KINDS_LIST = sorted(POLYMORPHIC_KINDS)
 
 
 class AnalyticsStore(BaseRepository):
@@ -14,7 +20,7 @@ class AnalyticsStore(BaseRepository):
     def get_symbol_counts_by_kind(self) -> Dict[str, int]:
         """Returns symbol counts grouped by their declaration kind."""
         rows = self._fetch_all("SELECT kind, COUNT(*) AS cnt FROM symbols GROUP BY kind")
-        return {r["kind"]: r["cnt"] for r in rows}
+        return {r["kind"]: int(r["cnt"]) for r in rows}
 
     def get_repo_totals(self) -> Dict[str, int]:
         """Returns total counts for files, symbols, edges, occurrences, and violations."""
@@ -24,28 +30,133 @@ class AnalyticsStore(BaseRepository):
         violations_cnt = (self._fetch_one("SELECT COUNT(*) AS cnt FROM compliance_violations") or {}).get("cnt", 0)
         occ_cnt = (self._fetch_one("SELECT COUNT(*) AS cnt FROM occurrences") or {}).get("cnt", 0)
         return {
-            "files": files_cnt,
-            "symbols": symbols_cnt,
-            "edges": edges_cnt,
-            "violations": violations_cnt,
-            "occurrences": occ_cnt,
+            "files": int(files_cnt),
+            "symbols": int(symbols_cnt),
+            "edges": int(edges_cnt),
+            "violations": int(violations_cnt),
+            "occurrences": int(occ_cnt),
         }
 
-    def get_symbols_by_file_prefix(self) -> Dict[str, int]:
-        """Groups symbol counts by top-level directory prefix."""
-        prefix_counts: Dict[str, int] = {}
-        rows = self._fetch_all("SELECT filepath FROM symbols WHERE filepath IS NOT NULL")
-        for r in rows:
-            fp_norm = normalize_path(r["filepath"])
-            if not fp_norm:
-                continue
-            parts = fp_norm.split("/")
-            if len(parts) > 1:
-                prefix = f"{parts[0]}/{parts[1]}/" if len(parts) >= 3 else f"{parts[0]}/"
+    def get_compliance_summary(self, top_files: int = 5) -> Dict[str, Any]:
+        """
+        Returns a read-only aggregated compliance scorecard directly from DuckDB:
+        file posture, normalized severity counts, origin split, per-rule rollups,
+        and top offending files (excluding pending_audit markers from rule counts).
+        """
+        posture_row = self._fetch_one(
+            """
+            SELECT
+                COUNT(*) AS total_files,
+                COALESCE(SUM(CASE WHEN status = 'COMPLIANT' THEN 1 ELSE 0 END), 0) AS compliant_files,
+                COALESCE(SUM(CASE WHEN status <> 'COMPLIANT' THEN 1 ELSE 0 END), 0) AS violating_files,
+                COALESCE(SUM(CASE WHEN pending_audit = TRUE THEN 1 ELSE 0 END), 0) AS pending_audit,
+                COALESCE(SUM(CASE WHEN manual_status <> status THEN 1 ELSE 0 END), 0) AS manual_overrides
+            FROM files
+            """
+        ) or {}
+
+        rule_rows = self._fetch_all(
+            """
+            SELECT
+                COALESCE(v.rule_id, 'unknown') AS rule_id,
+                COALESCE(
+                    r.severity,
+                    CASE WHEN COALESCE(v.origin, 'automatic') = 'manual' THEN 'Manual' ELSE 'Warning' END
+                ) AS severity,
+                COALESCE(
+                    r.description,
+                    CASE WHEN COALESCE(v.origin, 'automatic') = 'manual'
+                         THEN 'Manual logical audit finding'
+                         ELSE 'Architectural boundary rule' END
+                ) AS description,
+                COALESCE(v.origin, 'automatic') AS origin,
+                COUNT(*) AS hit_count,
+                COUNT(DISTINCT v.filepath) AS file_count
+            FROM compliance_violations v
+            LEFT JOIN compliance_rules r ON v.rule_id = r.rule_id
+            WHERE COALESCE(v.rule_id, '') <> 'pending_audit'
+            GROUP BY 1, 2, 3, 4
+            ORDER BY hit_count DESC, rule_id ASC
+            """
+        )
+
+        file_rows = self._fetch_all(
+            """
+            SELECT filepath, COUNT(*) AS hit_count
+            FROM compliance_violations
+            WHERE COALESCE(rule_id, '') <> 'pending_audit'
+            GROUP BY filepath
+            ORDER BY hit_count DESC, filepath ASC
+            LIMIT ?
+            """,
+            (int(top_files),),
+        )
+
+        def _norm_severity(raw: Any) -> str:
+            val = str(raw or "Warning").strip().lower()
+            mapping = {
+                "critical": "Critical",
+                "error": "Error",
+                "warning": "Warning",
+                "info": "Info",
+                "manual": "Manual",
+            }
+            return mapping.get(val, val.capitalize() if val else "Warning")
+
+        by_severity: Dict[str, int] = {}
+        merged_rules: Dict[str, Dict[str, Any]] = {}
+        total_violations = 0
+        automatic_violations = 0
+        manual_violations = 0
+
+        for r in rule_rows:
+            hits = int(r.get("hit_count") or 0)
+            sev = _norm_severity(r.get("severity"))
+            origin = str(r.get("origin") or "automatic").lower()
+            rid = str(r.get("rule_id") or "unknown")
+            desc = str(r.get("description") or "").strip()
+            f_cnt = int(r.get("file_count") or 0)
+
+            total_violations += hits
+            if origin == "manual":
+                manual_violations += hits
             else:
-                prefix = "./"
-            prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
-        return prefix_counts
+                automatic_violations += hits
+
+            by_severity[sev] = by_severity.get(sev, 0) + hits
+
+            if rid not in merged_rules:
+                merged_rules[rid] = {
+                    "rule_id": rid,
+                    "severity": sev,
+                    "description": desc,
+                    "count": hits,
+                    "file_count": f_cnt,
+                }
+            else:
+                merged_rules[rid]["count"] += hits
+                merged_rules[rid]["file_count"] = max(merged_rules[rid]["file_count"], f_cnt)
+
+        by_rule = sorted(merged_rules.values(), key=lambda x: (-x["count"], x["rule_id"]))
+        hotspot_files = [
+            {"filepath": normalize_path(r["filepath"]), "count": int(r.get("hit_count") or 0)}
+            for r in file_rows
+            if r.get("filepath")
+        ]
+
+        return {
+            "total_files": int(posture_row.get("total_files") or 0),
+            "compliant_files": int(posture_row.get("compliant_files") or 0),
+            "violating_files": int(posture_row.get("violating_files") or 0),
+            "pending_audit": int(posture_row.get("pending_audit") or 0),
+            "manual_overrides": int(posture_row.get("manual_overrides") or 0),
+            "total_violations": total_violations,
+            "automatic_violations": automatic_violations,
+            "manual_violations": manual_violations,
+            "by_severity": by_severity,
+            "by_rule": by_rule,
+            "hotspot_files": hotspot_files,
+        }
 
     def get_symbol_count_by_languages(self, languages: List[str]) -> int:
         """Returns the count of symbols originating from files of specific languages."""
@@ -55,7 +166,7 @@ class AnalyticsStore(BaseRepository):
             "SELECT COUNT(*) AS cnt FROM symbols WHERE filepath IN (SELECT filepath FROM files WHERE language IN (SELECT UNNEST(?::VARCHAR[])))",
             (languages,),
         )
-        return row["cnt"] if row else 0
+        return int(row["cnt"]) if row else 0
 
     def get_transitive_closure(
         self,
@@ -63,7 +174,10 @@ class AnalyticsStore(BaseRepository):
         max_depth: int = 4,
         direction: str = "both",
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """BFS graph traversal finding upstream (callers) and/or downstream (callees) symbols."""
+        """
+        Symmetrical BFS graph traversal finding upstream (callers) and/or downstream (callees) symbols.
+        Expands polymorphic Implements edges bidirectionally as VirtualDispatch without sibling leakage.
+        """
         upstream: List[Dict[str, Any]] = []
         downstream: List[Dict[str, Any]] = []
         dir_norm = (direction or "both").lower()
@@ -75,19 +189,25 @@ class AnalyticsStore(BaseRepository):
                 if not current_frontier:
                     break
                 nodes = list(current_frontier.keys())
-                rows = self._fetch_all(
-                    "SELECT source, target, relation FROM edges WHERE target IN (SELECT UNNEST(?::VARCHAR[]))",
-                    (nodes,),
+                # Standard callers (exclude Implements so sibling concrete types do not leak)
+                direct_rows = self._fetch_all(
+                    "SELECT source AS next_sym, target AS curr_sym, relation FROM edges WHERE target IN (SELECT UNNEST(?::VARCHAR[])) AND relation <> ?",
+                    (nodes, IMPLEMENTS_RELATION),
+                )
+                # Virtual dispatch upstream: concrete C --[Implements]--> abstract T
+                virtual_rows = self._fetch_all(
+                    "SELECT target AS next_sym, source AS curr_sym, ? AS relation FROM edges WHERE source IN (SELECT UNNEST(?::VARCHAR[])) AND relation = ?",
+                    (VIRTUAL_DISPATCH_RELATION, nodes, IMPLEMENTS_RELATION),
                 )
                 next_frontier = {}
-                for r in rows:
-                    caller, tgt, rel = r["source"], r["target"], r["relation"]
+                for r in direct_rows + virtual_rows:
+                    caller, curr, rel = r["next_sym"], r["curr_sym"], r["relation"]
                     if caller not in visited:
                         visited.add(caller)
-                        new_path = [caller] + current_frontier[tgt]
+                        new_path = [caller] + current_frontier[curr]
                         upstream.append({
                             "symbol": caller,
-                            "parent": tgt,
+                            "parent": curr,
                             "depth": depth + 1,
                             "path": new_path,
                             "relation": rel,
@@ -102,19 +222,30 @@ class AnalyticsStore(BaseRepository):
                 if not current_frontier:
                     break
                 nodes = list(current_frontier.keys())
-                rows = self._fetch_all(
-                    "SELECT target, source, relation FROM edges WHERE source IN (SELECT UNNEST(?::VARCHAR[]))",
-                    (nodes,),
+                # Standard callees (exclude Implements so concrete C does not bounce through T to siblings)
+                direct_rows = self._fetch_all(
+                    "SELECT target AS next_sym, source AS curr_sym, relation FROM edges WHERE source IN (SELECT UNNEST(?::VARCHAR[])) AND relation <> ?",
+                    (nodes, IMPLEMENTS_RELATION),
+                )
+                # Virtual dispatch downstream: abstract T (in POLYMORPHIC_KINDS) <--[Implements]-- concrete C
+                virtual_rows = self._fetch_all(
+                    """SELECT e.source AS next_sym, e.target AS curr_sym, ? AS relation
+                       FROM edges e
+                       JOIN symbols s ON e.target = s.symbol
+                       WHERE e.target IN (SELECT UNNEST(?::VARCHAR[]))
+                         AND e.relation = ?
+                         AND s.kind IN (SELECT UNNEST(?::VARCHAR[]))""",
+                    (VIRTUAL_DISPATCH_RELATION, nodes, IMPLEMENTS_RELATION, _POLY_KINDS_LIST),
                 )
                 next_frontier = {}
-                for r in rows:
-                    callee, src, rel = r["target"], r["source"], r["relation"]
+                for r in direct_rows + virtual_rows:
+                    callee, curr, rel = r["next_sym"], r["curr_sym"], r["relation"]
                     if callee not in visited:
                         visited.add(callee)
-                        new_path = current_frontier[src] + [callee]
+                        new_path = current_frontier[curr] + [callee]
                         downstream.append({
                             "symbol": callee,
-                            "parent": src,
+                            "parent": curr,
                             "depth": depth + 1,
                             "path": new_path,
                             "relation": rel,
@@ -133,7 +264,6 @@ class AnalyticsStore(BaseRepository):
             "symbols_count": totals["symbols"],
             "edges_count": totals["edges"],
             "occurrences_count": totals["occurrences"],
-            "definitions_count": def_row["cnt"] if def_row else 0,
+            "definitions_count": int(def_row["cnt"]) if def_row else 0,
             "references_count": totals["occurrences"],
         }
-

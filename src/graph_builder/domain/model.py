@@ -110,7 +110,7 @@ class GraphModel:
                 return False
 
         if self.exclude_boilerplate:
-            from engines.ffi_linker import is_boilerplate
+            from utils.exclusions import is_boilerplate
             if is_boilerplate(clean):
                 return False
 
@@ -311,7 +311,7 @@ class GraphModel:
 
             if src_id and tgt_id:
                 rel_lower = rel.lower()
-                etype = EdgeType.INHERITS if "inherit" in rel_lower else EdgeType.CALLS
+                etype = EdgeType.INHERITS if ("inherit" in rel_lower or rel_lower == "implements") else EdgeType.CALLS
                 coord = (e["line"], e["col"]) if e.get("line") is not None and e.get("col") is not None else None
                 self.add_edge(
                     source=src_id,
@@ -463,4 +463,5 @@ class GraphModel:
                 "edge_types": edge_counts,
             },
         }
+
 

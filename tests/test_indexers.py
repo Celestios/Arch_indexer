@@ -8,9 +8,12 @@ from engines.scip.indexers import index_dart
 
 
 def test_index_dart_already_activated(tmp_path):
-    # Setup dummy project with pubspec.yaml
+    # Setup dummy project with pubspec.yaml and existing package_config.json
     pubspec = tmp_path / "pubspec.yaml"
     pubspec.write_text("name: mycelium")
+    pkg_cfg = tmp_path / ".dart_tool" / "package_config.json"
+    pkg_cfg.parent.mkdir(parents=True, exist_ok=True)
+    pkg_cfg.write_text("{}")
 
     with patch("shutil.which", return_value="/path/to/dart"), \
          patch("subprocess.run") as mock_run, \
@@ -40,9 +43,12 @@ def test_index_dart_already_activated(tmp_path):
 
 
 def test_index_dart_not_activated_success(tmp_path):
-    # Setup dummy project with pubspec.yaml
+    # Setup dummy project with pubspec.yaml and existing package_config.json
     pubspec = tmp_path / "pubspec.yaml"
     pubspec.write_text("name: mycelium")
+    pkg_cfg = tmp_path / ".dart_tool" / "package_config.json"
+    pkg_cfg.parent.mkdir(parents=True, exist_ok=True)
+    pkg_cfg.write_text("{}")
 
     with patch("shutil.which", return_value="/path/to/dart"), \
          patch("subprocess.run") as mock_run, \
@@ -77,4 +83,8 @@ def test_index_dart_not_activated_success(tmp_path):
             cwd=str(tmp_path),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, shell=pytest.approx(True) if sys.platform == "win32" else pytest.approx(False)
+        )
+        mock_scroll.assert_called_once_with(
+            ["dart", "pub", "global", "run", "scip_dart", "."],
+            cwd=str(tmp_path), shell=pytest.approx(True) if sys.platform == "win32" else pytest.approx(False)
         )

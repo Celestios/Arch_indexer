@@ -7,7 +7,7 @@ from typing import Dict, List, Any, Optional, Union, Set
 from engines.registry import LanguageRegistry
 from engines.reconciler import reconcile_symbol_id
 from engines.treesitter.loader import detect_language, get_parser, get_language, is_available
-from engines.treesitter.extractor import extract_symbols_from_file, SymbolDeclaration
+from engines.treesitter.extractor import extract_symbols_from_file, extract_di_edges, SymbolDeclaration
 from engines.treesitter.folding import fold_code
 from engines.treesitter.rules import check_file
 from engines.treesitter.metrics import calculate_metrics
@@ -47,6 +47,8 @@ def sync_file_to_db(
     filepath: Union[str, Path],
     source: Optional[Union[str, bytes]] = None,
     project_root: Optional[Path] = None,
+    leaf_symbol_map: Optional[Dict[str, str]] = None,
+    commit: bool = True,
 ) -> List[SymbolDeclaration]:
     """Fast Tier-1 synchronization (< 2ms): updates DuckDB files and syntactic symbol columns."""
     fp = Path(filepath)
@@ -122,9 +124,47 @@ def sync_file_to_db(
             "end_col": decl.end_col,
         })
 
-    with repository.transaction():
-        repository.workspace.upsert_file(norm_fp, sha256_hash, lang)
-        repository.graph.upsert_syntactic_symbols(symbols_to_upsert)
+    raw_di_edges = extract_di_edges(fp, code_bytes, project_root=project_root, declarations=declarations)
+    injects_to_upsert: List[Dict[str, Any]] = []
+    if raw_di_edges:
+        seen_injects = set()
+        for item in raw_di_edges:
+            t_name = item["target_name"]
+            resolved_target = leaf_symbol_map.get(t_name) if leaf_symbol_map is not None else None
+            if not resolved_target and leaf_symbol_map is None:
+                matches = repository.graph.search_symbols(t_name, limit=10)
+                for m in matches:
+                    clean_m = m.get("clean_symbol") or m["symbol"]
+                    leaf = clean_m.rstrip("()").split(".")[-1]
+                    if leaf == t_name:
+                        resolved_target = m["symbol"]
+                        break
+            if resolved_target and resolved_target != item["source"]:
+                edge_key = (item["source"], resolved_target)
+                if edge_key not in seen_injects:
+                    seen_injects.add(edge_key)
+                    injects_to_upsert.append({
+                        "source": item["source"],
+                        "target": resolved_target,
+                        "relation": "Injects",
+                        "weight": 0.9,
+                        "call_line": item["call_line"],
+                    })
+
+    # Deduplicate symbols_to_upsert by symbol to prevent duplicate key errors in DuckDB UNNEST
+    deduped_symbols = list({s["symbol"]: s for s in symbols_to_upsert}.values())
+
+    if commit:
+        with repository.transaction():
+            repository.workspace.upsert_ast_file(norm_fp, sha256_hash, lang)
+            repository.graph.upsert_syntactic_symbols(deduped_symbols)
+            if injects_to_upsert:
+                repository.graph.upsert_edges(injects_to_upsert)
+    else:
+        repository.workspace.upsert_ast_file(norm_fp, sha256_hash, lang)
+        repository.graph.upsert_syntactic_symbols(deduped_symbols)
+        if injects_to_upsert:
+            repository.graph.upsert_edges(injects_to_upsert)
 
     return declarations
 
@@ -175,11 +215,31 @@ def sync_project_to_db(
                         except ValueError:
                             continue
 
-    for p in target_files:
-        try:
-            total_symbols += len(sync_file_to_db(repository, p, project_root=project_root))
-        except Exception:
-            pass
+    with repository.transaction():
+        # Pre-build in-memory leaf map from existing DB symbols to avoid slow per-call LIKE scans
+        existing_syms = repository.graph.get_all_symbols()
+        leaf_map: Dict[str, str] = {}
+        for s in existing_syms:
+            clean = s.get("clean_symbol") or s["symbol"]
+            leaf = clean.rstrip("()").split(".")[-1]
+            if leaf and leaf not in leaf_map:
+                leaf_map[leaf] = s["symbol"]
+
+        for p in target_files:
+            try:
+                decls = sync_file_to_db(
+                    repository,
+                    p,
+                    project_root=project_root,
+                    leaf_symbol_map=leaf_map,
+                    commit=False,
+                )
+                for d in decls:
+                    if d.name and d.symbol:
+                        leaf_map[d.name] = d.symbol
+                total_symbols += len(decls)
+            except Exception:
+                pass
 
     return total_symbols
 
@@ -192,6 +252,7 @@ __all__ = [
     "is_available",
     "extract_symbols",
     "extract_symbols_from_file",
+    "extract_di_edges",
     "fold_code",
     "check_rules",
     "check_file",
@@ -203,3 +264,4 @@ __all__ = [
     "sync_file_to_db",
     "sync_project_to_db",
 ]
+

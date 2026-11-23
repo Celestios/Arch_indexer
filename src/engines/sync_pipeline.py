@@ -4,7 +4,8 @@ from typing import Dict, List, Optional, Set, Any
 
 from engines.scip.wrapper import detect_languages, run_indexer, parse_index, ingest_index
 from engines.treesitter import sync_project_to_db
-from engines.ffi_linker import FfiLinker
+from engines.ffi_linker import link_ffi_bridges
+from utils.helpers import load_config
 
 
 def sync_workspace(
@@ -53,7 +54,7 @@ def sync_workspace(
     ffi_edges = 0
     if run_ffi and len(target_langs) > 1:
         try:
-            ffi_edges = FfiLinker(repository).link_scip_bridges()
+            ffi_edges = link_ffi_bridges(repository, config=load_config(project_root))
         except Exception:
             pass
 

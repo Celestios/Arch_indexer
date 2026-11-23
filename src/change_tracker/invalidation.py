@@ -39,10 +39,16 @@ def expand_changed_files(
                         fp_norm = fp.replace("\\", "/")
                         new_by_file.setdefault(fp_norm, {})[s.get("symbol")] = s.get("signature")
 
+        all_norm_fps = [fp.replace("\\", "/") for fp in changed_files]
+        all_old_syms = repository.graph.get_symbols_for_files(all_norm_fps)
+        old_syms_by_file: Dict[str, Dict[str, Optional[str]]] = {}
+        for s in all_old_syms:
+            fp = (s.get("filepath") or "").replace("\\", "/")
+            old_syms_by_file.setdefault(fp, {})[s["symbol"]] = s.get("signature")
+
         for fp in changed_files:
             fp_norm = fp.replace("\\", "/")
-            old_syms = repository.graph.get_symbols_for_files([fp_norm])
-            old_map = {s["symbol"]: s.get("signature") for s in old_syms}
+            old_map = old_syms_by_file.get(fp_norm, {})
             new_map = new_by_file.get(fp_norm, {})
 
             # If symbol set or any signature changed, we must invalidate callers

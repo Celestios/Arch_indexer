@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple, Set
 
 from utils.exclusions import load_include_dirs, load_exclude_patterns, is_included, is_excluded
 from utils.helpers import infer_scip_kind, score_definition_candidate
@@ -199,38 +199,23 @@ def parse_index(
         "diagnostics": []
     }
 
-    # 1. Parse external symbols (from external packages)
-    for sym_info in index.external_symbols:
-        docs = "\n".join(sym_info.documentation) if sym_info.documentation else ""
-        kind_val = sym_info.kind
-        kind_str = scip_pb2.SymbolInformation.Kind.Name(kind_val) if kind_val in scip_pb2.SymbolInformation.Kind.values() else "UnspecifiedKind"
-        parent_sym = getattr(sym_info, "enclosing_symbol", None) or None
+    # 1. Map external symbols (deferred ingestion: only ingest if referenced by local files/edges)
+    external_symbols_map = {sym_info.symbol: sym_info for sym_info in index.external_symbols}
+    seen_edges: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
 
-        parsed_data["symbols"][sym_info.symbol] = {
-            "symbol": sym_info.symbol,
-            "filepath": None,
-            "kind": kind_str,
-            "signature": None,
-            "docstring": docs,
-            "body_hash": None,
-            "start_line": 1,
-            "end_line": 1,
-            "parent_symbol": parent_sym,
-        }
-
-        for rel in getattr(sym_info, "relationships", []):
-            if getattr(rel, "is_implementation", False):
-                parsed_data["edges"].append({
-                    "source": sym_info.symbol,
-                    "target": rel.symbol,
-                    "relation": "Implements"
-                })
-            if getattr(rel, "is_type_definition", False):
-                parsed_data["edges"].append({
-                    "source": sym_info.symbol,
-                    "target": rel.symbol,
-                    "relation": "TypeDefinition"
-                })
+    def add_edge(src: str, tgt: str, rel: str, line: Optional[int] = None):
+        key = (src, tgt, rel)
+        if key not in seen_edges:
+            seen_edges[key] = {
+                "source": src,
+                "target": tgt,
+                "relation": rel,
+                "call_line": line,
+            }
+        elif line is not None:
+            curr = seen_edges[key].get("call_line")
+            if curr is None or line < curr:
+                seen_edges[key]["call_line"] = line
 
     # 2. First pass: Extract local symbol definitions & hover/docstrings
     for document in index.documents:
@@ -259,17 +244,9 @@ def parse_index(
 
             for rel in getattr(sym_info, "relationships", []):
                 if getattr(rel, "is_implementation", False):
-                    parsed_data["edges"].append({
-                        "source": sym_info.symbol,
-                        "target": rel.symbol,
-                        "relation": "Implements"
-                    })
+                    add_edge(sym_info.symbol, rel.symbol, "Implements")
                 if getattr(rel, "is_type_definition", False):
-                    parsed_data["edges"].append({
-                        "source": sym_info.symbol,
-                        "target": rel.symbol,
-                        "relation": "TypeDefinition"
-                    })
+                    add_edge(sym_info.symbol, rel.symbol, "TypeDefinition")
 
         for occ in document.occurrences:
             symbol = occ.symbol
@@ -383,7 +360,7 @@ def parse_index(
                 not is_reference
                 or symbol.startswith("local ")
                 or symbol.endswith(")")
-                or (changed_set is None and symbol not in parsed_data["symbols"])
+                or (changed_set is None and symbol not in parsed_data["symbols"] and symbol not in external_symbols_map)
             ):
                 continue
 
@@ -404,34 +381,42 @@ def parse_index(
                 and not caller_symbol.startswith("local ")
                 and not symbol.startswith("local ")
             ):
-                parsed_data["edges"].append({
-                    "source": caller_symbol,
-                    "target": symbol,
-                    "relation": "Calls",
-                    "call_line": ref_line,
-                })
+                add_edge(caller_symbol, symbol, "Calls", ref_line)
+
+    parsed_data["edges"] = list(seen_edges.values())
 
     # 4. Third pass: Missing symbol recovery / synthesis
-    # Ensure any symbol referenced in occurrences or edges exists in parsed_data["symbols"]
+    # Only synthesize external symbols that are actively referenced in occurrences or edges
+    referenced_syms = set()
     for occ in parsed_data["occurrences"]:
-        sym = occ["symbol"]
-        if sym and sym not in parsed_data["symbols"] and not sym.startswith("local "):
-            parsed_data["symbols"][sym] = {
-                "symbol": sym,
-                "filepath": None,
-                "kind": infer_scip_kind(sym),
-                "signature": None,
-                "docstring": "",
-                "body_hash": None,
-                "start_line": 1,
-                "end_line": 1,
-                "parent_symbol": None,
-            }
-
+        if occ.get("symbol") and not occ["symbol"].startswith("local "):
+            referenced_syms.add(occ["symbol"])
     for edge in parsed_data["edges"]:
-        for sym_key in ("source", "target"):
-            sym = edge.get(sym_key)
-            if sym and sym not in parsed_data["symbols"] and not sym.startswith("local "):
+        if edge.get("source") and not edge["source"].startswith("local "):
+            referenced_syms.add(edge["source"])
+        if edge.get("target") and not edge["target"].startswith("local "):
+            referenced_syms.add(edge["target"])
+
+    for sym in referenced_syms:
+        if sym not in parsed_data["symbols"]:
+            if sym in external_symbols_map:
+                sym_info = external_symbols_map[sym]
+                docs = "\n".join(sym_info.documentation) if sym_info.documentation else ""
+                kind_val = sym_info.kind
+                kind_str = scip_pb2.SymbolInformation.Kind.Name(kind_val) if kind_val in scip_pb2.SymbolInformation.Kind.values() else "UnspecifiedKind"
+                parent_sym = getattr(sym_info, "enclosing_symbol", None) or None
+                parsed_data["symbols"][sym] = {
+                    "symbol": sym,
+                    "filepath": None,
+                    "kind": kind_str,
+                    "signature": None,
+                    "docstring": docs,
+                    "body_hash": None,
+                    "start_line": 1,
+                    "end_line": 1,
+                    "parent_symbol": parent_sym,
+                }
+            else:
                 parsed_data["symbols"][sym] = {
                     "symbol": sym,
                     "filepath": None,

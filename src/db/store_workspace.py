@@ -1,7 +1,7 @@
 import json
 import logging
 from typing import Dict, List, Any, Optional
-from db.base import BaseRepository, UPSERT_FILE_SQL, normalize_path
+from db.base import BaseRepository, UPSERT_FILE_SQL, UPSERT_AST_FILE_SQL, UPSERT_FILES_VECTORIZED_SQL, normalize_path
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class WorkspaceStore(BaseRepository):
         """Retrieves metadata and audit state for a tracked file."""
         norm_fp = normalize_path(filepath)
         row = self._fetch_one(
-            "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE filepath = ?",
+            "SELECT filepath, sha256, ast_sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE filepath = ?",
             (norm_fp,),
         )
         return self._format_file_dict(row)
@@ -49,7 +49,7 @@ class WorkspaceStore(BaseRepository):
     def get_all_files(self) -> List[Dict[str, Any]]:
         """Returns all tracked files with metadata."""
         rows = self._fetch_all(
-            "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files ORDER BY filepath"
+            "SELECT filepath, sha256, ast_sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files ORDER BY filepath"
         )
         return [self._format_file_dict(r) for r in rows if r]
 
@@ -66,7 +66,7 @@ class WorkspaceStore(BaseRepository):
         """Case-insensitive substring search in filepath."""
         q = f"%{query}%"
         rows = self._fetch_all(
-            "SELECT filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE LOWER(filepath) LIKE LOWER(?) LIMIT ?",
+            "SELECT filepath, sha256, ast_sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification FROM files WHERE LOWER(filepath) LIKE LOWER(?) LIMIT ?",
             (q, limit),
         )
         return [self._format_file_dict(r) for r in rows if r]
@@ -75,22 +75,35 @@ class WorkspaceStore(BaseRepository):
         """Registers or updates a file's hash and index metadata."""
         self._execute(UPSERT_FILE_SQL, (normalize_path(filepath), sha256, language))
 
+    def upsert_ast_file(self, filepath: str, ast_sha256: str, language: str):
+        """Registers or updates a file's Tier-1 AST hash without altering Tier-2 SCIP sha256."""
+        self._execute(UPSERT_AST_FILE_SQL, (normalize_path(filepath), ast_sha256, language))
+
     def upsert_files(self, files_list: List[Dict[str, Any]]):
-        """Bulk registers or updates files."""
+        """Bulk registers or updates files using vectorized UNNEST."""
         if not files_list:
             return
-        data = [
-            (normalize_path(f["filepath"]), f["sha256"], f["language"])
-            for f in files_list
-        ]
-        self._executemany(UPSERT_FILE_SQL, data)
+        fps = [normalize_path(f["filepath"]) for f in files_list]
+        hashes = [f["sha256"] for f in files_list]
+        langs = [f["language"] for f in files_list]
+        self._execute(UPSERT_FILES_VECTORIZED_SQL, (fps, hashes, langs))
 
     def update_file_statuses(self, statuses: Dict[str, str]):
-        """Batch update of file compliance statuses."""
+        """Vectorized batch update of file compliance statuses."""
         if not statuses:
             return
-        data = [(status, normalize_path(fp)) for fp, status in statuses.items()]
-        self._executemany("UPDATE files SET status = ? WHERE filepath = ?", data)
+        stats = list(statuses.values())
+        fps = [normalize_path(fp) for fp in statuses.keys()]
+        self._execute(
+            """UPDATE files
+               SET status = u.s
+               FROM (
+                   SELECT UNNEST(?::VARCHAR[]) AS s,
+                          UNNEST(?::VARCHAR[]) AS f
+               ) u
+               WHERE files.filepath = u.f""",
+            (stats, fps),
+        )
 
     def update_file_manual_status(self, filepath: str, status: str, justification: Optional[str] = None):
         """Sets a manual override status for a file and clears its pending audit flag."""

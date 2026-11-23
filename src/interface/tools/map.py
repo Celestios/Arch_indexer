@@ -158,7 +158,7 @@ def handle_map(
             tgt_fp = symbols_dict.get(tgt, {}).get("filepath")
             if not src_fp or not tgt_fp:
                 continue
-        w = int(weight) if weight else 1
+        w = max(1, round(float(weight))) if weight is not None else 1
         out_degrees[src] += w
         in_degrees[tgt] += w
 
@@ -205,10 +205,11 @@ def handle_map(
         if not src_grp or not tgt_grp:
             continue
         if src_grp != tgt_grp:
-            w = int(weight) if weight else 1
-            group_outbound[src_grp] += w
-            group_inbound[tgt_grp] += w
-            inter_group_calls[(src_grp, tgt_grp)] += w
+            w = max(1, round(float(weight))) if weight is not None else 1
+            if w > 0:
+                group_outbound[src_grp] += w
+                group_inbound[tgt_grp] += w
+                inter_group_calls[(src_grp, tgt_grp)] += w
 
     # 6. Build Markdown Output
     md: List[str] = ["## Repository Architectural Blueprint Map\n"]
@@ -306,10 +307,11 @@ def handle_map(
 
     # Section C: Inter-Module Call Dependencies (Directional arrows)
     md.append("### Inter-Module Call Dependencies")
-    if not inter_group_calls:
+    filtered_calls = [item for item in inter_group_calls.items() if item[1] > 0]
+    if not filtered_calls:
         md.append("*No inter-module dependencies detected for the specified target(s).*\n")
     else:
-        sorted_calls = sorted(inter_group_calls.items(), key=lambda x: x[1], reverse=True)
+        sorted_calls = sorted(filtered_calls, key=lambda x: x[1], reverse=True)
         for (src_g, tgt_g), call_count in sorted_calls:
             calls_plural = "call" if call_count == 1 else "calls"
             md.append(f"- `{src_g}` ──[{call_count} {calls_plural}]──> `{tgt_g}`")

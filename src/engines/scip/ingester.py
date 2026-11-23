@@ -1,4 +1,5 @@
 """Incremental SCIP semantic ingestion into DuckDB with disjoint Tier-2 ownership."""
+import time
 import collections
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -149,6 +150,7 @@ def _reconcile_and_stage_symbols(
 
     symbols_to_ingest = []
     superseded_ids = set()
+    reconciled_id_map = {}
 
     for sym_id, sym in filtered_symbols.items():
         sym_fp = sym.get("filepath")
@@ -165,6 +167,7 @@ def _reconcile_and_stage_symbols(
             )
             if existing_id and existing_id != sym_id:
                 superseded_ids.add(existing_id)
+                reconciled_id_map[existing_id] = sym_id
 
         # Tier-1 owns syntactic fields when a Tier-1 record was upgraded to a SCIP symbol ID.
         # UPSERT_SEMANTIC_SYMBOL_SQL guarantees existing syntactic columns are never clobbered.
@@ -214,6 +217,7 @@ def _reconcile_and_stage_symbols(
         "filtered_symbols": filtered_symbols,
         "existing_symbols": existing_symbols,
         "superseded_ids": superseded_ids,
+        "reconciled_id_map": reconciled_id_map,
         "symbols_to_ingest": symbols_to_ingest,
         "occurrences_to_ingest": filtered_occurrences,
         "diagnostics_to_ingest": filtered_diagnostics,
@@ -228,18 +232,19 @@ def _cleanup_superseded_records(
     staged_data: Dict[str, Any],
 ):
     """Deletes stale edges, occurrences, diagnostics, and removed/superseded symbols inside the active transaction."""
+    t0 = time.perf_counter()
     filtered_symbols = staged_data.get("filtered_symbols", {})
     existing_symbols = staged_data.get("existing_symbols", {})
     changed_set = staged_data.get("changed_set", {fp.replace("\\", "/") for fp in changed_files})
     superseded_ids = set(staged_data.get("superseded_ids", ()))
 
     if force:
-        repository.graph.delete_edges(filepaths=changed_files)
+        repository.graph.delete_edges(filepaths=changed_files, exclude_relations=["Injects", "FFI_Binds"])
         repository.graph.delete_occurrences(changed_files)
         repository.quality.delete_diagnostics(changed_files)
         repository.graph.delete_symbols(filepaths=changed_files)
     elif changed_files:
-        repository.graph.delete_edges(filepaths=changed_files)
+        repository.graph.delete_edges(filepaths=changed_files, exclude_relations=["Injects", "FFI_Binds"])
         repository.graph.delete_occurrences(changed_files)
         repository.quality.delete_diagnostics(changed_files)
         upgraded_clean = {
@@ -259,6 +264,9 @@ def _cleanup_superseded_records(
         )
         if removed_symbols:
             repository.graph.delete_symbols(symbols=removed_symbols)
+    t_clean = time.perf_counter() - t0
+    if t_clean > 0.05:
+        print(f"[SCIP Ingest] Cleanup completed in {t_clean:.3f}s")
 
 
 def _write_index_batches(
@@ -298,6 +306,10 @@ def _write_index_batches(
         for i in range(0, total_edges, chunk_size):
             repository.graph.upsert_edges(edges_to_ingest[i:i + chunk_size])
             print_progress(min(i + chunk_size, total_edges), total_edges, prefix="[SCIP Ingest] Edges")
+
+        reconciled_id_map = staged_data.get("reconciled_id_map", {})
+        if reconciled_id_map:
+            repository.graph.remap_edge_symbols(reconciled_id_map)
 
         if force and had_existing_files:
             orphaned_edges, orphaned_occurrences = repository.graph.delete_orphaned_records()

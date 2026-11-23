@@ -55,17 +55,17 @@ def run_with_scroll(cmd: list, cwd: str, max_lines: int = 10, shell: bool = Fals
 
     try:
         while True:
-            char = process.stdout.read(1)
-            if not char:
+            chunk = process.stdout.read(1024)
+            if not chunk:
                 break
-
-            if char in ('\r', '\n'):
-                if partial_line.strip():
-                    buffer.append(partial_line.strip())
-                    _redraw()
-                partial_line = ""
-            else:
-                partial_line += char
+            for char in chunk:
+                if char in ('\r', '\n'):
+                    if partial_line.strip():
+                        buffer.append(partial_line.strip())
+                        _redraw()
+                    partial_line = ""
+                else:
+                    partial_line += char
     except (KeyboardInterrupt, SystemExit):
         process.kill()
         raise

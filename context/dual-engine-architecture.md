@@ -59,4 +59,39 @@ Tree-sitter AST parsing was extended to support Dart via `tree-sitter-dart>=0.1.
 
 **Reason:** In Flutter/Dart codebases, Tree-sitter previously extracted 0 symbols because `tree-sitter-dart` was absent from dependencies. Furthermore, when `.arch/config.json` contained directory prefixes with trailing slashes (e.g. `"lib/"`), raw substring comparisons (`part in include_dirs`) failed to match path segments (`"lib"`), causing Tree-sitter to silently skip all workspace files.
 
+---
+
+## Decoupled Tier-1 (Tree-sitter) and Tier-2 (SCIP) file modification hashes to prevent change detection poisoning
+
+**Id:** b06e7f5d-a73c-477c-83a8-f92cdbeabee7
+**Type:** incident
+**Type:** decision
+**Status:** active
+**Evidence:** confirmed
+**Source:** maintainer session and bug investigation, 2026-11-23
+**Revisit when:** Tree-sitter and SCIP indexing pipelines are unified into a single single-pass compiler engine
+
+In `src/db/schema.sql` (schema version 3), the `files` table was extended with a separate `ast_sha256 VARCHAR DEFAULT ''` column, decoupling Tier-1 syntactic file hashes from Tier-2 semantic compiler hashes (`files.sha256`). `sync_file_to_db` in `src/engines/treesitter/` updates `ast_sha256` exclusively via `upsert_ast_file`, leaving `files.sha256` untouched.
+
+**Reason:** In `sync_workspace`, Tier-1 Tree-sitter runs immediately before Tier-2 SCIP. Previously, `sync_file_to_db` wrote the file's current disk SHA-256 directly to `files.sha256`. When Tier-2 SCIP ingester subsequently checked for modified files via `_resolve_changed_and_deleted`, `current_hash == db_hash` evaluated to `True` for every file that Tree-sitter had parsed. As a result, all successfully parsed source files (505 out of 506 Dart files in Flutter workspaces) were categorized as unchanged and dropped from `changed_files`. SCIP symbols, occurrences, and edges were never ingested, leaving the database stuck with incomplete syntactic dotted symbol stubs and 0 call graph edges. Decoupling the hash columns ensures Tier-1 AST extraction never poisons Tier-2 semantic change detection.
+
+**Rejected alternative:** Bypassing change detection by forcing `force=True` on every run was rejected because it causes full workspace re-indexing on every incremental change, destroying sub-second watcher turnaround.
+
+---
+
+## Reconciling Tier-1 Injects edges to canonical Tier-2 SCIP symbol IDs
+
+**Id:** 7a90adc0-00e9-4c7d-bb3a-95f2cbe860b5
+**Type:** decision
+**Status:** active
+**Evidence:** confirmed
+**Source:** maintainer session and architecture decision, 2026-11-23
+**Revisit when:** Riverpod/DI frameworks provide native SCIP indexer relationship output
+
+In `src/engines/scip/ingester.py` and `src/db/store_graph.py`, `_reconcile_and_stage_symbols` builds a `reconciled_id_map: Dict[str, str]` tracking every Tier-1 Tree-sitter symbol ID upgraded to a canonical SCIP symbol ID. Before running orphan cleanup, `_write_index_batches` calls `repository.graph.remap_edge_symbols(reconciled_id_map)` to update `edges.source` and `edges.target` to the upgraded SCIP IDs.
+
+**Reason:** Tier-1 AST dependency injection analyzers (e.g. Flutter Riverpod / Provider) extract `Injects` edges using file-local Tree-sitter symbol IDs (e.g. `features.graph.ui.canvas.graph_canvas._GraphCanvasState`). When Tier-2 SCIP runs, these symbols are reconciled and upgraded to canonical package-qualified SCIP IDs (`scip-dart pub ...`), and stale Tree-sitter IDs are deleted. Without symbol remapping on edges, `delete_orphaned_records` purged all `Injects` edges because their endpoints no longer existed in `symbols`, or left them disconnected with `src_lang = 'external'`. Remapping endpoints preserves DI architecture links and integrates them directly into the full cross-file call graph.
+
+**Rejected alternative:** Keeping duplicate Tree-sitter symbol rows in `symbols` alongside SCIP symbols was rejected because it produces fragmented duplicate symbols, confuses symbol lookup tools, and breaks 1:1 symbol coordinate mappings.
+
 **Rejected alternative (SCIP-only indexing for Dart):** Relying solely on `scip-dart` without Tree-sitter was rejected because SCIP lacks sub-millisecond AST synchronization on file save and cannot extract multi-line signatures or docstrings in real time when files contain transient syntax errors.

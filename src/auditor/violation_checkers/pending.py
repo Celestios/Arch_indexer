@@ -22,9 +22,9 @@ def check(
             continue
         justification_msg = meta.get("justification") or ""
         msg = (
-            f"{f_path}: file changed"
+            "file changed"
             if "modified" in justification_msg.lower() or "changed" in justification_msg.lower()
-            else f"{f_path}: new file"
+            else "new file"
         )
         violation_id = generate_violation_id("pending_audit", f_path)
         violations.append({

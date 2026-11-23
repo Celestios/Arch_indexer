@@ -58,6 +58,17 @@ DEFAULT_EXCLUDED_DIRS = {
     ".git", ".arch", ".venv", "venv", "node_modules", "bin", "__pycache__", "dist", "build"
 }
 
+BOILERPLATE_PATTERNS = ("generated", ".freezed.", ".g.", "frb_generated", "_impl")
+
+
+def is_boilerplate(filepath: Optional[str]) -> bool:
+    """Check if filepath belongs to auto-generated boilerplate code."""
+    if not filepath:
+        return False
+    fp = filepath.replace("\\", "/").lower()
+    return any(p in fp for p in BOILERPLATE_PATTERNS)
+
+
 
 def matches_glob(rel_path: str, pattern: str) -> bool:
     """Matches a relative path against a glob pattern in a cross-platform way."""

@@ -114,11 +114,6 @@ def test_layer_aggregations(tmp_path):
     assert kinds["Class"] == 1
     assert kinds["Function"] == 1
 
-    prefixes = repository.analytics.get_symbols_by_file_prefix()
-    assert prefixes["src/db/"] == 2
-    assert prefixes["src/engines/"] == 1
-    assert prefixes["src/"] == 1
-
     db_conn.close()
 
 
@@ -406,6 +401,18 @@ def test_mcp_tools_audit(tmp_path, monkeypatch):
     assert "ui_widget" in out
     assert "call violation" in out
 
+    # Test pending audit formatting (no duplicate path in message)
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message)
+            VALUES ('vi_2', 'pending_audit', null, 'lib/core/util.dart', 1, 'lib/core/util.dart: new file')
+        """)
+    out_pending = mcp_server.audit()
+    assert "Files Pending Deep Audit" in out_pending
+    assert "- `lib/core/util.dart` (new file)" in out_pending
+    # Ensure filepath is not repeated twice in that line
+    assert "lib/core/util.dart: new file" not in out_pending
+
     db_conn.close()
 
 
@@ -422,6 +429,7 @@ def test_mcp_tools_database_missing(tmp_path, monkeypatch):
     assert "database not found" in mcp_server.map().lower()
     assert "database not found" in mcp_server.update().lower()
     assert "database not found" in mcp_server.graph().lower()
+    assert "database not found" in mcp_server.history().lower()
 
 
 def test_mcp_tool_registered_names():
@@ -429,6 +437,8 @@ def test_mcp_tool_registered_names():
     tools = getattr(mcp_server.mcp, "tools", [])
     assert "update" in tools
     assert "graph" in tools
+    assert "history" in tools
+    assert "report" not in tools
     assert "reindex" not in tools
     assert "index" not in tools
     assert "projects" not in tools
@@ -539,4 +549,99 @@ def test_run_server_stdio(monkeypatch):
     mcp_server.run_server(port=0)
 
     assert "transport" not in called["kwargs"]
+
+
+def test_query_tool_success_json(tmp_path, monkeypatch):
+    import src.interface.server as mcp_server
+    repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
+
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO files (filepath, sha256, language)
+            VALUES ('src/main.py', 'hash1', 'python'), ('src/utils.py', 'hash2', 'python')
+        """)
+
+    res = mcp_server.query(sql="SELECT filepath, language FROM files ORDER BY filepath", project_root=str(root))
+    data = json.loads(res)
+    assert data["total_rows"] == 2
+    assert data["truncated"] is False
+    assert data["columns"] == ["filepath", "language"]
+    assert len(data["rows"]) == 2
+    assert data["rows"][0]["filepath"] == "src/main.py"
+    assert data["rows"][1]["filepath"] == "src/utils.py"
+
+
+def test_query_tool_truncation(tmp_path, monkeypatch):
+    import src.interface.server as mcp_server
+    repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
+
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO files (filepath, sha256, language)
+            VALUES ('a.py', 'h1', 'python'), ('b.py', 'h2', 'python'), ('c.py', 'h3', 'python')
+        """)
+
+    res = mcp_server.query(sql="SELECT filepath FROM files ORDER BY filepath", limit=2, project_root=str(root))
+    data = json.loads(res)
+    assert data["total_rows"] == 3
+    assert data["row_count"] == 2
+    assert data["truncated"] is True
+    assert "hint" in data
+
+
+def test_query_tool_export_output_path(tmp_path, monkeypatch):
+    import src.interface.server as mcp_server
+    repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
+
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO symbols (symbol, filepath, kind, signature)
+            VALUES ('fn_a', 'a.py', 'Function', 'fn_a()'), ('fn_b', 'b.py', 'Function', 'fn_b()')
+        """)
+
+    out_file = "analysis/symbols_export.json"
+    res = mcp_server.query(
+        sql="SELECT symbol, filepath, kind FROM symbols ORDER BY symbol",
+        output_path=out_file,
+        project_root=str(root)
+    )
+
+    assert "Query Executed Successfully" in res
+    assert "**Exported Rows**: 2" in res
+
+    saved_path = root / out_file
+    assert saved_path.exists()
+    content = json.loads(saved_path.read_text(encoding="utf-8"))
+    assert content["total_rows"] == 2
+    assert len(content["data"]) == 2
+    assert content["data"][0]["symbol"] == "fn_a"
+    assert content["data"][1]["symbol"] == "fn_b"
+
+
+def test_query_tool_blocks_mutations(tmp_path, monkeypatch):
+    import src.interface.server as mcp_server
+    repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
+
+    res_drop = mcp_server.query(sql="DROP TABLE files", project_root=str(root))
+    assert "Forbidden statement type" in res_drop
+
+    res_delete = mcp_server.query(sql="DELETE FROM files", project_root=str(root))
+    assert "Forbidden statement type" in res_delete
+
+    res_insert = mcp_server.query(sql="INSERT INTO files (filepath, sha256, language) VALUES ('x', 'y', 'z')", project_root=str(root))
+    assert "Forbidden statement type" in res_insert
+
+
+def test_query_tool_syntax_error(tmp_path, monkeypatch):
+    import src.interface.server as mcp_server
+    repository, db_conn, root = setup_workspace(tmp_path)
+    _patch_server_config(monkeypatch, root)
+
+    res_err = mcp_server.query(sql="SELECT * FORM non_existent", project_root=str(root))
+    assert "SQL" in res_err and "Error" in res_err
+
 

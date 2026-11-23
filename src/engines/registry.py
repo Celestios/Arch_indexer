@@ -17,7 +17,10 @@ class LanguageSpec:
     docstring_node_type: Optional[str] = None
     container_node_types: Tuple[str, ...] = ("Class", "Interface", "Struct", "Trait")
     impl_node_types: Tuple[str, ...] = ()
+    di_call_patterns: Tuple[str, ...] = ()
     scip_command: Optional[Tuple[str, ...]] = None
+    scip_prerequisites: Tuple[str, ...] = ()
+    scip_index_subpath: Optional[str] = None
     is_client_lang: bool = False
     is_native_lang: bool = False
 
@@ -58,7 +61,10 @@ class LanguageRegistry:
                   docstring_node_type: Optional[str] = None,
                   container_node_types: Optional[Sequence[str]] = None,
                   impl_node_types: Optional[Sequence[str]] = None,
+                  di_call_patterns: Optional[Sequence[str]] = None,
                   scip_command: Optional[Sequence[str]] = None,
+                  scip_prerequisites: Optional[Sequence[str]] = None,
+                  scip_index_subpath: Optional[str] = None,
                   is_client_lang: bool = False,
                   is_native_lang: bool = False,
                   **kwargs) -> None:
@@ -76,7 +82,10 @@ class LanguageRegistry:
                 docstring_node_type=docstring_node_type if docstring_node_type is not None else kwargs.get("docstring_node_type"),
                 container_node_types=tuple(container_node_types) if container_node_types is not None else kwargs.get("container_node_types", ("Class", "Interface", "Struct", "Trait")),
                 impl_node_types=tuple(impl_node_types or ()) if impl_node_types is not None else kwargs.get("impl_node_types", ()),
+                di_call_patterns=tuple(di_call_patterns or ()) if di_call_patterns is not None else kwargs.get("di_call_patterns", ()),
                 scip_command=tuple(scip_command) if scip_command is not None else kwargs.get("scip_command"),
+                scip_prerequisites=tuple(scip_prerequisites or ()) if scip_prerequisites is not None else kwargs.get("scip_prerequisites", ()),
+                scip_index_subpath=scip_index_subpath if scip_index_subpath is not None else kwargs.get("scip_index_subpath"),
                 is_client_lang=is_client_lang if is_client_lang is not None else kwargs.get("is_client_lang", False),
                 is_native_lang=is_native_lang if is_native_lang is not None else kwargs.get("is_native_lang", False),
             )
@@ -202,9 +211,11 @@ class LanguageRegistry:
             ts_factory="language",
             scip_binary="dart",
             scip_command=("dart", "pub", "global", "run", "scip_dart", "."),
+            di_call_patterns=("ref.watch", "ref.read", "context.read", "GetIt.instance.get"),
             is_client_lang=True,
             ast_node_kinds={
                 "class_definition": "Class",
+                "enum_declaration": "Enum",
                 "function_signature": "Function",
                 "method_signature": "Method",
             },
@@ -378,3 +389,4 @@ class LanguageRegistry:
 
 # Register built-in languages
 LanguageRegistry.register_defaults()
+

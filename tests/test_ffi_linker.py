@@ -3,7 +3,8 @@ from pathlib import Path
 from setup.initializer import initialize_workspace, DEFAULT_CONFIG_JSON
 from db.connection import DbConnection
 from db.repository import Repository
-from engines.ffi_linker import FfiLinker, FfiMatch
+from engines.ffi_linker import link_ffi_bridges, parse_callable_parts
+from utils.arch_config import ArchConfig
 import pytest
 
 
@@ -18,104 +19,25 @@ def setup_workspace(tmp_path):
     return repository, db_conn, tmp_path
 
 
-def test_linker_creates_ffi_edges(tmp_path):
-    repository, db_conn, root = setup_workspace(tmp_path)
+def test_parse_callable_parts():
+    cls_name, fn_name = parse_callable_parts("centrode_core.bridge.api.impl.[AppHandle]add_anchor_spring()")
+    assert cls_name == "apphandle"
+    assert fn_name == "addanchorspring"
 
-    with db_conn.session() as conn:
-        conn.execute("""
-            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
-            VALUES
-                ('rust::src/lib.rs::native_init', 'src/lib.rs', 'Function', 'fn(i32) -> bool', 'Rust init', 'h1'),
-                ('dart::lib/ffi.dart::native_init', 'lib/ffi.dart', 'Function', '(int) -> bool', 'Dart init', 'h2')
-        """)
+    cls_name, fn_name = parse_callable_parts("lib.bridge.api.dart.AppHandle.addAnchorSpring()")
+    assert cls_name == "apphandle"
+    assert fn_name == "addanchorspring"
 
-    matches = [
-        FfiMatch(
-            source_symbol="dart::lib/ffi.dart::native_init",
-            target_symbol="rust::src/lib.rs::native_init",
-            confidence=0.8,
-            match_type="name"
-        )
-    ]
+    cls_name, fn_name = parse_callable_parts("crate::AppHandle#new")
+    assert cls_name == "apphandle"
+    assert fn_name == "new"
 
-    linker = FfiLinker(repository)
-    edges_created = linker.link(matches)
-
-    assert edges_created == 1
-
-    with db_conn.session() as conn:
-        res = conn.execute(
-            "SELECT source, target, relation, weight FROM edges WHERE relation = 'FFI_Binds'"
-        ).fetchall()
-        assert len(res) == 1
-        assert res[0][0] == "dart::lib/ffi.dart::native_init"
-        assert res[0][1] == "rust::src/lib.rs::native_init"
-        assert res[0][2] == "FFI_Binds"
-        assert res[0][3] == pytest.approx(0.8)
-
-    db_conn.close()
+    cls_name, fn_name = parse_callable_parts("lib.bridge.api.dart.AppHandle.newInstance()")
+    assert cls_name == "apphandle"
+    assert fn_name == "new"
 
 
-def test_linker_skips_missing_symbols(tmp_path):
-    repository, db_conn, root = setup_workspace(tmp_path)
-
-    matches = [
-        FfiMatch(
-            source_symbol="dart::lib/ffi.dart::missing_fn",
-            target_symbol="rust::src/lib.rs::missing_fn",
-            confidence=0.8,
-            match_type="name"
-        )
-    ]
-
-    linker = FfiLinker(repository)
-    edges_created = linker.link(matches)
-    assert edges_created == 0
-
-    db_conn.close()
-
-
-def test_linker_clears_old_ffi_edges_before_relink(tmp_path):
-    repository, db_conn, root = setup_workspace(tmp_path)
-
-    with db_conn.session() as conn:
-        conn.execute("""
-            INSERT INTO symbols (symbol, filepath, kind, signature, docstring, body_hash)
-            VALUES
-                ('rust::src/lib.rs::native_init', 'src/lib.rs', 'Function', 'fn(i32) -> bool', 'Rust init', 'h1'),
-                ('dart::lib/ffi.dart::native_init', 'lib/ffi.dart', 'Function', '(int) -> bool', 'Dart init', 'h2')
-        """)
-        conn.execute("""
-            INSERT INTO edges (source, target, relation, weight)
-            VALUES ('dart::lib/ffi.dart::native_init', 'rust::src/lib.rs::native_init', 'FFI_Binds', 0.5)
-        """)
-
-    with db_conn.session() as conn:
-        res = conn.execute("SELECT weight FROM edges WHERE relation = 'FFI_Binds'").fetchall()
-        assert len(res) == 1
-        assert res[0][0] == 0.5
-
-    matches = [
-        FfiMatch(
-            source_symbol="dart::lib/ffi.dart::native_init",
-            target_symbol="rust::src/lib.rs::native_init",
-            confidence=1.0,
-            match_type="name+signature"
-        )
-    ]
-
-    linker = FfiLinker(repository)
-    edges_created = linker.link(matches)
-
-    with db_conn.session() as conn:
-        res = conn.execute("SELECT weight FROM edges WHERE relation = 'FFI_Binds'").fetchall()
-        assert len(res) == 1
-        assert res[0][0] == 1.0
-
-    db_conn.close()
-
-
-def test_link_scip_bridges_direct(tmp_path):
+def test_link_ffi_bridges_direct(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
     with db_conn.session() as conn:
@@ -130,14 +52,12 @@ def test_link_scip_bridges_direct(tmp_path):
                 ('rust_app_handle_new', 'centrode_core.bridge.api.impl.[AppHandle]new()', 'native/bridge/api.rs', 'Constructor', 'pub fn new()', '', 'h6')
         """)
 
-    linker = FfiLinker(repository)
-    edges_created = linker.link_scip_bridges()
-
+    edges_created = link_ffi_bridges(repository)
     assert edges_created == 3
 
     with db_conn.session() as conn:
         res = conn.execute(
-            "SELECT source, target, relation FROM edges WHERE relation = 'FFI_Binds' ORDER BY source"
+            "SELECT source, target, relation, weight FROM edges WHERE relation = 'FFI_Binds' ORDER BY source"
         ).fetchall()
         assert len(res) == 3
         sources = [r[0] for r in res]
@@ -148,11 +68,12 @@ def test_link_scip_bridges_direct(tmp_path):
         assert "rust_init_engine" in targets
         assert "dart_app_handle_new" in sources
         assert "rust_app_handle_new" in targets
+        assert all(r[3] == 1.0 for r in res)
 
     db_conn.close()
 
 
-def test_link_scip_bridges_excludes_boilerplate(tmp_path):
+def test_link_ffi_bridges_excludes_boilerplate(tmp_path):
     repository, db_conn, root = setup_workspace(tmp_path)
 
     with db_conn.session() as conn:
@@ -163,10 +84,58 @@ def test_link_scip_bridges_excludes_boilerplate(tmp_path):
                 ('rust_app_handle_add_spring', 'centrode_core.bridge.api.impl.[AppHandle]add_anchor_spring()', 'native/bridge/api.rs', 'Method', 'pub fn add_anchor_spring(&self)', '', 'h2')
         """)
 
-    linker = FfiLinker(repository)
-    edges_created = linker.link_scip_bridges()
-
-    # Boilerplate freezed file should be excluded
+    edges_created = link_ffi_bridges(repository)
     assert edges_created == 0
+
+    db_conn.close()
+
+
+def test_link_ffi_bridges_clears_old_edges(tmp_path):
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash)
+            VALUES
+                ('dart_fn', 'lib.api.init()', 'lib/api.dart', 'Function', 'void init()', '', 'h1'),
+                ('rust_fn', 'native.api.init()', 'native/api.rs', 'Function', 'pub fn init()', '', 'h2')
+        """)
+        conn.execute("""
+            INSERT INTO edges (source, target, relation, weight)
+            VALUES ('old_source', 'old_target', 'FFI_Binds', 0.5)
+        """)
+
+    edges_created = link_ffi_bridges(repository)
+    assert edges_created == 1
+
+    with db_conn.session() as conn:
+        res = conn.execute("SELECT source, target, relation, weight FROM edges WHERE relation = 'FFI_Binds'").fetchall()
+        assert len(res) == 1
+        assert res[0][0] == "dart_fn"
+        assert res[0][1] == "rust_fn"
+
+    db_conn.close()
+
+
+def test_link_ffi_bridges_explicit_config(tmp_path):
+    repository, db_conn, root = setup_workspace(tmp_path)
+
+    with db_conn.session() as conn:
+        conn.execute("""
+            INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash)
+            VALUES
+                ('custom_client', 'client.mismatched_name()', 'lib/client.dart', 'Function', 'void mismatched()', '', 'h1'),
+                ('custom_native', 'native.different_name()', 'native/src.rs', 'Function', 'pub fn diff()', '', 'h2')
+        """)
+
+    config = ArchConfig(ffi_bindings={"custom_client": "custom_native"})
+    edges_created = link_ffi_bridges(repository, config=config)
+    assert edges_created == 1
+
+    with db_conn.session() as conn:
+        res = conn.execute("SELECT source, target, relation FROM edges WHERE relation = 'FFI_Binds'").fetchall()
+        assert len(res) == 1
+        assert res[0][0] == "custom_client"
+        assert res[0][1] == "custom_native"
 
     db_conn.close()

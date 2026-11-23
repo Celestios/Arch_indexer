@@ -26,11 +26,12 @@ from interface.tools.map import handle_map
 from interface.tools.update import handle_update
 from interface.tools.set_status import handle_set_status
 from interface.tools.graph import handle_graph
-from interface.tools.report import handle_report
+from interface.tools.history import handle_history
 from interface.tools.analyze import handle_analyze
 from interface.tools.set_fields import handle_set_fields
 from interface.tools.clear_pending import handle_clear_pending
-from interface.validators import validate_direction, validate_resolution
+from interface.tools.query import handle_query
+from interface.validators import validate_direction, validate_resolution, validate_sections
 
 mcp = FastMCP("arch")
 _explicit_project_root = contextvars.ContextVar("_explicit_project_root", default=None)
@@ -274,7 +275,8 @@ async def impact(
     ctx: Context = None,
 ) -> str:
     """
-    Performs blast radius analysis by computing the transitive call tree up to max_depth.
+    Performs blast radius analysis by computing the transitive call tree up to max_depth,
+    enriched with live Git hotspot risk and Lift-ranked temporal co-change coupling for the focal file.
     Use this tool when evaluating the ripple effects of proposed refactors or deletions.
     symbol: Focal symbol identifier to analyze.
     project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
@@ -288,8 +290,15 @@ async def impact(
         return f"Error: {msg}"
 
     try:
-        _, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        return handle_impact(symbol, max_depth, repository, direction=direction, max_nodes=max_nodes)
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
+        return handle_impact(
+            symbol,
+            max_depth,
+            repository,
+            direction=direction,
+            max_nodes=max_nodes,
+            project_root=resolved_root,
+        )
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -339,14 +348,16 @@ async def compile_context(
 
 
 @_tool()
-async def audit(project_root: str, ctx: Context = None) -> str:
+async def audit(project_root: str, summary_only: bool = False, ctx: Context = None) -> str:
     """
-    Runs project-wide architectural boundary and layer compliance checks against configured rules.
+    Runs project-wide architectural boundary and layer compliance checks against configured rules,
+    returning a compact compliance scorecard (posture, severity/rule rollups) plus concrete violation traces.
     project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
+    summary_only: When True, return only the compliance scorecard and hotspot files without individual traces.
     """
     try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        return handle_audit(repository, resolved_root)
+        return handle_audit(repository, resolved_root, summary_only=summary_only)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -354,20 +365,51 @@ async def audit(project_root: str, ctx: Context = None) -> str:
 
 
 @_tool()
-async def report(name: str, project_root: str, format: str = "markdown", ctx: Context = None) -> str:
+async def history(
+    project_root: str,
+    sections: Optional[Union[List[str], str]] = None,
+    target: Optional[str] = None,
+    scope: Optional[Union[str, List[str]]] = None,
+    commits: int = 100,
+    limit: int = 10,
+    ctx: Context = None,
+) -> str:
     """
-    Generates high-level summaries or compliance reports of the workspace code graph.
-    name: 'overview' or 'compliance'
+    Performs on-the-fly Git evolution and risk intelligence intersected with the static code graph.
+    Composes any combination of sections in a single git log pass:
+    - 'hotspots': Evolution risk (decayed churn x structural fan-in x AST complexity); symbol-level if target is a file.
+    - 'thrash': Rework balance, short-interval touch bursts, and revert loops (resists poor commit messages).
+    - 'coupling': Inverse-commit-size weighted Lift/PMI temporal co-change tagged HIDDEN (no static edge) vs STRUCTURAL.
+    - 'archaeology': Compact commit timeline for a specific target file or symbol (requires target).
+    - 'growth': Net line expansion paired with current LOC and AST complexity.
+    - 'test_gap': High-churn production files lacking static test callers or co-modified test files.
     project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    format: 'markdown' or 'json'
+    sections: List or comma-separated string of sections to include (default: ['hotspots', 'coupling'], or ['archaeology', 'coupling'] when target is set).
+    target: Optional file path or symbol identifier to focus analysis on.
+    scope: Optional directory prefix or list of prefixes to constrain workspace analysis.
+    commits: Maximum number of recent non-merge commits to analyze (default 100).
+    limit: Maximum items returned per section (default 10).
     """
+    valid, parsed = validate_sections(sections, has_target=bool(target))
+    if not valid:
+        return f"Error: {parsed}"
+
     try:
-        _, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        return handle_report(repository, name, format)
+        filepath_hint = target if isinstance(target, str) and ("/" in target or "\\" in target) else None
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
+        return handle_history(
+            repository=repository,
+            project_root=resolved_root,
+            sections=parsed,
+            target=target,
+            scope=scope,
+            commits=commits,
+            limit=limit,
+        )
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error generating report: {e}"
+        return f"Error running git history analysis: {e}"
 
 
 @_tool()
@@ -508,6 +550,46 @@ async def update(
         return f"Error updating workspace: {e}"
 
 
+@_tool()
+async def query(
+    sql: str,
+    project_root: str,
+    limit: Optional[int] = None,
+    output_path: Optional[str] = None,
+    ctx: Context = None,
+) -> str:
+    """
+    Executes a read-only SQL query directly against the DuckDB index (.arch/arch.db).
+    Provides raw analytical database access for graph clustering, connected component isolation,
+    custom topological metrics, or bulk inspections without process lock contention.
+    Tables:
+    - files (filepath, sha256, language, status, manual_status, manual_fields, justification)
+    - symbols (symbol, clean_symbol, filepath, kind, signature, docstring, connection_weight, parent_symbol, classification)
+    - edges (source, target, relation, weight, call_line)
+    - occurrences (symbol, filepath, start_line, start_col, end_line, end_col, role)
+    - file_co_changes (filepath_a, filepath_b, co_change_count, frequency)
+    - compliance_violations (violation_id, rule_id, symbol, filepath, line, message)
+
+    sql: Read-only SQL query (SELECT, WITH, PRAGMA, EXPLAIN, DESCRIBE, SHOW).
+    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
+    limit: Maximum number of rows to return or export (defaults to 100 in memory; unlimited when output_path is provided).
+    output_path: Optional file path to export the complete result set as JSON for downstream agent analysis.
+    """
+    try:
+        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
+        return handle_query(
+            repository=repository,
+            project_root=resolved_root,
+            sql=sql,
+            limit=limit,
+            output_path=output_path,
+        )
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error executing query: {e}"
+
+
 def run_server(port: int = 0):
     try:
         if port > 0:
@@ -527,5 +609,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

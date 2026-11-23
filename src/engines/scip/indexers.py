@@ -105,6 +105,25 @@ def index_dart(project_dir: Path) -> Optional[Path]:
         pubspec_dir = pubspecs[0].parent
         print(f"[SCIP] Using pubspec at {pubspec_dir}")
 
+    # Ensure package resolution exists before running indexer
+    pkg_config = pubspec_dir / ".dart_tool" / "package_config.json"
+    pubspec_file = pubspec_dir / "pubspec.yaml"
+    is_flutter = False
+    if pubspec_file.exists():
+        try:
+            pubspec_content = pubspec_file.read_text(encoding="utf-8", errors="replace")
+            is_flutter = "flutter:" in pubspec_content or "sdk: flutter" in pubspec_content
+        except Exception:
+            pass
+
+    if not pkg_config.exists():
+        try:
+            get_cmd = ["flutter", "pub", "get"] if (is_flutter and shutil.which("flutter")) else ["dart", "pub", "get"]
+            print(f"[SCIP] Resolving Dart dependencies with {' '.join(get_cmd)}...")
+            subprocess.run(get_cmd, cwd=str(pubspec_dir), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=IS_WINDOWS)
+        except Exception:
+            pass
+
     # Check if scip_dart is already activated globally
     is_activated = False
     try:

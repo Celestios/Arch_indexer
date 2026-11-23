@@ -157,6 +157,8 @@ class DbConnection:
             # DuckDB allows executing multiple SQL statements separated by semicolons
             # We can execute the whole schema string
             conn.execute(schema_sql)
+            # Ensure any stale secondary ART index on clean_symbol is removed
+            conn.execute("DROP INDEX IF EXISTS idx_symbols_clean_symbol;")
         except Exception as e:
             pass
 
@@ -175,8 +177,9 @@ class DbConnection:
                 conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS end_line INTEGER;")
                 conn.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS end_col INTEGER;")
                 conn.execute("ALTER TABLE edges ADD COLUMN IF NOT EXISTS call_line INTEGER;")
+                conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS ast_sha256 VARCHAR DEFAULT '';")
                 try:
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_symbols_clean_symbol ON symbols(clean_symbol);")
+                    conn.execute("DROP INDEX IF EXISTS idx_symbols_clean_symbol;")
                 except Exception:
                     pass
                 # Backfill clean_symbol for existing rows if null
@@ -193,5 +196,9 @@ class DbConnection:
                 conn.execute(r"UPDATE compliance_violations SET filepath = replace(filepath, '\', '/') WHERE filepath LIKE '%\%'")
                 conn.execute(r"UPDATE file_co_changes SET filepath_a = replace(filepath_a, '\', '/'), filepath_b = replace(filepath_b, '\', '/') WHERE filepath_a LIKE '%\%' OR filepath_b LIKE '%\%'")
                 conn.execute("INSERT INTO system_metadata (key, value) VALUES ('schema_version', '2') ON CONFLICT (key) DO UPDATE SET value = '2'")
+
+            if current_ver < 3:
+                conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS ast_sha256 VARCHAR DEFAULT '';")
+                conn.execute("INSERT INTO system_metadata (key, value) VALUES ('schema_version', '3') ON CONFLICT (key) DO UPDATE SET value = '3'")
         except Exception as e:
             print(f"Warning during schema migration: {e}", file=sys.stderr)

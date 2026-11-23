@@ -2,6 +2,7 @@ import sys
 from typing import Dict, List, Any
 from collections import deque
 
+from engines.polymorphism import build_propagation_adjacency
 from utils.arch_config import ArchConfig
 
 
@@ -32,13 +33,7 @@ class MetadataPropagator:
         if not propagation_fields:
             return {}
 
-        adj_forward: Dict[str, set] = {}
-        adj_backward: Dict[str, set] = {}
-        for edge in all_edges:
-            src, tgt = edge["source"], edge["target"]
-            if src in symbol_classifications and tgt in symbol_classifications:
-                adj_forward.setdefault(src, set()).add(tgt)
-                adj_backward.setdefault(tgt, set()).add(src)
+        adj_forward, adj_backward = build_propagation_adjacency(all_edges, symbol_classifications)
 
         propagation_sources: Dict[tuple, str] = {}
 
@@ -97,3 +92,4 @@ class MetadataPropagator:
                 )
 
         return propagation_sources
+
