@@ -1,9 +1,10 @@
 import logging
-from typing import Dict, List, Any, Optional, Union
+from typing import Any, Dict, List, Optional
+
 from db.base import BaseRepository, normalize_path
 from engines.polymorphism import (
-    POLYMORPHIC_KINDS,
     IMPLEMENTS_RELATION,
+    POLYMORPHIC_KINDS,
     VIRTUAL_DISPATCH_RELATION,
 )
 
@@ -14,7 +15,7 @@ _POLY_KINDS_LIST = sorted(POLYMORPHIC_KINDS)
 class AnalyticsStore(BaseRepository):
     """
     Domain store providing read-only analytical queries, graph intelligence summaries,
-    transitive closures, and metric aggregations.
+    symmetrical transitive closures, and clustering graph projections.
     """
 
     def get_symbol_counts_by_kind(self) -> Dict[str, int]:
@@ -189,14 +190,17 @@ class AnalyticsStore(BaseRepository):
                 if not current_frontier:
                     break
                 nodes = list(current_frontier.keys())
-                # Standard callers (exclude Implements so sibling concrete types do not leak)
+                # Standard callers (exclude Implements so abstract T does not bounce to sibling concrete classes)
                 direct_rows = self._fetch_all(
                     "SELECT source AS next_sym, target AS curr_sym, relation FROM edges WHERE target IN (SELECT UNNEST(?::VARCHAR[])) AND relation <> ?",
                     (nodes, IMPLEMENTS_RELATION),
                 )
                 # Virtual dispatch upstream: concrete C --[Implements]--> abstract T
                 virtual_rows = self._fetch_all(
-                    "SELECT target AS next_sym, source AS curr_sym, ? AS relation FROM edges WHERE source IN (SELECT UNNEST(?::VARCHAR[])) AND relation = ?",
+                    """SELECT e.target AS next_sym, e.source AS curr_sym, ? AS relation
+                       FROM edges e
+                       WHERE e.source IN (SELECT UNNEST(?::VARCHAR[]))
+                         AND e.relation = ?""",
                     (VIRTUAL_DISPATCH_RELATION, nodes, IMPLEMENTS_RELATION),
                 )
                 next_frontier = {}
@@ -274,7 +278,7 @@ class AnalyticsStore(BaseRepository):
         scope_prefixes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Executes a read-only DuckDB projection over symbols, files, and edges
+        Executes a read-only DuckDB projection over canonical symbols, files, and edges
         for parameter-free hierarchical clustering.
         """
         norm_prefixes = (
@@ -286,7 +290,7 @@ class AnalyticsStore(BaseRepository):
         symbols_sql = """
             SELECT
                 s.symbol,
-                s.clean_symbol,
+                s.name,
                 s.filepath,
                 s.kind,
                 s.parent_symbol,
@@ -313,7 +317,7 @@ class AnalyticsStore(BaseRepository):
                 e.weight,
                 s_src.filepath AS src_filepath,
                 s_tgt.filepath AS tgt_filepath,
-                s_tgt.clean_symbol AS tgt_clean_symbol,
+                s_tgt.name AS tgt_name,
                 s_tgt.kind AS tgt_kind
             FROM edges e
             JOIN symbols s_src ON e.source = s_src.symbol

@@ -1,8 +1,10 @@
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from auditor.path_tracer import format_path_trace, matches_blocklist
 from auditor.snapshot import AuditSnapshot
-from utils.arch_config import ArchConfig, build_rule_id
-from utils.helpers import matches_filter, find_call_site_or_definition_line, demangle_scip_symbol
+from utils.arch_config import ArchConfig, FieldConfig, build_rule_id
+from utils.helpers import find_call_site_or_definition_line, matches_filter
+from utils.symbol_id import canonical_display_name
 from utils.violation_id import generate_violation_id
 
 
@@ -11,7 +13,7 @@ def _trace_propagation_path(
     target_sym: str,
     field_name: str,
     propagation_sources: Dict[tuple, str],
-    field_conf: Any,
+    field_conf: FieldConfig,
 ) -> List[str]:
     curr_src = source_sym
     src_path = [curr_src]
@@ -47,14 +49,14 @@ def _find_counterfactual_fix(
     target_sym: str,
     target_data: Dict[str, Any],
     field_name: str,
-    field_conf: Any,
+    field_conf: FieldConfig,
     symbol_classifications: Dict[str, Any],
     snapshot: Optional[AuditSnapshot] = None,
 ) -> Optional[str]:
     barriers = field_conf.get("barriers", [])
     if not barriers:
         return None
-    barrier_field = field_conf.barrier_field if hasattr(field_conf, "barrier_field") else (field_conf.get("barrier_field") or field_name)
+    barrier_field = field_conf.barrier_field
 
     incoming = snapshot.get_incoming(target_sym) if snapshot is not None else []
     parent_sym = target_data.get("symbol_info", {}).get("parent_symbol")
@@ -70,8 +72,8 @@ def _find_counterfactual_fix(
         seen_callers.add(caller)
         caller_layer = symbol_classifications[caller]["fields"].get(barrier_field)
         if caller_layer in barriers:
-            clean_caller = demangle_scip_symbol(caller)
-            clean_target = demangle_scip_symbol(target_sym)
+            clean_caller = canonical_display_name(caller)
+            clean_target = canonical_display_name(target_sym)
             candidates.append(f"`{clean_caller}` (in {caller_layer}) already calls `{clean_target}`")
             if len(candidates) >= 2:
                 break
@@ -81,7 +83,7 @@ def _find_counterfactual_fix(
 
 
 def _check_package_restrictions(
-    rule: Any,
+    rule: Dict[str, Any],
     source_sym: str,
     target_sym: str,
     source_data: Dict[str, Any],
@@ -94,7 +96,9 @@ def _check_package_restrictions(
     source_val = source_data["static_fields"].get(field_name)
     forbidden_source = rule.get("source")
     blocklist = rule.get("blocklist", [])
-    if source_val != forbidden_source or not matches_blocklist(target_sym, blocklist):
+    tgt_info = snapshot.get_symbol(target_sym) if snapshot is not None else None
+    alt_symbols = [tgt_info.get("scip_id"), tgt_info.get("name")] if tgt_info else None
+    if source_val != forbidden_source or not matches_blocklist(target_sym, blocklist, alt_symbols=alt_symbols):
         return []
     msg = rule.get("message", f"Package restriction violation: {source_val} cannot depend on {target_sym}")
     line_number = find_call_site_or_definition_line(source_sym, target_sym, edge=edge, snapshot=snapshot)
@@ -112,7 +116,7 @@ def _check_package_restrictions(
 
 
 def _check_single_dependency(
-    rule: Any,
+    rule: Dict[str, Any],
     source_sym: str,
     target_sym: str,
     source_data: Dict[str, Any],
@@ -121,7 +125,7 @@ def _check_single_dependency(
     matched_prefix: Optional[str],
     field_name: str,
     propagation_sources: Dict[tuple, str],
-    field_conf: Any,
+    field_conf: FieldConfig,
     symbol_classifications: Dict[str, Any],
     edge: Optional[Dict[str, Any]] = None,
     snapshot: Optional[AuditSnapshot] = None,
@@ -138,7 +142,9 @@ def _check_single_dependency(
     path = _trace_propagation_path(source_sym, target_sym, field_name, propagation_sources, field_conf)
     trace_msg = msg + format_path_trace(path, snapshot=snapshot)
 
-    fix_hint = _find_counterfactual_fix(target_sym, target_data, field_name, field_conf, symbol_classifications, snapshot=snapshot)
+    fix_hint = _find_counterfactual_fix(
+        target_sym, target_data, field_name, field_conf, symbol_classifications, snapshot=snapshot
+    )
     if fix_hint:
         trace_msg += f"\n  Suggested Fix: {fix_hint}"
     line_number = find_call_site_or_definition_line(source_sym, target_sym, edge=edge, snapshot=snapshot)
@@ -167,11 +173,10 @@ def check(
     snapshot: AuditSnapshot,
     symbol_classifications: Dict[str, Any],
     propagation_sources: Dict[str, Any],
-    config: Any,
+    config: ArchConfig,
     filepath_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Checks dependency and package restriction rules for architectural boundary compliance."""
-    cfg = config if isinstance(config, ArchConfig) else ArchConfig.from_dict(config)
     violations: List[Dict[str, Any]] = []
     edges_to_check = snapshot.all_edges if snapshot else []
     classifications = symbol_classifications or {}
@@ -186,8 +191,8 @@ def check(
         if not filepath or not matches_filter(filepath, filepath_filter):
             continue
 
-        matched_prefix = cfg.get_applicable_prefix(filepath)
-        prefix_conf = cfg.prefixes.get(matched_prefix) if matched_prefix else None
+        matched_prefix = config.get_applicable_prefix(filepath)
+        prefix_conf = config.prefixes.get(matched_prefix) if matched_prefix else None
         if not prefix_conf:
             continue
 

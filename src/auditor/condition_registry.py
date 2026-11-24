@@ -1,4 +1,6 @@
-from typing import Dict, Callable, Any, Optional, List
+from typing import Any, Callable, Dict, List, Optional
+
+from utils.symbol_id import parse_canonical_id, strip_rust_generics
 
 
 class ConditionEvaluatorRegistry:
@@ -41,15 +43,27 @@ def _eval_path_prefix(symbol_info: dict, prefix: str, **kwargs) -> bool:
 
 
 def _eval_class_suffix(symbol_info: dict, suffix: str, **kwargs) -> bool:
-    return symbol_info["symbol"].split(" ")[-1].endswith(suffix)
+    _, scope_parts, leaf = parse_canonical_id(symbol_info["symbol"])
+    name = symbol_info.get("name") or leaf
+    if name.endswith(suffix):
+        return True
+    if scope_parts and strip_rust_generics(scope_parts[-1]).endswith(suffix):
+        return True
+    return False
 
 
 def _eval_class_contains(symbol_info: dict, substring: str, **kwargs) -> bool:
-    return substring in symbol_info["symbol"].split(" ")[-1]
+    _, scope_parts, leaf = parse_canonical_id(symbol_info["symbol"])
+    name = symbol_info.get("name") or leaf
+    if substring in name:
+        return True
+    return any(substring in strip_rust_generics(s) for s in scope_parts)
 
 
 def _eval_name_contains(symbol_info: dict, substring: str, **kwargs) -> bool:
-    return substring in symbol_info["symbol"].split(" ")[-1]
+    _, _, leaf = parse_canonical_id(symbol_info["symbol"])
+    name = symbol_info.get("name") or leaf
+    return substring in name
 
 
 def _eval_calls_prefix(

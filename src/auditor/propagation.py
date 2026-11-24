@@ -1,9 +1,11 @@
-import sys
-from typing import Dict, List, Any
 from collections import deque
+import logging
+from typing import Any, Dict, List
 
 from engines.polymorphism import build_propagation_adjacency
 from utils.arch_config import ArchConfig
+
+logger = logging.getLogger(__name__)
 
 
 class MetadataPropagator:
@@ -13,12 +15,10 @@ class MetadataPropagator:
         self,
         symbol_classifications: Dict[str, Dict[str, Any]],
         all_edges: List[Dict[str, Any]],
-        config: Any,
+        config: ArchConfig,
     ) -> Dict[tuple, str]:
-        cfg = config if isinstance(config, ArchConfig) else ArchConfig.from_dict(config)
-
         propagation_fields = {}
-        for _, prefix_conf in cfg.items():
+        for _, prefix_conf in config.items():
             for field_name, field_conf in prefix_conf.automatic_fields.items():
                 if field_conf.get("handler") == "propagation":
                     propagation_fields[field_name] = {
@@ -85,11 +85,10 @@ class MetadataPropagator:
                             visited.add(m)
 
             if queue and iterations >= max_iterations:
-                print(
-                    f"[MetadataPropagator] Warning: Worklist propagation for field '{field_name}' "
-                    f"reached maximum iteration cap ({max_iterations}) before reaching a fixed point.",
-                    file=sys.stderr,
+                logger.warning(
+                    "Worklist propagation for field '%s' reached maximum iteration cap (%d) before reaching a fixed point.",
+                    field_name,
+                    max_iterations,
                 )
 
         return propagation_sources
-

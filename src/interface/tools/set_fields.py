@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from auditor.analyzer import Auditor
-from utils.helpers import resolve_filepath
 
 
 def handle_set_fields(
@@ -23,7 +22,7 @@ def handle_set_fields(
     if not isinstance(fields, dict):
         return "Error: Fields payload must be a JSON object.", False
 
-    resolved = resolve_filepath(repository, filepath)
+    resolved = repository.workspace.resolve_filepath(filepath)
     if not resolved:
         return f"Error: File '{filepath}' is not registered in the database.", False
 

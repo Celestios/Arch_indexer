@@ -1,9 +1,4 @@
-"""Single-instance management for the machine-global MCP daemon.
-
-First instance starts the daemon and writes connection info to ~/.arch/daemon.lock
-and acquires a machine-global named mutex on Windows.
-Subsequent instances detect the running daemon, register their workspace, and exit.
-"""
+"""Single-instance management for the machine-global MCP daemon."""
 import atexit
 import json
 import os
@@ -14,7 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 if sys.platform == "win32":
     import ctypes
@@ -22,7 +17,6 @@ if sys.platform == "win32":
 
 CONFIG_DIR_NAME = ".arch"
 LOCK_FILE_NAME = "daemon.lock"
-LEGACY_LOCK_FILE_NAME = "arch.lock"
 PROJECTS_FILE_NAME = "projects.json"
 DEFAULT_PORT = 8071
 WINDOWS_MUTEX_NAME = "Local\\ArchMcpDaemonMutex"
@@ -45,12 +39,11 @@ def _pid_alive(pid: int) -> bool:
             kernel32.CloseHandle(handle)
             return True
         return False
-    else:
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def _port_open(port: int) -> bool:
@@ -77,11 +70,7 @@ def _find_open_port(start: int = DEFAULT_PORT) -> int:
 
 
 def acquire_named_mutex() -> bool:
-    """Acquires the machine-wide named mutex on Windows.
-
-    Returns True if successfully acquired/created, False if already held by another process.
-    On non-Windows platforms, returns True.
-    """
+    """Acquires the machine-wide named mutex on Windows."""
     global _daemon_mutex_handle
     if sys.platform == "win32":
         ERROR_ALREADY_EXISTS = 183
@@ -116,14 +105,9 @@ def read_lock(arch_dir: Optional[Path] = None) -> Optional[dict]:
     target_dir = arch_dir if arch_dir is not None else get_global_arch_dir()
     lock_path = target_dir / LOCK_FILE_NAME
     if not lock_path.exists():
-        legacy_path = target_dir / LEGACY_LOCK_FILE_NAME
-        if legacy_path.exists():
-            lock_path = legacy_path
-        else:
-            return None
+        return None
     try:
-        data = json.loads(lock_path.read_text(encoding="utf-8"))
-        return data
+        return json.loads(lock_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
 
@@ -138,10 +122,7 @@ def write_lock(arch_dir: Optional[Path], pid: int, port: int) -> Path:
 
 
 def check_existing(arch_dir: Optional[Path] = None) -> Optional[str]:
-    """Check if a daemon is already running and responding.
-
-    Returns the server URL if alive, None otherwise. Cleans up stale locks.
-    """
+    """Check if a daemon is already running and responding; cleans up stale locks."""
     target_dir = arch_dir if arch_dir is not None else get_global_arch_dir()
     lock = read_lock(target_dir)
     if not lock:
@@ -152,39 +133,27 @@ def check_existing(arch_dir: Optional[Path] = None) -> Optional[str]:
 
     def _cleanup():
         target_dir.joinpath(LOCK_FILE_NAME).unlink(missing_ok=True)
-        target_dir.joinpath(LEGACY_LOCK_FILE_NAME).unlink(missing_ok=True)
         release_named_mutex()
 
-    if not pid or not url:
-        _cleanup()
-        return None
-
-    if not _pid_alive(pid):
+    if not pid or not url or not _pid_alive(pid):
         _cleanup()
         return None
 
     if _server_alive(url):
         return url
 
-    # PID exists but server not responding — stale
     _cleanup()
     return None
 
 
 def acquire_server(arch_dir: Optional[Path] = None, port: int = 0) -> Optional[str]:
-    """Try to acquire the daemon slot.
-
-    If a daemon is already running, returns its URL.
-    If not, writes lock file with our PID, acquires Windows mutex, and returns None.
-    """
+    """Acquire the daemon slot or return the existing daemon URL."""
     target_dir = arch_dir if arch_dir is not None else get_global_arch_dir()
     existing = check_existing(target_dir)
     if existing:
         return existing
 
-    # Try acquiring named mutex on Windows
     if not acquire_named_mutex():
-        # Mutex held by another process starting up; wait briefly and check again
         time.sleep(0.3)
         existing = check_existing(target_dir)
         if existing:
@@ -210,7 +179,6 @@ def acquire_server(arch_dir: Optional[Path] = None, port: int = 0) -> Optional[s
 
 
 def _kill_pid(pid: int) -> bool:
-    """Terminates a process by PID across Windows and Unix."""
     if sys.platform == "win32":
         try:
             PROCESS_TERMINATE = 0x0001
@@ -230,20 +198,16 @@ def _kill_pid(pid: int) -> bool:
             return res.returncode == 0
         except Exception:
             return False
-    else:
-        try:
-            import signal
-            os.kill(pid, signal.SIGTERM)
-            return True
-        except OSError:
-            return False
+    try:
+        import signal
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except OSError:
+        return False
 
 
 def stop_server(arch_dir: Optional[Path] = None) -> Optional[int]:
-    """Stops the running MCP daemon if active.
-
-    Returns the PID of the stopped server, or None if no running server was found.
-    """
+    """Stops the running MCP daemon if active."""
     target_dir = arch_dir if arch_dir is not None else get_global_arch_dir()
     lock = read_lock(target_dir)
     if not lock:
@@ -252,7 +216,6 @@ def stop_server(arch_dir: Optional[Path] = None) -> Optional[int]:
     pid = lock.get("pid")
     if not pid:
         target_dir.joinpath(LOCK_FILE_NAME).unlink(missing_ok=True)
-        target_dir.joinpath(LEGACY_LOCK_FILE_NAME).unlink(missing_ok=True)
         release_named_mutex()
         return None
 
@@ -261,7 +224,6 @@ def stop_server(arch_dir: Optional[Path] = None) -> Optional[int]:
         time.sleep(0.2)
 
     target_dir.joinpath(LOCK_FILE_NAME).unlink(missing_ok=True)
-    target_dir.joinpath(LEGACY_LOCK_FILE_NAME).unlink(missing_ok=True)
     release_named_mutex()
     return pid
 
@@ -279,7 +241,6 @@ def get_server_status(arch_dir: Optional[Path] = None) -> Optional[dict]:
 
     if not pid or not _pid_alive(pid):
         target_dir.joinpath(LOCK_FILE_NAME).unlink(missing_ok=True)
-        target_dir.joinpath(LEGACY_LOCK_FILE_NAME).unlink(missing_ok=True)
         release_named_mutex()
         return None
 
@@ -306,7 +267,6 @@ def register_workspace(project_root: Path, global_dir: Optional[Path] = None) ->
             data = {"projects": {}, "active_project": None}
 
     resolved_root = project_root.resolve()
-    # Walk up to find project root containing .arch/arch.db
     cur = resolved_root if resolved_root.is_dir() else resolved_root.parent
     db_root = None
     while True:
@@ -323,7 +283,7 @@ def register_workspace(project_root: Path, global_dir: Optional[Path] = None) ->
     resolved_root = db_root
     root_str = str(resolved_root).replace("\\", "/")
     root_lower = root_str.lower()
-    is_global = (target_dir.resolve() == get_global_arch_dir().resolve())
+    is_global = target_dir.resolve() == get_global_arch_dir().resolve()
     if is_global and ("pytest" in root_lower or "temp" in root_lower or "tmp" in resolved_root.name.lower()):
         return data
 
@@ -355,25 +315,10 @@ def start_headless(project_root: Optional[Path] = None, port: int = 0) -> Option
         port = DEFAULT_PORT if not _port_open(DEFAULT_PORT) else _find_open_port(DEFAULT_PORT)
 
     if getattr(sys, "frozen", False):
-        cmd = [
-            sys.executable,
-            "mcp",
-            str(resolved_root),
-            "--port",
-            str(port),
-            "--foreground",
-        ]
+        cmd = [sys.executable, "mcp", str(resolved_root), "--port", str(port), "--foreground"]
     else:
         main_script = Path(__file__).resolve().parent.parent / "main.py"
-        cmd = [
-            sys.executable,
-            str(main_script),
-            "mcp",
-            str(resolved_root),
-            "--port",
-            str(port),
-            "--foreground",
-        ]
+        cmd = [sys.executable, str(main_script), "mcp", str(resolved_root), "--port", str(port), "--foreground"]
 
     log_file = open(log_file_path, "a", encoding="utf-8")
 
@@ -408,7 +353,6 @@ def start_headless(project_root: Optional[Path] = None, port: int = 0) -> Option
         if status and status.get("healthy"):
             return status
 
-    # Check if process crashed immediately
     if proc.poll() is not None:
         return None
 

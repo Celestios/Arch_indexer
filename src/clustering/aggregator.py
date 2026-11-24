@@ -1,27 +1,25 @@
 """Hierarchical bottom-up dendrogram aggregation with dominance gate and LCA placement."""
 from collections import defaultdict
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Tuple
 
 from clustering.models import ClusterNode
 
 
 def collapse_single_child_wrappers(node: ClusterNode) -> ClusterNode:
-    """Collapses redundant single-child wrapper chain and recalculates level monotonically."""
+    """Collapses redundant single-child wrapper chains and recalculates level monotonically."""
     node.children = [collapse_single_child_wrappers(c) for c in node.children]
-    if len(node.children) == 1:
+    if node.cluster_id != "root" and len(node.children) == 1:
         child = node.children[0]
         if child.children:
             node.children = child.children
             node.is_cycle = node.is_cycle or child.is_cycle
             node.is_singleton = False
-    # Recalculate level monotonically: leaves = 0, parents = max(child) + 1
     node.level = max((c.level for c in node.children), default=-1) + 1
     return node
 
 
 def assign_hierarchical_ids(node: ClusterNode):
     """Assigns dot-delimited positional IDs (c1, c1.1, c1.2, etc.) deterministically."""
-    # Sibling sort: (-total_symbols, first_canonical_symbol_id)
     node.children.sort(key=lambda c: (-len(c.symbol_ids), min(c.symbol_ids) if c.symbol_ids else ""))
     for i, child in enumerate(node.children):
         if node.cluster_id == "root":
@@ -37,40 +35,34 @@ def run_hierarchical_aggregation(
     initial_nodes: List[ClusterNode],
     sym_to_id: Dict[str, int],
     undirected_aff: Dict[Tuple[int, int], float],
-    raw_dep_weight: Dict[Tuple[int, int], float],
-    dir_in_edges: Dict[str, Set[str]],
+    dampened_out_weights: Dict[Tuple[int, int], float],
     max_passes: int = 8,
 ) -> ClusterNode:
     """
-    Executes Passes L = 1..max_passes in O(E) sparse edge iterations per pass:
+    Executes Passes L = 1..max_passes in O(E) sparse edge iterations per pass on the
+    shared dampened affinity scale:
     - Phase A: Deterministic Louvain Modularity Local Moving (preserving internal self-loop mass)
-    - Phase B: Dominance Gate (Hub Ejection, stopping on 1-member communities)
-    - Phase C: Private-Dependency Absorption (with outbound fan-out guard)
+    - Phase B: Dominance Gate (Direction-aware Hub & Orchestrator Ejection)
+    - Phase C: Private-Dependency Absorption (symmetrical directed super-node adjacency)
     - Phase D: Super-Node Contraction & Natural LCA Placement
     """
     current_super_nodes = initial_nodes
-    P = len(current_super_nodes)
-
-    # Track internal edge mass for each super-node to preserve self-loops across passes
-    supernode_internal_weight: List[float] = [0.0] * P
+    supernode_internal_weight: List[float] = [0.0] * len(current_super_nodes)
 
     for pass_num in range(1, max_passes + 1):
         P = len(current_super_nodes)
         if P <= 1:
             break
 
-        # Fast O(1) symbol -> super-node index mapping
-        sym_to_supernode: Dict[str, int] = {}
         sym_id_to_supernode: Dict[int, int] = {}
         for node_idx, s_node in enumerate(current_super_nodes):
             for s in s_node.symbol_ids:
-                sym_to_supernode[s] = node_idx
                 if s in sym_to_id:
                     sym_id_to_supernode[sym_to_id[s]] = node_idx
 
-        # O(E) sparse graph construction between super-nodes
         node_adj: Dict[int, Dict[int, float]] = defaultdict(lambda: defaultdict(float))
-        raw_node_coupling: Dict[int, Dict[int, float]] = defaultdict(lambda: defaultdict(float))
+        node_out_adj: Dict[int, Dict[int, float]] = defaultdict(lambda: defaultdict(float))
+        node_in_adj: Dict[int, Dict[int, float]] = defaultdict(lambda: defaultdict(float))
         node_external_deg: List[float] = [0.0] * P
 
         for (u, v), w in undirected_aff.items():
@@ -82,20 +74,17 @@ def run_hierarchical_aggregation(
                     node_adj[sv][su] += w
                     node_external_deg[su] += w
                     node_external_deg[sv] += w
-                else:
-                    if pass_num == 1:
-                        # Count initial self-loop within initial SCC nodes
-                        supernode_internal_weight[su] += w
+                elif pass_num == 1:
+                    supernode_internal_weight[su] += w
 
-        for (u, v), w in raw_dep_weight.items():
+        for (u, v), w in dampened_out_weights.items():
             if u in sym_id_to_supernode and v in sym_id_to_supernode:
                 su = sym_id_to_supernode[u]
                 sv = sym_id_to_supernode[v]
                 if su != sv:
-                    raw_node_coupling[su][sv] += w
-                    raw_node_coupling[sv][su] += w
+                    node_out_adj[su][sv] += w
+                    node_in_adj[sv][su] += w
 
-        # Preserve full degree k_i = 2 * internal_loop + external_deg
         node_deg: List[float] = [
             2.0 * supernode_internal_weight[i] + node_external_deg[i]
             for i in range(P)
@@ -144,12 +133,12 @@ def run_hierarchical_aggregation(
             if not moved_any:
                 break
 
-        # Group into candidate communities
         comm_members: Dict[int, List[int]] = defaultdict(list)
         for i, c in enumerate(community):
             comm_members[c].append(i)
 
-        # Phase B: Dominance Gate (Hub Ejection)
+        # Phase B: Dominance Gate (Direction-aware Hub & Orchestrator Ejection)
+        next_comm_id = P
         for _ in range(5):
             ejected_any = False
             for c_id in sorted(list(comm_members.keys())):
@@ -158,86 +147,96 @@ def run_hierarchical_aggregation(
                     continue
 
                 for u in list(members):
-                    # Stop if community has shrunk to singleton
                     if len(members) < 2:
                         break
 
-                    w_in_c = sum(raw_node_coupling[u].get(v, 0.0) for v in members if v != u)
-                    w_total = sum(raw_node_coupling[u].values())
-                    if w_total <= 0:
-                        continue
+                    w_internal = sum(node_adj[u].get(v, 0.0) for v in members if v != u)
 
-                    connected_comms = {
+                    ext_inbound_comms = {
                         community[v]
-                        for v, w in raw_node_coupling[u].items()
+                        for v, w in node_in_adj[u].items()
                         if w > 0
-                    }
-                    if len(connected_comms) >= 2 and (w_in_c / w_total) <= 0.50:
+                    } - {c_id}
+
+                    ext_outbound_comms = {
+                        community[v]
+                        for v, w in node_out_adj[u].items()
+                        if w > 0
+                    } - {c_id}
+
+                    should_eject = False
+
+                    # Shared Inbound Hub
+                    if len(ext_inbound_comms) >= 2:
+                        w_in_ext = sum(w for v, w in node_in_adj[u].items() if community[v] != c_id)
+                        total_in_and_internal = w_in_ext + w_internal
+                        if total_in_and_internal > 0 and (w_internal / total_in_and_internal) <= 0.50:
+                            should_eject = True
+
+                    # Callerless Multi-Subsystem Orchestrator
+                    if not should_eject and len(node_in_adj[u]) == 0 and len(ext_outbound_comms) >= 2:
+                        w_total_coupling = sum(node_adj[u].values())
+                        if w_total_coupling > 0 and (w_internal / w_total_coupling) <= 0.50:
+                            should_eject = True
+
+                    if should_eject:
                         members.remove(u)
-                        new_c = P + u + pass_num * 1000
+                        new_c = next_comm_id
+                        next_comm_id += 1
                         community[u] = new_c
                         comm_members[new_c] = [u]
                         ejected_any = True
             if not ejected_any:
                 break
 
-        # Phase C: Private-Dependency Absorption (with outbound fan-out guard)
+        # Phase C: Private-Dependency Absorption (symmetrical directed super-node adjacency)
         for u in range(P):
             c_u = community[u]
-            if len(comm_members[c_u]) == 1:
-                # Singleton u: inspect incoming callers in O(1) per caller
-                syms_u = current_super_nodes[u].symbol_ids
-                callers_of_u: Set[int] = set()
-                for s in syms_u:
-                    for caller_sym in dir_in_edges.get(s, set()):
-                        v = sym_to_supernode.get(caller_sym)
-                        if v is not None and v != u:
-                            callers_of_u.add(v)
+            if len(comm_members[c_u]) != 1:
+                continue
 
-                # Check outbound candidate communities to prevent absorbing fan-out orchestrators
-                outbound_comms = {
-                    community[v]
-                    for v, w in node_adj[u].items()
-                    if v != u and w > 0
-                }
+            caller_comms = {
+                community[v]
+                for v, w in node_in_adj[u].items()
+                if v != u and w > 0
+            }
+            outbound_comms = {
+                community[v]
+                for v, w in node_out_adj[u].items()
+                if v != u and w > 0
+            }
 
-                caller_comms = {community[v] for v in callers_of_u if v != u}
-                absorbed = False
+            absorbed = False
+            if len(caller_comms) == 1:
+                target_c = next(iter(caller_comms))
+                if len(comm_members[target_c]) >= 2 and len(outbound_comms - {target_c}) <= 1:
+                    comm_members[c_u].remove(u)
+                    if not comm_members[c_u]:
+                        del comm_members[c_u]
+                    community[u] = target_c
+                    comm_members[target_c].append(u)
+                    absorbed = True
 
-                # Absorb only if callers are in single community AND outbound does not fan out to multiple communities
-                if len(caller_comms) == 1:
-                    target_c = next(iter(caller_comms))
-                    if len(comm_members[target_c]) >= 2:
-                        other_outbound = outbound_comms - {target_c}
-                        if len(other_outbound) <= 1:
-                            comm_members[c_u].remove(u)
-                            if not comm_members[c_u]:
-                                del comm_members[c_u]
-                            community[u] = target_c
-                            comm_members[target_c].append(u)
-                            absorbed = True
-
-                if not absorbed:
-                    w_total = sum(raw_node_coupling[u].values())
-                    if w_total > 0:
-                        for cand_c in sorted(comm_members.keys()):
-                            members = comm_members[cand_c]
-                            if cand_c != c_u and len(members) >= 2:
-                                w_in = sum(raw_node_coupling[u].get(v, 0.0) for v in members)
-                                if (w_in / w_total) > 0.85:
-                                    comm_members[c_u].remove(u)
-                                    if not comm_members[c_u]:
-                                        del comm_members[c_u]
-                                    community[u] = cand_c
-                                    comm_members[cand_c].append(u)
-                                    break
+            if not absorbed:
+                w_total = sum(node_adj[u].values())
+                if w_total > 0:
+                    for cand_c in sorted(comm_members.keys()):
+                        members = comm_members[cand_c]
+                        if cand_c != c_u and len(members) >= 2:
+                            w_in = sum(node_adj[u].get(v, 0.0) for v in members)
+                            if (w_in / w_total) > 0.85:
+                                comm_members[c_u].remove(u)
+                                if not comm_members[c_u]:
+                                    del comm_members[c_u]
+                                community[u] = cand_c
+                                comm_members[cand_c].append(u)
+                                break
 
         # Phase D: Super-Node Contraction
         new_super_nodes: List[ClusterNode] = []
         new_internal_weights: List[float] = []
         any_merges = False
 
-        # Sort candidate communities deterministically by (-total_symbols, first_canonical_symbol)
         sorted_comms = sorted(
             [m for m in comm_members.values() if m],
             key=lambda members: (
@@ -271,10 +270,9 @@ def run_hierarchical_aggregation(
                 )
                 new_super_nodes.append(parent_node)
 
-                # Accumulate internal self-loop edge mass: children internal + inter-child edges
                 parent_internal = sum(supernode_internal_weight[m] for m in members)
                 for i_pos, ma in enumerate(members):
-                    for mb in members[i_pos + 1 :]:
+                    for mb in members[i_pos + 1:]:
                         parent_internal += node_adj[ma].get(mb, 0.0)
                 new_internal_weights.append(parent_internal)
 
@@ -283,7 +281,6 @@ def run_hierarchical_aggregation(
         if not any_merges:
             break
 
-    # Attach surviving top-level nodes under root
     all_root_syms = tuple(sorted(sum((list(c.symbol_ids) for c in current_super_nodes), [])))
     all_root_fps = tuple(sorted(set(sum((list(c.filepaths) for c in current_super_nodes), []))))
     root = ClusterNode(

@@ -1,14 +1,15 @@
-"""Incremental SCIP semantic ingestion into DuckDB with disjoint Tier-2 ownership."""
+"""Incremental SCIP semantic ingestion into DuckDB using canonical symbol identity."""
+import logging
 import time
-import collections
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from engines.scip.utils import print_progress
-from engines.reconciler import reconcile_symbol_id
-from utils.helpers import ext_to_lang, demangle_scip_symbol
-from change_tracker.tracker import calculate_sha256
 from change_tracker.invalidation import expand_changed_files
+from change_tracker.tracker import calculate_sha256
+from engines.registry import LanguageRegistry
+from utils.symbol_id import parse_canonical_id
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_changed_and_deleted(
@@ -17,7 +18,7 @@ def _resolve_changed_and_deleted(
     project_root: Optional[Path] = None,
     force: bool = False,
 ) -> Tuple[List[str], List[str], List[str], List[str], bool]:
-    """Resolves changed files, deleted files, unchanged files, and hashes."""
+    """Resolves changed files, deleted files, unchanged files, and shrink-guard checks."""
     files_to_register = set()
     for f in parsed_data.get("files", []):
         if f:
@@ -30,8 +31,7 @@ def _resolve_changed_and_deleted(
             files_to_register.add(sym["filepath"].replace("\\", "/"))
 
     file_list = list(files_to_register)
-
-    languages_in_index = {ext_to_lang(Path(fp).suffix.lower()) for fp in file_list}
+    languages_in_index = {LanguageRegistry.detect_language(fp) or "unknown" for fp in file_list}
     db_files = repository.workspace.get_all_files_metadata()
 
     if not languages_in_index:
@@ -55,8 +55,8 @@ def _resolve_changed_and_deleted(
             if not exists_on_disk and (project_root is not None or Path(fp).is_absolute()):
                 deleted_files.append(fp)
 
-    changed_files = []
-    unchanged_files = []
+    changed_files: List[str] = []
+    unchanged_files: List[str] = []
     if project_root and not force:
         for fp in file_list:
             current_hash = calculate_sha256(project_root / fp)
@@ -67,8 +67,14 @@ def _resolve_changed_and_deleted(
                 unchanged_files.append(fp)
 
         if changed_files:
-            changed_files = list(expand_changed_files(repository, changed_files, new_symbols=parsed_data.get("symbols"), max_depth=1))
-            print(f"[SCIP Ingest] Incremental: {len(changed_files)} to process (including dependents), {len(unchanged_files)} unchanged")
+            changed_files = list(
+                expand_changed_files(repository, changed_files, new_symbols=parsed_data.get("symbols"), max_depth=1)
+            )
+            logger.info(
+                "[SCIP Ingest] Incremental: %d to process (including dependents), %d unchanged",
+                len(changed_files),
+                len(unchanged_files),
+            )
     else:
         changed_files = file_list
 
@@ -102,90 +108,57 @@ def _ingest_files_table(
     """Writes file records to WorkspaceStore and cascades deleted files."""
     if deleted_files:
         for fp in deleted_files:
-            print(f"[SCIP Ingest] Cleaning up deleted file from database: {fp}")
+            logger.info("[SCIP Ingest] Cleaning up deleted file from database: %s", fp)
         repository.delete_files(deleted_files)
 
     files_to_ingest = [
         {
             "filepath": fp,
             "sha256": calculate_sha256(project_root / fp) if project_root else "initial_hash",
-            "language": ext_to_lang(Path(fp).suffix.lower()),
+            "language": LanguageRegistry.detect_language(fp) or "unknown",
         }
         for fp in file_list
     ]
     repository.workspace.upsert_files(files_to_ingest)
 
 
-def _reconcile_and_stage_symbols(
+def _stage_index_data(
     repository,
     parsed_data: Dict[str, Any],
     changed_files: List[str],
 ) -> Dict[str, Any]:
-    """Reconciles Tier-2 SCIP symbols against existing Tier-1 syntactic rows and stages semantic batches."""
+    """Stages canonical symbols, occurrences, diagnostics, and edges for changed files."""
     changed_set = {fp.replace("\\", "/") for fp in changed_files}
     filtered_symbols = {
         k: {**v, "filepath": v["filepath"].replace("\\", "/") if v.get("filepath") else None}
         for k, v in parsed_data.get("symbols", {}).items()
         if v.get("filepath") is None or v["filepath"].replace("\\", "/") in changed_set
     }
-    print(f"[SCIP Ingest] Ingesting {len(filtered_symbols)} symbols from {len(changed_files)} changed files...")
+    logger.info("[SCIP Ingest] Staging %d symbols from %d changed files...", len(filtered_symbols), len(changed_files))
 
     existing_symbols: Dict[str, Dict[str, Any]] = {}
-    clean_to_existing_by_fp: Dict[str, Dict[str, str]] = collections.defaultdict(dict)
-    line_to_existing_by_fp: Dict[str, Dict[int, str]] = collections.defaultdict(dict)
-    coords_by_fp: Dict[str, List[Tuple[str, int]]] = collections.defaultdict(list)
-
     if changed_files:
         for sdata in repository.graph.get_symbols_for_files(list(changed_set)):
-            sid = sdata["symbol"]
-            existing_symbols[sid] = sdata
-            fp = sdata.get("filepath")
-            csym = sdata.get("clean_symbol") or sid
-            if fp and csym:
-                clean_to_existing_by_fp[fp][csym] = sid
-            s_line = sdata.get("start_line")
-            if fp and s_line is not None:
-                line_to_existing_by_fp[fp][s_line] = sid
-                coords_by_fp[fp].append((sid, s_line))
+            existing_symbols[sdata["symbol"]] = sdata
 
-    symbols_to_ingest = []
-    superseded_ids = set()
-    reconciled_id_map = {}
-
-    for sym_id, sym in filtered_symbols.items():
-        sym_fp = sym.get("filepath")
-        clean = demangle_scip_symbol(sym["symbol"])
-        existing_id = sym_id if sym_id in existing_symbols else None
-
-        if existing_id is None and sym_fp:
-            existing_id = reconcile_symbol_id(
-                clean_symbol=clean,
-                start_line=sym.get("start_line"),
-                clean_to_existing=clean_to_existing_by_fp.get(sym_fp, {}),
-                line_to_existing=line_to_existing_by_fp.get(sym_fp, {}),
-                occ_list=coords_by_fp.get(sym_fp, []),
-            )
-            if existing_id and existing_id != sym_id:
-                superseded_ids.add(existing_id)
-                reconciled_id_map[existing_id] = sym_id
-
-        # Tier-1 owns syntactic fields when a Tier-1 record was upgraded to a SCIP symbol ID.
-        # UPSERT_SEMANTIC_SYMBOL_SQL guarantees existing syntactic columns are never clobbered.
-        upgraded = existing_symbols.get(existing_id) if (existing_id and existing_id != sym_id) else None
-        symbols_to_ingest.append({
+    symbols_to_ingest = [
+        {
             "symbol": sym["symbol"],
-            "clean_symbol": clean,
-            "filepath": sym_fp,
-            "kind": (upgraded.get("kind") if upgraded and upgraded.get("kind") != "UnspecifiedKind" else None) or sym.get("kind"),
-            "signature": (upgraded.get("signature") if upgraded else None) or sym.get("signature"),
-            "docstring": (upgraded.get("docstring") if upgraded else None) or sym.get("docstring"),
-            "body_hash": (upgraded.get("body_hash") if upgraded else None) or sym.get("body_hash"),
-            "parent_symbol": (upgraded.get("parent_symbol") if upgraded else None) or sym.get("parent_symbol"),
-            "start_line": (upgraded.get("start_line") if upgraded else None) or sym.get("start_line"),
-            "start_col": upgraded.get("start_col") if (upgraded and upgraded.get("start_col") is not None) else sym.get("start_col"),
-            "end_line": (upgraded.get("end_line") if upgraded else None) or sym.get("end_line"),
-            "end_col": upgraded.get("end_col") if (upgraded and upgraded.get("end_col") is not None) else sym.get("end_col"),
-        })
+            "name": sym.get("name") or parse_canonical_id(sym["symbol"])[2] or sym["symbol"],
+            "scip_id": sym.get("scip_id"),
+            "filepath": sym.get("filepath"),
+            "kind": sym.get("kind"),
+            "signature": sym.get("signature"),
+            "docstring": sym.get("docstring"),
+            "body_hash": sym.get("body_hash"),
+            "parent_symbol": sym.get("parent_symbol"),
+            "start_line": sym.get("start_line"),
+            "start_col": sym.get("start_col"),
+            "end_line": sym.get("end_line"),
+            "end_col": sym.get("end_col"),
+        }
+        for sym in filtered_symbols.values()
+    ]
 
     filtered_occurrences = [
         {**occ, "filepath": occ["filepath"].replace("\\", "/")}
@@ -216,8 +189,6 @@ def _reconcile_and_stage_symbols(
         "changed_set": changed_set,
         "filtered_symbols": filtered_symbols,
         "existing_symbols": existing_symbols,
-        "superseded_ids": superseded_ids,
-        "reconciled_id_map": reconciled_id_map,
         "symbols_to_ingest": symbols_to_ingest,
         "occurrences_to_ingest": filtered_occurrences,
         "diagnostics_to_ingest": filtered_diagnostics,
@@ -225,18 +196,17 @@ def _reconcile_and_stage_symbols(
     }
 
 
-def _cleanup_superseded_records(
+def _cleanup_stale_records(
     repository,
     changed_files: List[str],
     force: bool,
     staged_data: Dict[str, Any],
 ):
-    """Deletes stale edges, occurrences, diagnostics, and removed/superseded symbols inside the active transaction."""
+    """Deletes stale edges, occurrences, diagnostics, and removed symbols inside the active transaction."""
     t0 = time.perf_counter()
-    filtered_symbols = staged_data.get("filtered_symbols", {})
-    existing_symbols = staged_data.get("existing_symbols", {})
-    changed_set = staged_data.get("changed_set", {fp.replace("\\", "/") for fp in changed_files})
-    superseded_ids = set(staged_data.get("superseded_ids", ()))
+    filtered_symbols = staged_data["filtered_symbols"]
+    existing_symbols = staged_data["existing_symbols"]
+    changed_set = staged_data["changed_set"]
 
     if force:
         repository.graph.delete_edges(filepaths=changed_files, exclude_relations=["Injects", "FFI_Binds"])
@@ -247,26 +217,17 @@ def _cleanup_superseded_records(
         repository.graph.delete_edges(filepaths=changed_files, exclude_relations=["Injects", "FFI_Binds"])
         repository.graph.delete_occurrences(changed_files)
         repository.quality.delete_diagnostics(changed_files)
-        upgraded_clean = {
-            (v["filepath"], demangle_scip_symbol(k))
-            for k, v in filtered_symbols.items()
-            if v.get("filepath")
-        }
-        removed_symbols = list(
-            superseded_ids
-            | {
-                sym_id
-                for sym_id, sym in existing_symbols.items()
-                if sym.get("filepath") in changed_set
-                and sym_id not in filtered_symbols
-                and (sym.get("filepath"), sym.get("clean_symbol") or sym_id) not in upgraded_clean
-            }
-        )
+        removed_symbols = [
+            sym_id
+            for sym_id, sym in existing_symbols.items()
+            if sym.get("filepath") in changed_set and sym_id not in filtered_symbols
+        ]
         if removed_symbols:
             repository.graph.delete_symbols(symbols=removed_symbols)
+
     t_clean = time.perf_counter() - t0
     if t_clean > 0.05:
-        print(f"[SCIP Ingest] Cleanup completed in {t_clean:.3f}s")
+        logger.info("[SCIP Ingest] Cleanup completed in %.3fs", t_clean)
 
 
 def _write_index_batches(
@@ -278,45 +239,35 @@ def _write_index_batches(
 ):
     """Performs transactional cleanup and bulk writes for symbols, occurrences, diagnostics, and edges."""
     symbols_to_ingest = staged_data["symbols_to_ingest"]
-    print(f"[SCIP Ingest] Writing {len(symbols_to_ingest)} symbols to database...")
     chunk_size = 10_000
 
     with repository.transaction():
-        _cleanup_superseded_records(repository, changed_files, force, staged_data)
+        _cleanup_stale_records(repository, changed_files, force, staged_data)
 
         for i in range(0, len(symbols_to_ingest), chunk_size):
             repository.graph.upsert_semantic_symbols(symbols_to_ingest[i:i + chunk_size])
-            print_progress(min(i + chunk_size, len(symbols_to_ingest)), len(symbols_to_ingest), prefix="[SCIP Ingest] Symbols DB")
 
         filtered_occurrences = staged_data["occurrences_to_ingest"]
-        total_occ = len(filtered_occurrences)
-        print(f"[SCIP Ingest] Ingesting {total_occ} occurrences...")
-        for i in range(0, total_occ, chunk_size):
+        for i in range(0, len(filtered_occurrences), chunk_size):
             repository.graph.upsert_occurrences(filtered_occurrences[i:i + chunk_size])
-            print_progress(min(i + chunk_size, total_occ), total_occ, prefix="[SCIP Ingest] Occurrences")
 
         filtered_diagnostics = staged_data["diagnostics_to_ingest"]
         if filtered_diagnostics:
-            print(f"[SCIP Ingest] Ingesting {len(filtered_diagnostics)} diagnostics...")
             repository.quality.upsert_diagnostics(filtered_diagnostics)
 
         edges_to_ingest = staged_data["edges_to_ingest"]
-        total_edges = len(edges_to_ingest)
-        print(f"[SCIP Ingest] Ingesting {total_edges} edges from changed files...")
-        for i in range(0, total_edges, chunk_size):
+        for i in range(0, len(edges_to_ingest), chunk_size):
             repository.graph.upsert_edges(edges_to_ingest[i:i + chunk_size])
-            print_progress(min(i + chunk_size, total_edges), total_edges, prefix="[SCIP Ingest] Edges")
-
-        reconciled_id_map = staged_data.get("reconciled_id_map", {})
-        if reconciled_id_map:
-            repository.graph.remap_edge_symbols(reconciled_id_map)
 
         if force and had_existing_files:
             orphaned_edges, orphaned_occurrences = repository.graph.delete_orphaned_records()
             if orphaned_edges or orphaned_occurrences:
-                print(f"[SCIP Ingest] Cleaned up {orphaned_edges} orphaned edges, {orphaned_occurrences} orphaned occurrences")
+                logger.info(
+                    "[SCIP Ingest] Cleaned up %d orphaned edges, %d orphaned occurrences",
+                    orphaned_edges,
+                    orphaned_occurrences,
+                )
 
-        print("[SCIP Ingest] Recalculating symbol connection weights...")
         repository.graph.recalculate_connection_weights()
 
 
@@ -326,17 +277,16 @@ def ingest_index(
     project_root: Optional[Path] = None,
     force: bool = False,
 ):
-    """Incrementally ingests parsed SCIP symbols, reference occurrences, diagnostics, and edges."""
+    """Incrementally ingests parsed canonical SCIP symbols, occurrences, diagnostics, and edges."""
     file_list, changed_files, _, deleted_files, had_existing_files = _resolve_changed_and_deleted(
         repository, parsed_data, project_root, force
     )
     _ingest_files_table(repository, file_list, deleted_files, project_root)
 
     if not changed_files and not deleted_files:
-        print("[SCIP Ingest] No files changed. Skipping symbol/occurrence/edge ingestion.")
+        logger.info("[SCIP Ingest] No files changed. Skipping symbol/occurrence/edge ingestion.")
         return
 
-    staged_data = _reconcile_and_stage_symbols(repository, parsed_data, changed_files)
+    staged_data = _stage_index_data(repository, parsed_data, changed_files)
     _write_index_batches(repository, staged_data, changed_files, force, had_existing_files=had_existing_files)
-    print("[SCIP Ingest] Ingestion complete.")
-
+    logger.info("[SCIP Ingest] Ingestion complete.")

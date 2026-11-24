@@ -1,7 +1,5 @@
 """Shared handler for composable on-the-fly Git evolution and risk intelligence."""
-import contextlib
 from pathlib import Path
-import sys
 from typing import Any, Dict, List, Optional, Union
 
 from engines.git_analyzer import run_history_analysis
@@ -168,26 +166,22 @@ def handle_history(
     commits: int = 100,
     limit: int = 10,
 ) -> str:
-    """
-    Runs composable on-the-fly Git evolution analysis across requested sections
-    ('hotspots', 'thrash', 'coupling', 'archaeology', 'growth', 'test_gap').
-    """
+    """Runs composable on-the-fly Git evolution analysis across requested sections."""
     ok, parsed = validate_sections(sections, has_target=bool(target))
     if not ok:
         return f"Error: {parsed}"
     section_list: List[str] = parsed  # type: ignore[assignment]
 
     root = Path(project_root).resolve()
-    with contextlib.redirect_stdout(sys.stderr):
-        res = run_history_analysis(
-            repository=repository,
-            project_root=root,
-            sections=section_list,
-            target=target,
-            scope=scope,
-            commits=max(1, int(commits)),
-            limit=max(1, int(limit)),
-        )
+    res = run_history_analysis(
+        repository=repository,
+        project_root=root,
+        sections=section_list,
+        target=target,
+        scope=scope,
+        commits=max(1, int(commits)),
+        limit=max(1, int(limit)),
+    )
 
     if not res.get("is_git_repo"):
         return f"## Git History Analysis\n\n*No Git repository detected at `{root}`.*"

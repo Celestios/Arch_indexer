@@ -1,7 +1,8 @@
 from pathlib import Path
 from typing import Any, Dict, List
+
 from auditor.analyzer import Auditor
-from utils.helpers import demangle_scip_symbol
+from utils.symbol_id import canonical_display_name
 
 _SEVERITY_ORDER = ("Critical", "Error", "Warning", "Info", "Manual")
 
@@ -75,9 +76,7 @@ def handle_audit(repository, project_root, summary_only: bool = False) -> str:
         if header_lines:
             md.extend(header_lines)
             md.append("")
-        pending_msg = (
-            f"\n\n*{pend_f} file(s) pending deep audit.*" if pend_f > 0 else ""
-        )
+        pending_msg = f"\n\n*{pend_f} file(s) pending deep audit.*" if pend_f > 0 else ""
         md.append(f"**No boundary rule violations found** project-wide.{pending_msg}")
         return "\n".join(md)
 
@@ -97,9 +96,8 @@ def handle_audit(repository, project_root, summary_only: bool = False) -> str:
         fp = v.get("filepath", "")
         line = v.get("line", 1)
         rule = v.get("rule_id", "rule")
-        sym = demangle_scip_symbol(v["symbol"]) if v.get("symbol") else None
+        sym = canonical_display_name(v["symbol"]) if v.get("symbol") else None
         msg = _clean_message(v)
-
         sym_str = f" (`{sym}`)" if sym else ""
         return f"- `{fp}:L{line}` **[{rule}]**{sym_str}: {msg}"
 

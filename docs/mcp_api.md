@@ -113,6 +113,22 @@ The CLI tool `arch` provides commands for workspace setup, indexing, auditing bo
     *   `--max-depth` (optional, default: `3`): Maximum depth of call chain traversal.
     *   `project_root` (optional, default: `.`): Path to the target project directory.
 
+#### `arch clusters`
+*   **Purpose**: Runs parameter-free hierarchical graph clustering, containment scoring, macro subsystems overview, and architectural drift diagnostics.
+*   **Syntax**:
+    ```bash
+    arch clusters [--cluster <id>] [--depth <depth>] [--unit symbol|file] [--view both|summary|tree|mermaid] [--scope <prefixes>] [--include-tests] [--no-drift] [project_root]
+    ```
+*   **Arguments**:
+    *   `project_root` (optional, default: `.`): Path to the target project directory.
+    *   `--cluster` (optional): Focus cluster ID (e.g. `c1`, `c2.1`), target symbol/filepath, `residuals`, or `unreferenced`.
+    *   `--depth` (optional, default: `2`): Hierarchy expansion depth below focal cluster.
+    *   `--unit` (optional, default: `symbol`): Unit of analysis (`symbol` or `file`).
+    *   `--view` (optional, default: `both`): Output format (`both`, `summary`, `tree`, or `mermaid`).
+    *   `--scope` (optional): Comma-separated directory prefixes to filter clustering scope.
+    *   `--include-tests` (optional): Include test files and symbols in the cluster analysis.
+    *   `--no-drift` (optional): Suppress drift diagnostics (split-brain files/classes, misplaced symbols).
+
 #### `arch mcp`
 *   **Purpose**: Starts and manages the FastMCP server with lifecycle management and single-instance locking.
 *   **Syntax**:
@@ -258,6 +274,19 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
     - `src/commands/` ──[8 calls]──> `src/db/`
     - `src/auditor/` ──[6 calls]──> `src/db/`
     ```
+
+### `clusters`
+*   **Purpose**: Performs parameter-free hierarchical graph clustering, containment scoring, and architectural drift diagnostics. Use this tool to discover emergent macro subsystems, evaluate containment purity, isolate shared hubs and low-connectivity residuals, or diagnose split-brain files/classes.
+*   **Parameters**:
+    *   `project_root` (string, required): Root workspace path of the project containing `.arch/arch.db`.
+    *   `cluster` (string, optional, default: None): Focal cluster ID (e.g. `c1`, `c2.1`), target symbol/filepath, `residuals`, or `unreferenced`. Omit for root overview.
+    *   `depth` (integer, optional, default: 2): Hierarchy expansion depth below the focal cluster.
+    *   `unit` (string, optional, default: `"symbol"`): Unit of analysis (`"symbol"` or `"file"`).
+    *   `view` (string, optional, default: `"both"`): View format (`"summary"`, `"tree"`, `"mermaid"`, or `"both"`).
+    *   `scope` (Union[list[str], str], optional, default: None): Directory prefix(es) to filter clustering scope.
+    *   `language` (string, optional, default: None): Language filter (e.g. `"dart"`, `"rust"`, `"python"`).
+    *   `include_tests` (boolean, optional, default: False): Whether to include test files and symbols.
+    *   `include_drift` (boolean, optional, default: True): Whether to compute and append architectural drift diagnostics.
 
 ### `update`
 *   **Purpose**: Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges. Note that the MCP watcher module already auto-updates the database in the background (tree-sitter updates are quick, while SCIP-gathered info might lag). Use this tool only for manual updates when forced synchronization or explicit re-indexing is required.

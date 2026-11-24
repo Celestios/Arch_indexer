@@ -1,31 +1,32 @@
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from utils.helpers import demangle_scip_symbol, resolve_symbol_in_repo, is_test_caller, detect_entry_point
+
+from utils.helpers import detect_entry_point, is_test_caller
+from utils.symbol_id import canonical_display_name, parse_canonical_id
+
+_CONTAINER_KINDS = ("Class", "Struct", "Interface", "Trait", "Enum", "Extension", "Mixin")
 
 
 def is_noisy_symbol(sym: str) -> bool:
-    """Filter out local variables, standard library primitives, typing symbols, and parameter definitions."""
+    """Filter out local variables and standard library primitives/typing symbols."""
     s = str(sym)
     if s.startswith("local "):
         return True
-    if "python-stdlib" in s:
-        return True
-    if "builtins/" in s or "builtins." in s:
-        return True
-    if "typing/" in s or "typing." in s:
-        return True
-    if s.endswith(")") and ".(" in s:
-        return True
+    if s.startswith("ext::"):
+        pkg_prefix, scope_parts, _ = parse_canonical_id(s)
+        pkg_lower = (pkg_prefix or "").lower()
+        if "python-stdlib" in pkg_lower or "/builtins" in pkg_lower or "/typing" in pkg_lower:
+            return True
+        if scope_parts and scope_parts[0] in ("builtins", "typing"):
+            return True
     return False
 
 
 def is_class_symbol(repository, db_symbol: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
-    """Check if the given symbol represents a Class/Struct/Interface/Trait in the repository."""
+    """Check if the given symbol represents a container type in the repository."""
     sym_record = repository.graph.get_symbol(db_symbol)
-    if sym_record and sym_record.get("kind") in ("Class", "Struct", "Interface", "Trait"):
-        return True, sym_record
-    if db_symbol.endswith("#"):
+    if sym_record and sym_record.get("kind") in _CONTAINER_KINDS:
         return True, sym_record
     if repository.graph.get_member_symbols(db_symbol):
         return True, sym_record
@@ -41,15 +42,13 @@ def handle_impact(
     project_root: Optional[Union[str, Path]] = None,
 ) -> str:
     """
-    Blast radius analysis for a symbol or class.
-    For methods/functions: compact indented call tree for the requested direction ('upstream', 'downstream', or 'both').
-    For classes: direct usages & interface callers (upstream) and per-method dependencies (downstream).
+    Blast radius analysis for a canonical symbol or container type.
     Enriches focal file with live Git hotspot risk and Lift-ranked temporal co-change coupling.
     """
     dir_norm = (direction or "upstream").lower()
-    resolved = resolve_symbol_in_repo(repository, symbol)
+    resolved = repository.graph.resolve_symbol(symbol)
     db_symbol = resolved["symbol"] if resolved else symbol
-    clean_focal = demangle_scip_symbol(db_symbol)
+    clean_focal = canonical_display_name(db_symbol, resolved.get("name") if resolved else None)
 
     is_cls, sym_record = is_class_symbol(repository, db_symbol)
     if is_cls:
@@ -115,7 +114,7 @@ def _render_call_tree(
         children_map[parent].append(item)
 
     for parent in children_map:
-        children_map[parent].sort(key=lambda x: demangle_scip_symbol(x["symbol"]))
+        children_map[parent].sort(key=lambda x: canonical_display_name(x["symbol"]))
 
     lines: List[str] = []
     emitted = 0
@@ -128,7 +127,7 @@ def _render_call_tree(
                 return
             emitted += 1
             sym = item["symbol"]
-            clean_sym = demangle_scip_symbol(sym)
+            clean_sym = canonical_display_name(sym)
             rel = item.get("relation")
             rel_tag = f" [{rel}]" if rel and rel != "Calls" else ""
             root_tag = f" [Root: {entry_tags[sym]}]" if sym in entry_tags else ""
@@ -148,13 +147,25 @@ def _handle_class_impact(
     clean_focal: str,
     direction: str = "upstream",
 ) -> str:
-    prefix = db_symbol if db_symbol.endswith("#") else db_symbol + "#"
+    prefix = db_symbol + "::"
     method_rows = repository.graph.get_member_symbols(db_symbol)
     methods_list = [r["symbol"] for r in method_rows if r.get("symbol")]
+    method_leaf_map = {
+        r["symbol"]: (r.get("name") or parse_canonical_id(r["symbol"])[2])
+        for r in method_rows
+        if r.get("symbol")
+    }
+    member_set = set(methods_list) | {db_symbol}
+    constructor_syms = {
+        r["symbol"]
+        for r in method_rows
+        if r.get("symbol")
+        and (r.get("kind") == "Constructor" or method_leaf_map[r["symbol"]] in ("__init__", "new"))
+    }
     public_methods = [
-        demangle_scip_symbol(m).split(".")[-1]
+        method_leaf_map[m]
         for m in methods_list
-        if not demangle_scip_symbol(m).split(".")[-1].startswith("_")
+        if not method_leaf_map[m].startswith("_")
     ]
 
     md = [f"## Blast Radius for Class: `{clean_focal}` (direction: `{direction}`)\n"]
@@ -165,24 +176,24 @@ def _handle_class_impact(
         md.append(f"*No member methods registered for class `{clean_focal}`.*\n")
 
     if direction in ("upstream", "both"):
-        constructor_sym = f"{prefix}__init__()."
-        direct_edges = repository.graph.get_edges(targets=[db_symbol, constructor_sym])
+        direct_targets = [db_symbol] + sorted(constructor_syms)
+        direct_edges = repository.graph.get_edges(targets=direct_targets)
         direct_usages = []
         seen_sources = set()
         for edge in direct_edges:
             src, tgt, rel = edge["source"], edge["target"], edge.get("relation")
-            if is_noisy_symbol(src) or src.startswith(prefix) or src in seen_sources:
+            if is_noisy_symbol(src) or src in member_set or src.startswith(prefix) or src in seen_sources:
                 continue
             seen_sources.add(src)
-            if tgt == constructor_sym:
+            if tgt in constructor_syms:
                 role_tag = "Instantiation"
             elif rel in ("Inherits", "Extends"):
                 role_tag = "Inheritance"
-            elif src.endswith("."):
-                role_tag = "Type Annotation"
+            elif rel == "TypeDefinition":
+                role_tag = "Type Reference"
             else:
                 role_tag = "Reference"
-            direct_usages.append((demangle_scip_symbol(src), role_tag))
+            direct_usages.append((canonical_display_name(src), role_tag))
 
         md.append("### Direct Usages")
         if not direct_usages:
@@ -193,20 +204,18 @@ def _handle_class_impact(
         md.append("")
 
         md.append("### Interface Surface (Exposed Callers)")
-        method_caller_map: Dict[str, List[str]] = {}
+        method_caller_map: Dict[str, List[str]] = defaultdict(list)
         all_caller_syms = set(seen_sources)
-        for m_sym in methods_list:
-            short_m = demangle_scip_symbol(m_sym).split(".")[-1]
-            ext_callers = []
-            for edge in repository.graph.get_edges(target=m_sym):
-                src = edge["source"]
-                if not is_noisy_symbol(src) and not src.startswith(prefix):
-                    all_caller_syms.add(src)
-                    clean_caller = demangle_scip_symbol(src)
-                    if clean_caller not in ext_callers:
-                        ext_callers.append(clean_caller)
-            if ext_callers:
-                method_caller_map[short_m] = ext_callers
+        if methods_list:
+            for edge in repository.graph.get_edges(targets=methods_list):
+                src, tgt = edge["source"], edge["target"]
+                if is_noisy_symbol(src) or src in member_set or src.startswith(prefix):
+                    continue
+                all_caller_syms.add(src)
+                short_m = method_leaf_map.get(tgt, parse_canonical_id(tgt)[2])
+                clean_caller = canonical_display_name(src)
+                if clean_caller not in method_caller_map[short_m]:
+                    method_caller_map[short_m].append(clean_caller)
 
         if not method_caller_map:
             md.append("*No external callers recorded for member methods.*")
@@ -221,7 +230,7 @@ def _handle_class_impact(
             for c_sym in all_caller_syms:
                 fp = meta_callers.get(c_sym, {}).get("filepath")
                 if is_test_caller(c_sym, fp):
-                    class_tests.append((demangle_scip_symbol(c_sym), fp))
+                    class_tests.append((canonical_display_name(c_sym), fp))
             if class_tests:
                 md.append("### Covered By Tests")
                 for ts, tfp in sorted(class_tests):
@@ -231,22 +240,29 @@ def _handle_class_impact(
 
     if direction in ("downstream", "both"):
         md.append("### Downstream Dependencies (Per Method)")
-        deps_found = False
-        for m_sym in methods_list:
-            short_m = demangle_scip_symbol(m_sym).split(".")[-1]
-            internal_calls = []
-            external_calls = []
-            for edge in repository.graph.get_edges(source=m_sym):
-                tgt = edge["target"]
+        internal_by_method: Dict[str, List[str]] = defaultdict(list)
+        external_by_method: Dict[str, List[str]] = defaultdict(list)
+
+        if methods_list:
+            for edge in repository.graph.get_edges(sources=methods_list):
+                src, tgt = edge["source"], edge["target"]
                 if is_noisy_symbol(tgt):
                     continue
-                clean_tgt = demangle_scip_symbol(tgt)
-                if tgt.startswith(prefix):
-                    tgt_short = clean_tgt.split(".")[-1]
-                    if tgt_short not in internal_calls:
-                        internal_calls.append(tgt_short)
-                elif clean_tgt not in external_calls:
-                    external_calls.append(clean_tgt)
+                short_m = method_leaf_map.get(src, parse_canonical_id(src)[2])
+                if tgt in member_set or tgt.startswith(prefix):
+                    tgt_short = method_leaf_map.get(tgt, parse_canonical_id(tgt)[2])
+                    if tgt_short not in internal_by_method[short_m]:
+                        internal_by_method[short_m].append(tgt_short)
+                else:
+                    clean_tgt = canonical_display_name(tgt)
+                    if clean_tgt not in external_by_method[short_m]:
+                        external_by_method[short_m].append(clean_tgt)
+
+        deps_found = False
+        for m_sym in methods_list:
+            short_m = method_leaf_map[m_sym]
+            internal_calls = internal_by_method.get(short_m, [])
+            external_calls = external_by_method.get(short_m, [])
             if internal_calls or external_calls:
                 deps_found = True
                 parts = []
@@ -291,8 +307,6 @@ def _handle_symbol_impact(
 
         prod_upstream = []
         test_callers = []
-        entry_tags: Dict[str, str] = {}
-
         for item in raw_upstream:
             sym = item["symbol"]
             fp = meta_batch.get(sym, {}).get("filepath")
@@ -300,10 +314,20 @@ def _handle_symbol_impact(
                 test_callers.append((item, fp))
             else:
                 prod_upstream.append(item)
-                inc_count = len(repository.graph.get_edges(target=sym))
-                ep = detect_entry_point(sym, fp, inc_count)
-                if ep:
-                    entry_tags[sym] = ep
+
+        prod_syms = [item["symbol"] for item in prod_upstream]
+        inc_counts: Counter = Counter()
+        if prod_syms:
+            for e in repository.graph.get_edges(targets=prod_syms):
+                inc_counts[e["target"]] += 1
+
+        entry_tags: Dict[str, str] = {}
+        for item in prod_upstream:
+            sym = item["symbol"]
+            fp = meta_batch.get(sym, {}).get("filepath")
+            ep = detect_entry_point(sym, fp, inc_counts.get(sym, 0))
+            if ep:
+                entry_tags[sym] = ep
 
         md.append("### Upstream Callers")
         if not prod_upstream:
@@ -315,8 +339,8 @@ def _handle_symbol_impact(
         if test_callers:
             md.append("### Covered By Tests")
             seen_tests = set()
-            for item, fp in sorted(test_callers, key=lambda x: (x[0]["depth"], demangle_scip_symbol(x[0]["symbol"]))):
-                clean_test = demangle_scip_symbol(item["symbol"])
+            for item, fp in sorted(test_callers, key=lambda x: (x[0]["depth"], canonical_display_name(x[0]["symbol"]))):
+                clean_test = canonical_display_name(item["symbol"])
                 if clean_test in seen_tests:
                     continue
                 seen_tests.add(clean_test)

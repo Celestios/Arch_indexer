@@ -1,7 +1,8 @@
 import os
+
 from interface.formatters import format_context_results
 from interface.validators import validate_filepaths
-from utils.helpers import demangle_scip_symbol
+from utils.symbol_id import canonical_display_name
 
 
 def handle_context(filepaths, repository, project_root=None) -> str:
@@ -48,7 +49,6 @@ def handle_context(filepaths, repository, project_root=None) -> str:
                 e_line = sym.get("end_line") or s_line
                 effective_end = e_line if e_line > s_line else s_line
                 symbol_to_lines[sym["symbol"]] = (s_line, effective_end)
-                symbol_to_lines[demangle_scip_symbol(sym["symbol"])] = (s_line, effective_end)
 
         res_md = format_context_results(fp, symbols, symbol_to_lines)
         file_diags = repository.quality.get_diagnostics(filepath=fp)
@@ -59,7 +59,7 @@ def handle_context(filepaths, repository, project_root=None) -> str:
                 "| :--- | :--- | :--- | :--- | :--- |",
             ]
             for d in file_diags:
-                s_name = demangle_scip_symbol(d["symbol"]) if d.get("symbol") else "-"
+                s_name = canonical_display_name(d["symbol"]) if d.get("symbol") else "-"
                 code_str = f"`{d['code']}`" if d.get("code") else ""
                 diag_lines.append(f"| `{s_name}` | L{d['line']}:{d['col']} | `{d['severity']}` | {code_str} | {d['message']} |")
             res_md += "\n" + "\n".join(diag_lines) + "\n"

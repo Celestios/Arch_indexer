@@ -1,58 +1,41 @@
-"""Direct cross-language interface-to-interface FFI bridge linker."""
-import re
+"""Direct cross-language interface-to-interface FFI bridge linker using canonical symbol IDs."""
+import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 from engines.registry import LanguageRegistry
+from utils.arch_config import ArchConfig
 from utils.exclusions import is_boilerplate
+from utils.symbol_id import canonical_display_name, parse_canonical_id, strip_rust_generics
+
+logger = logging.getLogger(__name__)
 
 
-def parse_callable_parts(clean: str, raw_sym: str = "") -> Tuple[str, str]:
+def parse_callable_parts(symbol_id: str, parent_symbol: Optional[str] = None) -> Tuple[str, str]:
     """
-    Extracts (normalized_class_name, normalized_fn_name) from symbol or clean_symbol.
-    Normalizes camelCase <-> snake_case and constructors (newInstance <-> new).
+    Extracts (normalized_class_name, normalized_fn_name) from a canonical symbol ID.
+    Normalizes camelCase <-> snake_case, strips Rust trait-impl qualifiers, ignores inline
+    lowercase Rust mod scopes, and normalizes constructors (newInstance <-> new).
     """
-    text = clean or raw_sym
-    base = re.sub(r"\(.*?\)", "", text).strip()
+    _, scope_parts, leaf = parse_canonical_id(symbol_id)
+    if not leaf:
+        return "", ""
 
-    # Rust impl: e.g. "bridge.api.impl.[AppHandle]add_anchor_spring" or "[AppHandle]::add_anchor_spring"
-    rust_impl = re.search(r"\[(\w+)\](?:::)?(\w+)", base)
-    if rust_impl:
-        cls_name = rust_impl.group(1).lower().replace("_", "")
-        fn_name = rust_impl.group(2).lower().replace("_", "")
-        if fn_name in ("new", "newinstance", "create", "default"):
-            fn_name = "new"
-        return cls_name, fn_name
-
-    # SCIP descriptor with hash/slash: e.g. "crate::Class#method"
-    if "#" in base:
-        parts = base.split("#")
-        cls_part = re.split(r"[/:\\]", parts[0])[-1]
-        fn_name = parts[-1].lower().replace("_", "")
-        if fn_name in ("new", "newinstance", "create", "default"):
-            fn_name = "new"
-        return cls_part.lower().replace("_", ""), fn_name
-
-    # Dotted identifier: e.g. "path.to.module.ClassName.methodName"
-    parts = base.split(".")
-    if len(parts) >= 2:
-        penultimate = parts[-2]
-        ultimate = parts[-1]
-        if penultimate and (penultimate[0].isupper() or "_" in penultimate):
-            cls_name = penultimate.lower().replace("_", "")
-            fn_name = ultimate.lower().replace("_", "")
-            if fn_name in ("new", "newinstance", "create", "default"):
-                fn_name = "new"
-            return cls_name, fn_name
-
-    leaf = re.split(r"[/:\\]", parts[-1])[-1]
     fn_name = leaf.lower().replace("_", "")
     if fn_name in ("new", "newinstance", "create", "default"):
         fn_name = "new"
-    return "", fn_name
+
+    cls_name = ""
+    if scope_parts:
+        raw_scope = strip_rust_generics(scope_parts[-1])
+        # Only treat scope segment as a class/type if backed by parent_symbol or PascalCase (excludes Rust inline `mod`)
+        if raw_scope and (parent_symbol or raw_scope[0].isupper()):
+            cls_name = raw_scope.lower().replace("_", "")
+
+    return cls_name, fn_name
 
 
-def link_ffi_bridges(repository, config: Optional[Any] = None) -> int:
+def link_ffi_bridges(repository, config: Optional[ArchConfig] = None) -> int:
     """
     Directly links client-tier API callables (e.g., Dart/TS/Python) to native-tier API
     callables (e.g., Rust/C/C++) with FFI_Binds edges, excluding generated glue code.
@@ -68,50 +51,43 @@ def link_ffi_bridges(repository, config: Optional[Any] = None) -> int:
     native_exts = LanguageRegistry.get_native_extensions()
 
     by_id: Dict[str, str] = {}
-    by_clean: Dict[str, str] = {}
-    client_symbols: List[Tuple[str, str]] = []
-    native_symbols: List[Tuple[str, str]] = []
+    by_display: Dict[str, str] = {}
+    client_symbols: List[Tuple[str, Optional[str]]] = []
+    native_symbols: List[Tuple[str, Optional[str]]] = []
 
     for r in rows:
         sym = r["symbol"]
         fp = r.get("filepath") or ""
         kind = r.get("kind") or ""
-        clean = r.get("clean_symbol") or sym
+        name = r.get("name") or ""
+        parent = r.get("parent_symbol")
 
         if is_boilerplate(fp):
             continue
 
         by_id[sym] = sym
-        by_clean.setdefault(clean, sym)
+        disp = canonical_display_name(sym, name)
+        by_display.setdefault(disp, sym)
+        if name:
+            by_display.setdefault(name, sym)
 
-        is_callable = (
-            kind in ("Method", "Function", "Constructor", "StaticMethod")
-            or sym.endswith("()")
-            or sym.endswith("().")
-        )
-        if not is_callable:
+        if kind not in ("Method", "Function", "Constructor", "StaticMethod"):
             continue
 
         ext = Path(fp.lower().replace("\\", "/")).suffix
         if ext in client_exts:
-            client_symbols.append((sym, clean))
+            client_symbols.append((sym, parent))
         elif ext in native_exts:
-            native_symbols.append((sym, clean))
+            native_symbols.append((sym, parent))
 
     edges_to_insert: List[Dict[str, Any]] = []
     seen_edges = set()
 
     # 1. Explicit config overrides (ArchConfig.ffi_bindings: client_sym -> native_sym)
-    explicit_bindings: Dict[str, str] = {}
-    if config is not None:
-        if hasattr(config, "ffi_bindings") and isinstance(config.ffi_bindings, dict):
-            explicit_bindings = config.ffi_bindings
-        elif isinstance(config, dict) and isinstance(config.get("ffi_bindings"), dict):
-            explicit_bindings = config["ffi_bindings"]
-
+    explicit_bindings: Dict[str, str] = config.ffi_bindings if config is not None else {}
     for client_key, native_key in explicit_bindings.items():
-        c_sym = by_id.get(client_key) or by_clean.get(client_key)
-        n_sym = by_id.get(native_key) or by_clean.get(native_key)
+        c_sym = by_id.get(client_key) or by_display.get(client_key)
+        n_sym = by_id.get(native_key) or by_display.get(native_key)
         if c_sym and n_sym and (c_sym, n_sym) not in seen_edges:
             seen_edges.add((c_sym, n_sym))
             edges_to_insert.append({
@@ -123,11 +99,11 @@ def link_ffi_bridges(repository, config: Optional[Any] = None) -> int:
 
     # 2. Direct interface-to-interface matching by normalized class/callable names
     native_map: Dict[Tuple[str, str], List[str]] = {}
-    for n_sym, n_clean in native_symbols:
-        native_map.setdefault(parse_callable_parts(n_clean, n_sym), []).append(n_sym)
+    for n_sym, n_parent in native_symbols:
+        native_map.setdefault(parse_callable_parts(n_sym, n_parent), []).append(n_sym)
 
-    for c_sym, c_clean in client_symbols:
-        key = parse_callable_parts(c_clean, c_sym)
+    for c_sym, c_parent in client_symbols:
+        key = parse_callable_parts(c_sym, c_parent)
         cls_name, fn_name = key
         if not fn_name:
             continue
@@ -149,7 +125,7 @@ def link_ffi_bridges(repository, config: Optional[Any] = None) -> int:
 
     if edges_to_insert:
         repository.graph.upsert_edges(edges_to_insert)
-        print(f"[Bridge Link] Created {len(edges_to_insert)} cross-language interface FFI edges.")
+        logger.info("[Bridge Link] Created %d cross-language interface FFI edges.", len(edges_to_insert))
         return len(edges_to_insert)
 
     return 0

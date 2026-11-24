@@ -54,3 +54,38 @@ Two critical fixes were applied to graph construction, Tarjan cycle detection, a
 3. **Ingress Peer Endpoint Sanitization**:
    - Boundary targets and callers are filtered against boilerplate, excluded paths, and test files (`is_auxiliary_path`, `is_test_caller`) when `include_tests=False`.
    - *Reason*: Unfiltered external peer edges previously inflated incident degree counts, causing dead production symbols called only by test suites to falsely exit `unreferenced_symbols`.
+
+---
+
+## Direction-aware Louvain aggregation with dampened coupling scale and zero-edge container promotion
+
+**Id:** 91f4b80b-dfb3-463d-88b9-87a3e742c382
+**Type:** decision
+**Status:** active
+**Evidence:** confirmed
+**Source:** maintainer architecture decision and audit review, 2026-11-24
+**Revisit when:** community detection graph algorithms natively support multi-layer directed multiplex networks without loss of modularity scale
+
+Clustering aggregation was refactored to eliminate artificial numeric connectivity cutoffs (`w_total >= 3.0`, `deg >= 3`, `ext >= 3`) and resolve mathematical scale mismatches:
+
+1. **Unified Dampened Affinity Scale Across All Phases**:
+   - Louvain (Phase A), Dominance Gate (Phase B), and Private Dependency Absorption (Phase C) all evaluate the exact same dampened directed and undirected weights ($w / \sqrt{\deg_{\text{in}}}$).
+   - Removed un-dampened raw coupling checks (`raw_dep_weight`), which previously caused normal classes calling high-degree utilities (e.g. `Logger`, `GraphNode`) to miscalculate external coupling and prematurely eject methods to root.
+2. **Direction-Aware Hub and Orchestrator Ejection (Phase B)**:
+   - Fixed off-by-one community count check: Evaluates strictly external communities (`connected_comms - {c_u} >= 2`), preventing ordinary 1-to-1 boundary methods from being misclassified as cross-cutting hubs.
+   - Symmetrically classifies two valid topological hub types:
+     * *Inbound Shared Hub*: Inbound callers span $\ge 2$ external communities with internal dampened share $\le 50\%$.
+     * *Callerless Orchestrator*: Zero inbound callers (`in_deg == 0`), outbound dependencies span $\ge 2$ external communities, with internal dampened share $\le 50\%$.
+   - Outbound consumers (commands, controllers) that call downstream services are no longer conflated with shared hubs.
+3. **Zero-Edge Container Promotion & Vertical Class-Method Cohesion (`affinity.py`)**:
+   - `parent_symbol` affinity weight was increased to 2.0 (strictly undirected in `undirected_aff`, omitted from `dir_out_edges` so Tarjan SCC cannot synthesize artificial cycles).
+   - Containers (classes, structs) with zero direct incident edges whose member methods have dependencies are promoted into `clustered_symbols` before unreferenced partitioning. This prevents container types from being exiled to unreferenced while their methods cluster in isolation.
+4. **Topological LCA Singleton Partitioning**:
+   - Root singletons are partitioned without numeric thresholds:
+     * *Shared Hub*: Couples to $\ge 2$ distinct sibling root clusters.
+     * *Residual*: Couples to $\le 1$ sibling root cluster.
+   - Sorts hubs by coupled sibling count and incident degree.
+
+**Reason:** Replacing arbitrary numeric thresholds with topological invariants produces stable, scale-free emergent clusters across small and large codebases (tested up to 20,000+ symbols in Centrode). Methods remain naturally bonded to their classes without hard-locking God Classes, and singleton spam is eliminated.
+
+**Rejected alternative (Arbitrary connectivity floors like `deg >= 3` or `w_total >= 3.0`):** Adding arbitrary degree or weight cutoffs masked structural bugs in Phase B's community counting and dampened-vs-undampened scale mismatch, but produced brittle, language-dependent clustering that failed on lightly coupled or clean modular code.

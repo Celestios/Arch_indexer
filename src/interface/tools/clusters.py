@@ -3,10 +3,10 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-from clustering.models import ClusterNode, ClusterHierarchyResult
 from clustering.analyzer import build_cluster_hierarchy
-from interface.validators import validate_cluster_view, validate_cluster_unit
-from utils.helpers import demangle_scip_symbol, resolve_symbol_in_repo
+from clustering.models import ClusterHierarchyResult, ClusterNode
+from interface.validators import validate_cluster_unit, validate_cluster_view
+from utils.symbol_id import canonical_display_name, parse_canonical_id
 
 
 def _collect_frontier(node: ClusterNode, max_depth: int, current_depth: int = 0) -> List[ClusterNode]:
@@ -36,14 +36,96 @@ def _format_node_line(node: ClusterNode, unit: str, indent: str = "") -> str:
     )
 
 
+def _partition_root_nodes(root: ClusterNode) -> Tuple[List[ClusterNode], List[ClusterNode], List[ClusterNode]]:
+    """
+    Partitions root-level children topologically (zero numeric cutoffs):
+    1. Composite clusters (multi-symbol subsystems)
+    2. Shared hubs (singletons coupling to >= 2 sibling root clusters)
+    3. Residuals (singletons coupling to <= 1 sibling root cluster)
+    """
+    composite: List[ClusterNode] = []
+    hubs: List[ClusterNode] = []
+    residuals: List[ClusterNode] = []
+
+    root_cids = {c.cluster_id for c in root.children}
+    coupled_siblings: Dict[str, Set[str]] = defaultdict(set)
+
+    for c in root.children:
+        c_id = c.cluster_id
+        for tgt_cid in c.ext_deps_by_cluster.keys():
+            if tgt_cid != "external":
+                tgt_root = tgt_cid.split(".")[0]
+                if tgt_root != c_id and tgt_root in root_cids:
+                    coupled_siblings[c_id].add(tgt_root)
+                    coupled_siblings[tgt_root].add(c_id)
+
+    for c in root.children:
+        if not c.is_singleton and len(c.symbol_ids) > 1:
+            composite.append(c)
+        else:
+            sibling_count = len(coupled_siblings.get(c.cluster_id, set()))
+            if sibling_count >= 2:
+                hubs.append(c)
+            else:
+                residuals.append(c)
+
+    hubs.sort(
+        key=lambda c: (
+            -len(coupled_siblings.get(c.cluster_id, set())),
+            -(c.ext_caller_count + c.ext_dep_count),
+            c.name,
+        )
+    )
+
+    return composite, hubs, residuals
+
+
+def _render_summary_table(
+    nodes: List[ClusterNode],
+    total_symbols: int,
+    total_files: int,
+    shared_hubs_count: int = 0,
+    residuals_count: int = 0,
+) -> List[str]:
+    lines: List[str] = [
+        "### Macro Subsystems Overview",
+        "",
+        "| Cluster | Files | Symbols | Containment | Ext Deps | Ext Callers | Dominant Path |",
+        "|:---|---:|---:|---:|---:|---:|:---|",
+    ]
+    symbols_covered = 0
+    for node in nodes:
+        f_cnt = len(node.filepaths)
+        s_cnt = len(node.symbol_ids)
+        symbols_covered += s_cnt
+        dom = node.dominant_dir or (node.filepaths[0] if node.filepaths else "-")
+        c_pct = f"{round(node.containment_pct)}%" if not node.is_singleton else "-"
+        lines.append(
+            f"| `{node.cluster_id}` {node.name} | {f_cnt:,} | {s_cnt:,} | {c_pct} | {node.ext_dep_count:,} | {node.ext_caller_count:,} | `{dom}` |"
+        )
+
+    lines.append("")
+    cov_pct = round((symbols_covered / max(1, total_symbols)) * 100.0, 1)
+    telemetry = [
+        f"**Coverage**: {len(nodes)} macro clusters covering {cov_pct}% of clustered symbols ({symbols_covered:,}/{total_symbols:,})",
+    ]
+    if shared_hubs_count > 0:
+        telemetry.append(f"{shared_hubs_count} shared hubs")
+    if residuals_count > 0:
+        telemetry.append(f"{residuals_count} collapsed residuals (pass `cluster=\"residuals\"` to inspect)")
+
+    lines.append(" * " + " | ".join(telemetry))
+    return lines
+
+
 def _render_tree(
     node: ClusterNode,
     unit: str,
     max_depth: int,
     current_depth: int = 0,
     indent: str = " ",
+    filter_residuals: bool = False,
 ) -> List[str]:
-    """Renders indented cluster tree up to max_depth."""
     lines: List[str] = []
     if current_depth > 0:
         lines.append(_format_node_line(node, unit, indent))
@@ -52,8 +134,19 @@ def _render_tree(
 
     if current_depth < max_depth and node.children:
         next_indent = indent + "    " if current_depth > 0 else " "
-        for c in node.children:
+        children_to_render = node.children
+        residual_count = 0
+        if current_depth == 0 and filter_residuals:
+            composite, hubs, residuals = _partition_root_nodes(node)
+            children_to_render = composite + hubs
+            residual_count = len(residuals)
+
+        for c in children_to_render:
             lines.extend(_render_tree(c, unit, max_depth, current_depth + 1, next_indent))
+
+        if residual_count > 0:
+            lines.append(f"{next_indent}[residuals] {residual_count} peripheral symbols (low coupling) - pass cluster=\"residuals\" to inspect")
+
     return lines
 
 
@@ -68,29 +161,31 @@ def _render_mermaid(
         lines.append("```")
         return lines
 
-    # Capped at 35 if needed
     note_line = None
     if len(frontier_nodes) > 35:
         frontier_nodes.sort(key=lambda n: n.ext_dep_count + n.ext_caller_count, reverse=True)
         frontier_nodes = frontier_nodes[:35]
         note_line = "> *Note: Frontier diagram capped to top 35 clusters by connectivity. Use `depth=1` or pass `--cluster <ID>` to zoom.*"
 
-    # Map each symbol to its owning visible frontier cluster ID
-    sym_to_frontier: Dict[str, str] = {}
+    leaf_to_frontier: Dict[str, str] = {}
     node_by_frontier_id: Dict[str, ClusterNode] = {}
+
+    def _map_descendants(node: ClusterNode, frontier_cid: str):
+        leaf_to_frontier[node.cluster_id] = frontier_cid
+        for child in node.children:
+            _map_descendants(child, frontier_cid)
+
     for fn in frontier_nodes:
         node_by_frontier_id[fn.cluster_id] = fn
-        for s in fn.symbol_ids:
-            sym_to_frontier[s] = fn.cluster_id
+        _map_descendants(fn, fn.cluster_id)
 
-    # Compute inter-frontier directed weights
     frontier_edges: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
     for fn in frontier_nodes:
         src_cid = fn.cluster_id
-        for target_list in fn.ext_deps_by_cluster.values():
-            for t in target_list:
-                tgt_frontier_cid = sym_to_frontier.get(t)
-                if tgt_frontier_cid and tgt_frontier_cid != src_cid:
+        for tgt_leaf_cid, target_list in fn.ext_deps_by_cluster.items():
+            tgt_frontier_cid = leaf_to_frontier.get(tgt_leaf_cid)
+            if tgt_frontier_cid and tgt_frontier_cid != src_cid:
+                for t in target_list:
                     frontier_edges[(src_cid, tgt_frontier_cid)].add(t)
 
     rendered_nodes: Set[str] = set()
@@ -106,23 +201,21 @@ def _render_mermaid(
         src_name = src_node.name.replace('"', "'")
         tgt_name = tgt_node.name.replace('"', "'")
 
-        src_lbl = f'{src_cid} {src_name} ({len(src_node.symbol_ids)}s)' if unit == "symbol" else f'{src_cid} {src_name} ({len(src_node.filepaths)}f)'
-        tgt_lbl = f'{tgt_cid} {tgt_name} ({len(tgt_node.symbol_ids)}s)' if unit == "symbol" else f'{tgt_cid} {tgt_name} ({len(tgt_node.filepaths)}f)'
+        src_lbl = f"{src_cid} {src_name} ({len(src_node.symbol_ids)}s)" if unit == "symbol" else f"{src_cid} {src_name} ({len(src_node.filepaths)}f)"
+        tgt_lbl = f"{tgt_cid} {tgt_name} ({len(tgt_node.symbol_ids)}s)" if unit == "symbol" else f"{tgt_cid} {tgt_name} ({len(tgt_node.filepaths)}f)"
 
         src_def = f'{src_san}["{src_lbl}"]' if src_san not in rendered_nodes else src_san
         tgt_def = f'{tgt_san}["{tgt_lbl}"]' if tgt_san not in rendered_nodes else tgt_san
         rendered_nodes.add(src_san)
         rendered_nodes.add(tgt_san)
 
-        weight = len(tgts)
-        edge_lines.append(f"  {src_def} -->|{weight}| {tgt_def}")
+        edge_lines.append(f"  {src_def} -->|{len(tgts)}| {tgt_def}")
 
-    # Include isolated frontier nodes without incident edges
     for fn in frontier_nodes:
         san = fn.cluster_id.replace(".", "_")
         if san not in rendered_nodes:
             fn_name = fn.name.replace('"', "'")
-            lbl = f'{fn.cluster_id} {fn_name} ({len(fn.symbol_ids)}s)' if unit == "symbol" else f'{fn.cluster_id} {fn_name} ({len(fn.filepaths)}f)'
+            lbl = f"{fn.cluster_id} {fn_name} ({len(fn.symbol_ids)}s)" if unit == "symbol" else f"{fn.cluster_id} {fn_name} ({len(fn.filepaths)}f)"
             edge_lines.append(f'  {san}["{lbl}"]')
 
     lines.extend(edge_lines)
@@ -133,7 +226,6 @@ def _render_mermaid(
 
 
 def _render_drift(drift: Any) -> List[str]:
-    """Renders architectural drift summary."""
     lines = ["Architectural Drift Summary"]
     has_drift = False
 
@@ -150,10 +242,10 @@ def _render_drift(drift: Any) -> List[str]:
         has_drift = True
         lines.append(f" * Split-Brain Classes ({len(drift.split_classes)}):")
         for sc in drift.split_classes[:10]:
-            clean = demangle_scip_symbol(sc['class_symbol'])
-            fp_str = f" in {sc['filepath']}" if sc.get('filepath') else ""
+            disp = canonical_display_name(sc["class_symbol"])
+            fp_str = f" in {sc['filepath']}" if sc.get("filepath") else ""
             dist_str = ", ".join(f"{cnt} in {c}" for c, cnt in sc.get("distribution", {}).items())
-            lines.append(f"   * {clean}{fp_str} (purity: {round(sc['purity_pct'])}% - {dist_str})")
+            lines.append(f"   * {disp}{fp_str} (purity: {round(sc['purity_pct'])}% - {dist_str})")
         if len(drift.split_classes) > 10:
             lines.append(f"   * ... and {len(drift.split_classes) - 10} more classes")
 
@@ -161,8 +253,8 @@ def _render_drift(drift: Any) -> List[str]:
         has_drift = True
         lines.append(f" * Misplaced Symbols ({len(drift.misplaced_symbols)}):")
         for ms in drift.misplaced_symbols[:10]:
-            clean = ms.get('clean_symbol') or demangle_scip_symbol(ms['symbol'])
-            lines.append(f"   * `{clean}` (in `{ms['filepath']}`): belongs to `{ms['assigned_cluster']}`, file is in `{ms['file_cluster']}`")
+            disp = ms.get("name") or canonical_display_name(ms["symbol"])
+            lines.append(f"   * `{disp}` (in `{ms['filepath']}`): belongs to `{ms['assigned_cluster']}`, file is in `{ms['file_cluster']}`")
         if len(drift.misplaced_symbols) > 10:
             lines.append(f"   * ... and {len(drift.misplaced_symbols) - 10} more symbols")
 
@@ -176,7 +268,6 @@ def _render_leaf_inspection(
     result: ClusterHierarchyResult,
     repository,
 ) -> List[str]:
-    """Renders Mode B: Leaf / Zoom Inspection with actionable audit targets."""
     lines: List[str] = [
         f"### Cluster Details: `[{node.cluster_id}] {node.name}`",
         f"- **Level**: {node.level} | **Cycle**: {node.is_cycle} | **Containment**: {node.containment_pct}%",
@@ -186,7 +277,6 @@ def _render_leaf_inspection(
         "#### Member Files & Symbols",
     ]
 
-    # One single batch query for all member symbols to prevent N+1 DuckDB queries
     sym_info_map = (
         repository.graph.get_symbols_by_ids(list(node.symbol_ids))
         if hasattr(repository, "graph")
@@ -197,9 +287,9 @@ def _render_leaf_inspection(
     for s in sorted(node.symbol_ids):
         sym_info = sym_info_map.get(s)
         fp = sym_info.get("filepath") if sym_info else (node.filepaths[0] if len(node.filepaths) == 1 else "unknown")
-        clean = (sym_info.get("clean_symbol") if sym_info else None) or demangle_scip_symbol(s)
+        disp = canonical_display_name(s, sym_info.get("name") if sym_info else None)
         line_info = f" (L{sym_info['start_line']})" if sym_info and sym_info.get("start_line") is not None else ""
-        symbols_by_file[fp or "unknown"].append(f"`{clean}`{line_info}")
+        symbols_by_file[fp or "unknown"].append(f"`{disp}`{line_info}")
 
     for fp, sym_list in sorted(symbols_by_file.items()):
         lines.append(f"- **`{fp}`** ({len(sym_list)} symbols):")
@@ -218,8 +308,8 @@ def _render_leaf_inspection(
             c_name = f" {c_node.name}" if c_node else ""
             lines.append(f"- **`[{c_id}]{c_name}`** ({len(targets)} targets):")
             for t in targets[:15]:
-                clean_t = demangle_scip_symbol(t)
-                lines.append(f"  -> `{clean_t}`")
+                disp_t = canonical_display_name(t) if "::" in t else t
+                lines.append(f"  -> `{disp_t}`")
             if len(targets) > 15:
                 lines.append(f"  -> ... and {len(targets) - 15} more targets")
 
@@ -262,12 +352,35 @@ def handle_clusters(
         unit=unit_mode,
     )
 
-    # Handle special unreferenced inspection
-    if cluster and cluster.strip().lower() in ("unreferenced", "unref"):
+    composite_roots, hub_roots, residual_roots = _partition_root_nodes(result.root)
+
+    if cluster and cluster.strip().lower() == "residuals":
+        lines = [
+            f"## Low-Connectivity Residuals ({len(residual_roots)} singletons)",
+            "- **Focus**: `residuals` (peripheral symbols with low external coupling)",
+            "",
+        ]
+        if not residual_roots:
+            lines.append("*No residual singletons at root.*")
+        else:
+            by_file = defaultdict(list)
+            for r in residual_roots:
+                fp = r.filepaths[0] if r.filepaths else "unknown"
+                by_file[fp].append(r)
+            for fp, items in sorted(by_file.items()):
+                lines.append(f"### `{fp}` ({len(items)} symbols)")
+                for item in items[:30]:
+                    lines.append(f"- `[{item.cluster_id}]` {item.name} [in: {item.ext_caller_count}, out: {item.ext_dep_count}]")
+                if len(items) > 30:
+                    lines.append(f"- ... and {len(items) - 30} more symbols")
+                lines.append("")
+        return "\n".join(lines).rstrip()
+
+    if cluster and cluster.strip().lower() == "unreferenced":
         unref = result.unreferenced_symbols
         lines = [
             f"## Unreferenced Symbols ({len(unref)} symbols)",
-            f"- **Focus**: `unreferenced` (isolated symbols with zero dependency edges)",
+            "- **Focus**: `unreferenced` (isolated symbols with zero dependency edges)",
             "",
         ]
         if not unref:
@@ -279,38 +392,34 @@ def handle_clusters(
             for fp, items in sorted(by_file.items()):
                 lines.append(f"### `{fp}` ({len(items)} symbols)")
                 for item in items[:30]:
-                    lines.append(f"- `{item['clean_symbol']}` ({item.get('kind', 'Symbol')})")
+                    disp = canonical_display_name(item.get("symbol", ""), item.get("name"))
+                    lines.append(f"- `{disp}` ({item.get('kind', 'Symbol')})")
                 if len(items) > 30:
                     lines.append(f"- ... and {len(items) - 30} more symbols")
                 lines.append("")
         return "\n".join(lines).rstrip()
 
-    # Resolve target cluster node
     target_node: Optional[ClusterNode] = None
     target_clean = cluster.strip() if cluster else None
 
-    if not target_clean or target_clean.lower() in ("root", "all", "."):
+    if not target_clean or target_clean.lower() == "root":
         target_node = result.root
     elif target_clean in result.index_by_id:
         target_node = result.index_by_id[target_clean]
     else:
-        # 1. Check if target is an exact symbol
         matched_cid = result.symbol_to_leaf.get(target_clean)
 
-        # 2. Check symbol in repo
         if not matched_cid and hasattr(repository, "graph"):
-            resolved_sym = resolve_symbol_in_repo(repository, target_clean)
+            resolved_sym = repository.graph.resolve_symbol(target_clean)
             if resolved_sym:
                 matched_cid = result.symbol_to_leaf.get(resolved_sym.get("symbol", ""))
 
-        # 3. Check by clean symbol suffix
         if not matched_cid:
             for s, cid in result.symbol_to_leaf.items():
-                if s == target_clean or s.endswith(f".{target_clean}") or demangle_scip_symbol(s) == target_clean:
+                if s == target_clean or canonical_display_name(s) == target_clean or parse_canonical_id(s)[2] == target_clean:
                     matched_cid = cid
                     break
 
-        # 4. Check by filepath (POSIX normalized, skipping root to jump directly to finest enclosing cluster)
         if not matched_cid:
             norm_target = target_clean.replace("\\", "/").strip("/")
             matching_nodes: List[ClusterNode] = []
@@ -324,7 +433,6 @@ def handle_clusters(
                         break
 
             if matching_nodes:
-                # Pick finest/deepest cluster (smallest total_symbols, then largest level)
                 matching_nodes.sort(key=lambda n: (len(n.symbol_ids), -n.level))
                 matched_cid = matching_nodes[0].cluster_id
 
@@ -333,39 +441,55 @@ def handle_clusters(
         else:
             return f"Error: Cluster, symbol, or filepath '{cluster}' not found in cluster hierarchy."
 
-    # Render header
     hdr_focus = target_node.cluster_id
     md: List[str] = [
         f"## Emergent Dependency Clusters ({result.total_files} files, {result.total_symbols:,} symbols, {result.total_edges:,} edges)",
         f"- **Focus**: `{hdr_focus}` (depth={depth_val}, unit=`{unit_mode}`)",
         f"- **Unreferenced Symbols**: {len(result.unreferenced_symbols)} (pass `cluster=\"unreferenced\"` to inspect)",
+        f"- **Residual Singletons**: {len(residual_roots)} (pass `cluster=\"residuals\"` to inspect)",
         "",
     ]
 
     is_leaf = not target_node.children or target_node.is_singleton
 
-    # If zoomed into a leaf, provide Mode B Leaf Inspection
     if is_leaf and target_node.cluster_id != "root":
         md.extend(_render_leaf_inspection(target_node, result, repository))
     else:
-        # Tree View
-        if view_mode in ("tree", "both"):
-            md.append("### Cluster Tree")
-            md.append("```text")
-            tree_root_lbl = f"{target_node.cluster_id} ({len(target_node.filepaths)} files, {len(target_node.symbol_ids):,} symbols)"
-            md.append(tree_root_lbl)
-            tree_lines = _render_tree(target_node, unit=unit_mode, max_depth=depth_val, current_depth=0)
-            md.extend(tree_lines)
-            md.append("```")
+        if view_mode == "summary":
+            summary_targets = composite_roots + hub_roots if target_node.cluster_id == "root" else target_node.children
+            md.extend(
+                _render_summary_table(
+                    nodes=summary_targets[:15],
+                    total_symbols=len(target_node.symbol_ids),
+                    total_files=len(target_node.filepaths),
+                    shared_hubs_count=len(hub_roots) if target_node.cluster_id == "root" else 0,
+                    residuals_count=len(residual_roots) if target_node.cluster_id == "root" else 0,
+                )
+            )
             md.append("")
+        else:
+            if view_mode in ("tree", "both"):
+                md.append("### Cluster Tree")
+                md.append("```text")
+                tree_root_lbl = f"{target_node.cluster_id} ({len(target_node.filepaths)} files, {len(target_node.symbol_ids):,} symbols)"
+                md.append(tree_root_lbl)
+                md.extend(
+                    _render_tree(
+                        target_node,
+                        unit=unit_mode,
+                        max_depth=depth_val,
+                        current_depth=0,
+                        filter_residuals=(target_node.cluster_id == "root"),
+                    )
+                )
+                md.append("```")
+                md.append("")
 
-        # Mermaid View
-        if view_mode in ("mermaid", "both"):
-            frontier = _collect_frontier(target_node, max_depth=depth_val)
-            md.extend(_render_mermaid(frontier, unit=unit_mode, result=result))
-            md.append("")
+            if view_mode in ("mermaid", "both"):
+                frontier = _collect_frontier(target_node, max_depth=depth_val)
+                md.extend(_render_mermaid(frontier, unit=unit_mode, result=result))
+                md.append("")
 
-    # Drift Summary
     if include_drift:
         md.extend(_render_drift(result.drift))
         md.append("")

@@ -1,10 +1,31 @@
 import json
-import sys
+import logging
 from pathlib import Path, PurePosixPath
-from typing import Set, Optional, List
+from typing import List, Optional, Set
 
 from utils.arch_config import ArchConfig
 from utils.helpers import config_path_for, load_config
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_EXCLUDED_DIRS: Set[str] = {
+    ".git",
+    ".arch",
+    ".venv",
+    "venv",
+    "node_modules",
+    "bin",
+    "__pycache__",
+    "dist",
+    "build",
+    "target",
+    ".dart_tool",
+    "dart_analyzer",
+    ".mypy_cache",
+    ".pytest_cache",
+}
+
+BOILERPLATE_PATTERNS = ("generated", ".freezed.", ".g.", "frb_generated", "_impl")
 
 
 def _load_scope_config(project_root: Path) -> Optional[ArchConfig]:
@@ -22,10 +43,9 @@ def _load_scope_config(project_root: Path) -> Optional[ArchConfig]:
             raw = json.load(f)
         fallback = ArchConfig.from_dict(raw)
         if fallback.prefixes or fallback.exclude:
-            print(
-                f"[Arch] Warning: {config_path} has validation errors; "
-                "using its directory prefixes and exclude patterns for indexing scope.",
-                file=sys.stderr,
+            logger.warning(
+                "%s has validation errors; using its directory prefixes and exclude patterns for indexing scope.",
+                config_path,
             )
             return fallback
     except Exception:
@@ -34,9 +54,7 @@ def _load_scope_config(project_root: Path) -> Optional[ArchConfig]:
 
 
 def load_include_dirs(project_root: Path) -> Optional[Set[str]]:
-    """Load included directories from .arch/config.json keys.
-    Returns None if no directory prefixes are configured.
-    """
+    """Load included directories from .arch/config.json keys. Returns None if none configured."""
     config = _load_scope_config(project_root)
     if config is None:
         return None
@@ -54,20 +72,12 @@ def load_exclude_patterns(project_root: Optional[Path]) -> List[str]:
     return list(config.exclude)
 
 
-DEFAULT_EXCLUDED_DIRS = {
-    ".git", ".arch", ".venv", "venv", "node_modules", "bin", "__pycache__", "dist", "build"
-}
-
-BOILERPLATE_PATTERNS = ("generated", ".freezed.", ".g.", "frb_generated", "_impl")
-
-
 def is_boilerplate(filepath: Optional[str]) -> bool:
     """Check if filepath belongs to auto-generated boilerplate code."""
     if not filepath:
         return False
     fp = filepath.replace("\\", "/").lower()
     return any(p in fp for p in BOILERPLATE_PATTERNS)
-
 
 
 def matches_glob(rel_path: str, pattern: str) -> bool:

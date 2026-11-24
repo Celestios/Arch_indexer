@@ -3,8 +3,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from utils.helpers import demangle_scip_symbol
 from clustering.models import ClusterNode
+from utils.symbol_id import canonical_display_name
 
 
 def compute_dominant_dir(filepaths: Tuple[str, ...], symbol_fps: List[str]) -> Optional[str]:
@@ -16,14 +16,12 @@ def compute_dominant_dir(filepaths: Tuple[str, ...], symbol_fps: List[str]) -> O
     for fp in symbol_fps:
         norm = fp.replace("\\", "/").strip("/")
         parts = norm.split("/")[:-1]
-        for l in range(1, len(parts) + 1):
-            prefix_counts["/".join(parts[:l])] += 1
+        for length in range(1, len(parts) + 1):
+            prefix_counts["/".join(parts[:length])] += 1
 
     qualifying = [p for p, cnt in prefix_counts.items() if cnt >= 0.5 * total]
     if not qualifying:
-        # Fall back to plurality directory (directory containing the most symbols)
         if prefix_counts:
-            # Sort by count desc, then path depth desc
             plurality = sorted(
                 prefix_counts.items(),
                 key=lambda x: (x[1], len(x[0].split("/")), len(x[0])),
@@ -57,7 +55,7 @@ def find_top_internal_hub(
         return ""
     if len(symbol_ids) == 1:
         s_info = active_symbols_map.get(symbol_ids[0], {})
-        return s_info.get("clean_symbol") or demangle_scip_symbol(symbol_ids[0])
+        return canonical_display_name(symbol_ids[0], s_info.get("name"))
 
     sym_set = set(symbol_ids)
     scored: List[Tuple[int, str, str]] = []
@@ -65,8 +63,8 @@ def find_top_internal_hub(
         neighbors = internal_adj.get(s, set())
         deg = len(neighbors & sym_set)
         s_info = active_symbols_map.get(s, {})
-        clean = s_info.get("clean_symbol") or demangle_scip_symbol(s)
-        scored.append((deg, s, clean))
+        disp = canonical_display_name(s, s_info.get("name"))
+        scored.append((deg, s, disp))
 
     scored.sort(key=lambda x: (-x[0], x[1]))
     return scored[0][2]
@@ -81,8 +79,7 @@ def derive_cluster_name(
     if len(node.symbol_ids) == 1:
         s = node.symbol_ids[0]
         s_info = active_symbols_map.get(s, {})
-        clean = s_info.get("clean_symbol") or demangle_scip_symbol(s)
-        return clean, None
+        return canonical_display_name(s, s_info.get("name")), None
 
     symbol_fps = [
         active_symbols_map[s].get("filepath", "")
@@ -91,10 +88,8 @@ def derive_cluster_name(
     ]
     dom_dir = compute_dominant_dir(node.filepaths, symbol_fps)
 
-    # Multi-symbol, 1-file cluster: <ClassName> if all symbols belong to that class, else filename stem
     if len(node.filepaths) == 1:
         fp = node.filepaths[0]
-        # Collect candidate enclosing classes
         all_classes = {
             s for s in node.symbol_ids
             if active_symbols_map.get(s, {}).get("kind") in ("Class", "Struct", "Interface", "Trait")
@@ -107,19 +102,16 @@ def derive_cluster_name(
         candidate_classes = all_classes | all_parents
         if len(candidate_classes) == 1:
             cls_sym = next(iter(candidate_classes))
-            # Verify EVERY symbol belongs to cls_sym
             all_belong = all(
                 s == cls_sym or active_symbols_map.get(s, {}).get("parent_symbol") == cls_sym
                 for s in node.symbol_ids
             )
             if all_belong:
                 cls_info = active_symbols_map.get(cls_sym, {})
-                cls_name = cls_info.get("clean_symbol") or demangle_scip_symbol(cls_sym)
-                return cls_name, dom_dir
+                return canonical_display_name(cls_sym, cls_info.get("name")), dom_dir
         stem = Path(fp.replace("\\", "/")).stem
         return stem, dom_dir
 
-    # Multi-file cluster: <dominant_dir_short> [<top_internal_hub>]
     top_hub = find_top_internal_hub(node.symbol_ids, internal_adj, active_symbols_map)
     if dom_dir:
         return f"{dom_dir} [{top_hub}]", dom_dir

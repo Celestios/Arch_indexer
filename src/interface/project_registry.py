@@ -4,7 +4,6 @@ Manages isolated DuckDB connections and repositories per project workspace.
 """
 import json
 import os
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -13,20 +12,16 @@ from typing import Any, Dict, List, Optional, Union
 
 from db.connection import DbConnection
 from db.repository import Repository
-from utils.single_instance import get_global_arch_dir, PROJECTS_FILE_NAME
+from utils.single_instance import PROJECTS_FILE_NAME, get_global_arch_dir
 
 
 def normalize_path(path: Union[str, Path]) -> str:
-    """Normalizes a filesystem path to forward slashes with drive letter normalized."""
-    p = Path(path).resolve()
-    return str(p).replace("\\", "/")
+    """Normalizes a filesystem path to forward slashes."""
+    return str(Path(path).resolve()).replace("\\", "/")
 
 
 def find_project_root_with_db(start: Union[str, Path]) -> Optional[Path]:
-    """Walks up the directory tree starting from `start` looking for `.arch/arch.db`.
-
-    Returns the nearest ancestor Path containing `.arch/arch.db`, or None if not found.
-    """
+    """Walks up the directory tree starting from `start` looking for `.arch/arch.db`."""
     try:
         p = Path(start).resolve()
         cur = p if p.is_dir() else p.parent
@@ -84,7 +79,7 @@ class ProjectRegistry:
             projects = data.get("projects", {})
             pruned = False
             user_home_arch = (Path.home() / ".arch").resolve()
-            is_user_home = (self.global_dir == user_home_arch)
+            is_user_home = self.global_dir == user_home_arch
             for p_str in list(projects.keys()):
                 p = Path(p_str)
                 p_lower = p_str.lower()
@@ -120,29 +115,13 @@ class ProjectRegistry:
         start_watcher: bool = True,
         set_active: Optional[bool] = None,
     ) -> ProjectContext:
-        """Initializes or retrieves an isolated project context.
-
-        Raises FileNotFoundError if .arch/arch.db does not exist in the project directory
-        or its ancestors.
-        """
+        """Initializes or retrieves an isolated project context."""
         root_path = Path(project_root).resolve()
-        # Find root with db if subdirectory passed
         db_root = find_project_root_with_db(root_path)
         if db_root is not None:
             root_path = db_root
         norm_key = normalize_path(root_path)
-
-        try:
-            server_cfg = sys.modules.get("interface.server_config")
-            if server_cfg is not None and hasattr(server_cfg, "get_db_path") and hasattr(server_cfg, "get_project_root"):
-                if server_cfg.get_project_root() == root_path:
-                    db_path = server_cfg.get_db_path()
-                else:
-                    db_path = root_path / ".arch" / "arch.db"
-            else:
-                db_path = root_path / ".arch" / "arch.db"
-        except Exception:
-            db_path = root_path / ".arch" / "arch.db"
+        db_path = root_path / ".arch" / "arch.db"
 
         if not db_path.exists():
             raise FileNotFoundError(
@@ -166,7 +145,6 @@ class ProjectRegistry:
             )
             self._projects[norm_key] = ctx
 
-            # Update persistence
             data = self._read_persisted_projects()
             projects = data.setdefault("projects", {})
             projects[norm_key] = {
@@ -182,7 +160,6 @@ class ProjectRegistry:
                     data["active_project"] = norm_key
             self._write_persisted_projects(data)
 
-            # Ensure watcher is running if watcher_manager is available
             if start_watcher:
                 try:
                     from change_tracker.watcher_manager import WatcherManager
@@ -210,65 +187,43 @@ class ProjectRegistry:
         project_root: Optional[Union[str, Path]] = None,
         filepath: Optional[Union[str, Path]] = None,
     ) -> Path:
-        """Resolves target project root using cascading heuristics:
-        1. Explicit project_root argument (checks itself and walks up tree for .arch/arch.db)
-        2. Explicit filepath ancestry (resolves relative paths and walks up tree)
-        3. server_config explicit override
-        4. Current working directory ancestry (walks up tree for .arch/arch.db)
-        5. ARCH_PROJECT_ROOT environment variable (walks up tree)
-        6. Currently loaded projects in memory with valid DB
-        7. Persisted active_project in ~/.arch/projects.json (with valid DB)
-        8. Fallback to server_config or CWD
-        """
+        """Resolves target project root using explicit cascading heuristics."""
         with self._lock:
-            # 1. Explicit project_root parameter: walk up from it for .arch/arch.db
             if project_root:
                 db_root = find_project_root_with_db(project_root)
                 if db_root is not None:
                     return db_root
                 return Path(project_root).resolve()
 
-            # 2. If filepath is provided, resolve against configured root or CWD, then walk up
             if filepath:
                 p_file = Path(filepath)
                 if not p_file.is_absolute():
-                    base = None
-                    server_cfg = sys.modules.get("interface.server_config")
-                    if server_cfg is not None and hasattr(server_cfg, "_resolved") and "project_root" in server_cfg._resolved:
-                        base = server_cfg._resolved["project_root"]
-                    p_file = (Path(base) / p_file if base else (Path.cwd() / p_file)).resolve()
+                    p_file = (Path.cwd() / p_file).resolve()
                 db_root = find_project_root_with_db(p_file)
                 if db_root is not None:
                     return db_root
 
                 fp_str = normalize_path(p_file)
-                # Check known active projects
                 for norm_key, ctx in self._projects.items():
-                    if (fp_str.lower().startswith(norm_key.lower() + "/") or fp_str.lower() == norm_key.lower()) and (ctx.root / ".arch" / "arch.db").exists():
+                    if (
+                        fp_str.lower().startswith(norm_key.lower() + "/")
+                        or fp_str.lower() == norm_key.lower()
+                    ) and (ctx.root / ".arch" / "arch.db").exists():
                         return ctx.root
 
-                # Check persisted projects
                 persisted = self._read_persisted_projects().get("projects", {})
                 for p_str in persisted.keys():
                     p = Path(p_str)
-                    if (fp_str.lower().startswith(p_str.lower() + "/") or fp_str.lower() == p_str.lower()) and (p / ".arch" / "arch.db").exists():
+                    if (
+                        fp_str.lower().startswith(p_str.lower() + "/")
+                        or fp_str.lower() == p_str.lower()
+                    ) and (p / ".arch" / "arch.db").exists():
                         return p
 
-            # 3. Check server_config explicit override (e.g. test monkeypatch or CLI param)
-            server_cfg = sys.modules.get("interface.server_config")
-            if server_cfg is not None and hasattr(server_cfg, "_resolved") and "project_root" in server_cfg._resolved:
-                cfg_root = server_cfg._resolved["project_root"]
-                db_root = find_project_root_with_db(cfg_root)
-                if db_root is not None:
-                    return db_root
-                return Path(cfg_root).resolve()
-
-            # 4. Current working directory: check if CWD or any ancestor contains .arch/arch.db
             cwd_root = find_project_root_with_db(Path.cwd())
             if cwd_root is not None:
                 return cwd_root
 
-            # 5. Explicit environment override (only if valid db exists)
             if "ARCH_PROJECT_ROOT" in os.environ:
                 env_val = os.environ["ARCH_PROJECT_ROOT"]
                 db_root = find_project_root_with_db(env_val)
@@ -278,12 +233,14 @@ class ProjectRegistry:
                 if (env_root / ".arch" / "arch.db").exists():
                     return env_root
 
-            # 6. Check loaded projects with valid DB
-            valid_loaded = [ctx.root for ctx in self._projects.values() if (ctx.root / ".arch" / "arch.db").exists()]
+            valid_loaded = [
+                ctx.root
+                for ctx in self._projects.values()
+                if (ctx.root / ".arch" / "arch.db").exists()
+            ]
             if len(valid_loaded) == 1:
                 return valid_loaded[0]
 
-            # 7. Persisted active_project or single persisted project (must have existing db)
             persisted_data = self._read_persisted_projects()
             active_proj = persisted_data.get("active_project")
             if active_proj:
@@ -292,20 +249,15 @@ class ProjectRegistry:
                     return p
 
             persisted_projects = persisted_data.get("projects", {})
-            valid_persisted = [Path(p) for p in persisted_projects.keys() if (Path(p) / ".arch" / "arch.db").exists()]
+            valid_persisted = [
+                Path(p)
+                for p in persisted_projects.keys()
+                if (Path(p) / ".arch" / "arch.db").exists()
+            ]
             if len(valid_persisted) == 1:
                 return valid_persisted[0]
 
-            # 8. Fallback to server_config or CWD
-            try:
-                from interface.server_config import get_project_root
-                cfg_root = get_project_root()
-                db_root = find_project_root_with_db(cfg_root)
-                if db_root is not None:
-                    return db_root
-                return cfg_root
-            except Exception:
-                return Path.cwd().resolve()
+            return Path.cwd().resolve()
 
     def get_repository(
         self,
@@ -335,17 +287,14 @@ class ProjectRegistry:
             result = []
             for norm_key, info in proj_dict.items():
                 p = Path(norm_key)
-                is_active = (norm_key == active)
-                is_loaded = norm_key in self._projects
-                db_exists = (p / ".arch" / "arch.db").exists()
                 result.append({
                     "root": norm_key,
                     "name": info.get("name", p.name),
                     "registered_at": info.get("registered_at"),
                     "last_accessed": info.get("last_accessed"),
-                    "is_active": is_active,
-                    "is_loaded": is_loaded,
-                    "db_exists": db_exists,
+                    "is_active": norm_key == active,
+                    "is_loaded": norm_key in self._projects,
+                    "db_exists": (p / ".arch" / "arch.db").exists(),
                 })
             return result
 
@@ -368,17 +317,14 @@ class ProjectRegistry:
         norm_key = normalize_path(root_path)
 
         with self._lock:
-            # 1. Close active db connection
             self.close_project(root_path)
 
-            # 2. Stop watcher
             try:
                 from change_tracker.watcher_manager import WatcherManager
                 WatcherManager.get_instance().stop_watcher(root_path)
             except Exception:
                 pass
 
-            # 3. Remove from persistence
             data = self._read_persisted_projects()
             projects = data.get("projects", {})
             removed = False

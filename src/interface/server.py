@@ -1,47 +1,44 @@
-import os
-import sys
 import asyncio
 import functools
-import contextvars
+import sys
 import urllib.request
-from urllib.parse import urlparse
 from pathlib import Path
-from typing import Optional, List, Union, Dict, Any
+from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlparse
 
-# Setup sys.path to resolve imports from src/
 src_dir = Path(__file__).resolve().parent.parent
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp import Context, FastMCP
+
+from change_tracker.watcher_manager import WatcherManager
 from db.repository import Repository
 from interface.project_registry import ProjectRegistry, find_project_root_with_db
-from change_tracker.watcher_manager import WatcherManager
-from interface.tools.context import handle_context
-from interface.tools.lookup import handle_lookup
-from interface.tools.impact import handle_impact
+from interface.tools.analyze import handle_analyze
 from interface.tools.audit import handle_audit
+from interface.tools.clear_pending import handle_clear_pending
+from interface.tools.clusters import handle_clusters
 from interface.tools.compile_context import handle_compile_context
-from interface.tools.map import handle_map
-from interface.tools.update import handle_update
-from interface.tools.set_status import handle_set_status
+from interface.tools.context import handle_context
 from interface.tools.graph import handle_graph
 from interface.tools.history import handle_history
-from interface.tools.analyze import handle_analyze
-from interface.tools.set_fields import handle_set_fields
-from interface.tools.clear_pending import handle_clear_pending
+from interface.tools.impact import handle_impact
+from interface.tools.lookup import handle_lookup
+from interface.tools.map import handle_map
 from interface.tools.query import handle_query
-from interface.tools.clusters import handle_clusters
+from interface.tools.set_fields import handle_set_fields
+from interface.tools.set_status import handle_set_status
+from interface.tools.update import handle_update
 from interface.validators import (
+    validate_cluster_unit,
+    validate_cluster_view,
     validate_direction,
     validate_resolution,
     validate_sections,
-    validate_cluster_view,
-    validate_cluster_unit,
 )
 
 mcp = FastMCP("arch")
-_explicit_project_root = contextvars.ContextVar("_explicit_project_root", default=None)
 
 
 def uri_to_path(uri: str) -> Path:
@@ -57,62 +54,19 @@ def uri_to_path(uri: str) -> Path:
 
 
 def _tool():
-    """Registers an async tool with FastMCP while enabling synchronous execution in test suites."""
+    """Registers an async tool with FastMCP while permitting direct synchronous invocation."""
     def decorator(fn):
         mcp.tool()(fn)
 
         @functools.wraps(fn)
-        def caller(*args, project_root: Optional[Union[str, Path]] = None, **kwargs):
-            if project_root is not None:
-                kwargs["project_root"] = str(project_root)
-            token = _explicit_project_root.set(str(project_root) if project_root else None)
+        def caller(*args, **kwargs):
             try:
-                import inspect
-                sig = inspect.signature(fn)
-                if "project_root" in sig.parameters and "project_root" not in kwargs:
-                    param_names = list(sig.parameters.keys())
-                    root_idx = param_names.index("project_root")
-                    if len(args) <= root_idx:
-                        # Fallback for Python/test callers: resolve from contextvar, filepath ancestry, server_config, or registry
-                        fallback = _explicit_project_root.get()
-                        if not fallback:
-                            fp = kwargs.get("filepath") or kwargs.get("filepaths") or kwargs.get("path")
-                            if not fp and len(args) > 0:
-                                cand = args[0]
-                                if isinstance(cand, list) and cand:
-                                    cand = cand[0]
-                                if isinstance(cand, (str, Path)) and Path(cand).is_absolute():
-                                    fp = cand
-                            if fp and isinstance(fp, (str, Path)) and Path(fp).is_absolute():
-                                db_root = find_project_root_with_db(fp)
-                                if db_root is not None:
-                                    fallback = str(db_root)
-
-                        if not fallback:
-                            server_cfg = sys.modules.get("interface.server_config")
-                            if server_cfg and hasattr(server_cfg, "_resolved") and "project_root" in server_cfg._resolved:
-                                fallback = str(server_cfg._resolved["project_root"])
-
-                        if not fallback:
-                            if "ARCH_PROJECT_ROOT" in os.environ:
-                                fallback = os.environ["ARCH_PROJECT_ROOT"]
-                            else:
-                                reg = ProjectRegistry.get_instance()
-                                try:
-                                    fallback = str(reg.resolve_project())
-                                except Exception:
-                                    fallback = str(Path.cwd().resolve())
-                        kwargs["project_root"] = fallback
-
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None
-                if loop and loop.is_running():
-                    return fn(*args, **kwargs)
-                return asyncio.run(fn(*args, **kwargs))
-            finally:
-                _explicit_project_root.reset(token)
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                return fn(*args, **kwargs)
+            return asyncio.run(fn(*args, **kwargs))
 
         return caller
     return decorator
@@ -123,30 +77,20 @@ async def _resolve_context(
     project_root: Optional[Union[str, Path]] = None,
     filepath: Optional[str] = None,
 ) -> tuple[Path, Repository]:
-    """Helper to resolve active workspace root and repository.
-
-    1. Explicit project_root argument or internal override via contextvar.
-    2. Primary: MCP client workspace roots via ctx.session.list_roots() (if supported).
-    3. Filepath ancestry check for .arch/arch.db (for absolute filepaths).
-    4. Fallback to ProjectRegistry cascading resolution (active_project in ~/.arch/projects.json, CWD, etc.).
-    """
+    """Resolves active workspace root and repository."""
     registry = ProjectRegistry.get_instance()
 
-    # 1. Explicit internal override or parameter
-    effective_root = project_root or _explicit_project_root.get()
-    if effective_root:
-        db_root = find_project_root_with_db(effective_root)
+    if project_root:
+        db_root = find_project_root_with_db(project_root)
         if db_root is not None:
             return db_root, registry.get_repository(project_root=db_root)
-        # If effective_root had no db, check if filepath is absolute and has a db
         if filepath and Path(filepath).is_absolute():
             fp_root = find_project_root_with_db(filepath)
             if fp_root is not None:
                 return fp_root, registry.get_repository(project_root=fp_root)
-        target = Path(effective_root).resolve()
+        target = Path(project_root).resolve()
         return target, registry.get_repository(project_root=target)
 
-    # 2. Ask Antigravity/client for open workspaces via roots/list if supported
     if ctx is not None:
         try:
             session = ctx.session
@@ -165,13 +109,11 @@ async def _resolve_context(
         except Exception:
             pass
 
-    # 3. Path from filepath hint
     if filepath:
         db_root = find_project_root_with_db(filepath)
         if db_root is not None:
             return db_root, registry.get_repository(project_root=db_root)
 
-    # 4. ProjectRegistry resolution (server_config, active_project, CWD)
     resolved_root = registry.resolve_project(project_root=project_root, filepath=filepath)
     repository = registry.get_repository(project_root=resolved_root)
     return resolved_root, repository
@@ -182,8 +124,7 @@ def get_server_repository(
     filepath: Optional[Union[str, Path]] = None,
 ) -> Repository:
     """Get or create cached Repository from the ProjectRegistry."""
-    registry = ProjectRegistry.get_instance()
-    return registry.get_repository(project_root=project_root, filepath=filepath)
+    return ProjectRegistry.get_instance().get_repository(project_root=project_root, filepath=filepath)
 
 
 def close_server_connection():
@@ -206,16 +147,7 @@ async def graph(
 ) -> str:
     """
     Builds the interactive Electronic PCB Circuit Diagram HTML architecture visualizer directly from the DuckDB index.
-    Generates a standalone, zoomable HTML schematic visualizer representing modules, classes, and dependency traces.
     project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    output_path: Destination HTML file path (defaults to <project_root>/circuit_board.html).
-    scope: Directory or package scope filter (defaults to registered paths in .arch/config.json).
-    include_tests: Include test files in the graph visualizer.
-    include_occurrences: Include raw symbol occurrence vias.
-    include_external: Include external third-party dependencies.
-    include_parameters: Include parameter variable nodes.
-    max_refs: Maximum reference occurrences per symbol.
-    open_browser: Whether to open the generated HTML in the default web browser.
     """
     try:
         resolved_root, _ = await _resolve_context(ctx=ctx, project_root=project_root)
@@ -240,7 +172,6 @@ async def graph(
 async def lookup(target: Union[List[str], str], project_root: str, ctx: Context = None) -> str:
     """
     Resolves symbol and file locations, definitions, occurrences, and direct call relationships.
-    Use this tool like a targeted search or symbol-aware grep to locate a specific node, symbol, function, or class across the codebase.
     target: Symbol name(s) or file path(s) to locate.
     project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
     """
@@ -258,7 +189,6 @@ async def lookup(target: Union[List[str], str], project_root: str, ctx: Context 
 async def context(filepaths: Union[List[str], str], project_root: str, ctx: Context = None) -> str:
     """
     Returns structural outlines, declared symbols, class/method signatures, and line ranges for specified files.
-    Use this tool when you know something is located in a specific file but don't know which part.
     filepaths: File path or list of file paths to inspect.
     project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
     """
@@ -284,12 +214,6 @@ async def impact(
     """
     Performs blast radius analysis by computing the transitive call tree up to max_depth,
     enriched with live Git hotspot risk and Lift-ranked temporal co-change coupling for the focal file.
-    Use this tool when evaluating the ripple effects of proposed refactors or deletions.
-    symbol: Focal symbol identifier to analyze.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    max_depth: Maximum call graph traversal depth (default 4).
-    direction: 'upstream' (callers, default), 'downstream' (callees), or 'both'.
-    max_nodes: Maximum number of tree nodes rendered per direction (default 50).
     """
     direction = direction.lower()
     valid, msg = validate_direction(direction)
@@ -325,13 +249,6 @@ async def compile_context(
 ) -> str:
     """
     Compiles a bounded architectural context document by traversing the call graph neighborhood of a focal symbol.
-    symbol: Focal symbol identifier.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    radius: Hop distance radius in call graph.
-    direction: 'upstream', 'downstream', or 'both'.
-    resolution: 'signature' or 'full'.
-    out_filepath: Optional output destination markdown file.
-    max_tokens: Maximum token budget.
     """
     direction = direction.lower()
     valid, msg = validate_direction(direction)
@@ -358,9 +275,7 @@ async def compile_context(
 async def audit(project_root: str, summary_only: bool = False, ctx: Context = None) -> str:
     """
     Runs project-wide architectural boundary and layer compliance checks against configured rules,
-    returning a compact compliance scorecard (posture, severity/rule rollups) plus concrete violation traces.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    summary_only: When True, return only the compliance scorecard and hotspot files without individual traces.
+    returning a compact compliance scorecard plus concrete violation traces.
     """
     try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
@@ -383,19 +298,6 @@ async def history(
 ) -> str:
     """
     Performs on-the-fly Git evolution and risk intelligence intersected with the static code graph.
-    Composes any combination of sections in a single git log pass:
-    - 'hotspots': Evolution risk (decayed churn x structural fan-in x AST complexity); symbol-level if target is a file.
-    - 'thrash': Rework balance, short-interval touch bursts, and revert loops (resists poor commit messages).
-    - 'coupling': Inverse-commit-size weighted Lift/PMI temporal co-change tagged HIDDEN (no static edge) vs STRUCTURAL.
-    - 'archaeology': Compact commit timeline for a specific target file or symbol (requires target).
-    - 'growth': Net line expansion paired with current LOC and AST complexity.
-    - 'test_gap': High-churn production files lacking static test callers or co-modified test files.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    sections: List or comma-separated string of sections to include (default: ['hotspots', 'coupling'], or ['archaeology', 'coupling'] when target is set).
-    target: Optional file path or symbol identifier to focus analysis on.
-    scope: Optional directory prefix or list of prefixes to constrain workspace analysis.
-    commits: Maximum number of recent non-merge commits to analyze (default 100).
-    limit: Maximum items returned per section (default 10).
     """
     valid, parsed = validate_sections(sections, has_target=bool(target))
     if not valid:
@@ -421,10 +323,7 @@ async def history(
 
 @_tool()
 async def analyze(project_root: str, ctx: Context = None) -> str:
-    """
-    Validates architectural configuration ontology completeness, reachability, and referential sanity.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    """
+    """Validates architectural configuration ontology completeness, reachability, and referential sanity."""
     try:
         resolved_root, _ = await _resolve_context(ctx=ctx, project_root=project_root)
         report_text, _ = handle_analyze(resolved_root)
@@ -441,13 +340,7 @@ async def set_fields(
     justification: Optional[str] = None,
     ctx: Context = None,
 ) -> str:
-    """
-    Sets manual architectural metadata fields and tags for a registered file.
-    filepath: Target file path.
-    fields_json: JSON string of metadata key-values.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    justification: Optional reason for the update.
-    """
+    """Sets manual architectural metadata fields and tags for a registered file."""
     try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath)
         msg, _ = handle_set_fields(repository, resolved_root, filepath, fields_json, justification)
@@ -460,11 +353,7 @@ async def set_fields(
 
 @_tool()
 async def clear_pending(justification: str, project_root: str, ctx: Context = None) -> str:
-    """
-    Clears the pending audit flag on all files in the database.
-    justification: Reason for clearing pending audits.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    """
+    """Clears the pending audit flag on all files in the database."""
     try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
         return handle_clear_pending(repository, resolved_root, justification)
@@ -484,15 +373,7 @@ async def map(
     include_external: bool = False,
     ctx: Context = None,
 ) -> str:
-    """
-    Returns a structured, multi-level architectural blueprint map of the repository.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    targets: Optional target folder(s) or file pattern(s).
-    path: Relative path within project to start mapping from.
-    tree_depth: Depth of directory tree to include.
-    detail_level: 'folder' or 'file'.
-    include_external: Include external dependencies.
-    """
+    """Returns a structured, multi-level architectural blueprint map of the repository."""
     try:
         _, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=path or None)
         return handle_map(
@@ -517,13 +398,7 @@ async def set_status(
     justification: Optional[str] = None,
     ctx: Context = None,
 ) -> str:
-    """
-    Sets manual AI logical compliance status for a file (COMPLIANT or VIOLATION_DETECTED).
-    filepath: Target file path.
-    status: 'COMPLIANT' or 'VIOLATION_DETECTED'.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    justification: Optional explanation for the status change.
-    """
+    """Sets manual AI logical compliance status for a file (COMPLIANT or VIOLATION_DETECTED)."""
     try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath)
         msg, _ = handle_set_status(repository, resolved_root, filepath, status, justification)
@@ -541,12 +416,7 @@ async def update(
     force: bool = False,
     ctx: Context = None,
 ) -> str:
-    """
-    Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    filepaths: Optional specific file paths to re-index.
-    force: Force full rebuild regardless of file modification timestamps.
-    """
+    """Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges."""
     filepath_hint = filepaths if isinstance(filepaths, str) else (filepaths[0] if filepaths else None)
     try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
@@ -567,20 +437,15 @@ async def query(
 ) -> str:
     """
     Executes a read-only SQL query directly against the DuckDB index (.arch/arch.db).
-    Provides raw analytical database access for graph clustering, connected component isolation,
-    custom topological metrics, or bulk inspections without process lock contention.
     Tables:
-    - files (filepath, sha256, language, status, manual_status, manual_fields, justification)
-    - symbols (symbol, clean_symbol, filepath, kind, signature, docstring, connection_weight, parent_symbol, classification)
+    - files (filepath, sha256, ast_sha256, language, status, manual_status, pending_audit, manual_fields, justification)
+    - symbols (symbol, name, scip_id, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, classification, change_count, start_line, start_col, end_line, end_col)
     - edges (source, target, relation, weight, call_line)
     - occurrences (symbol, filepath, start_line, start_col, end_line, end_col, role)
-    - file_co_changes (filepath_a, filepath_b, co_change_count, frequency)
-    - compliance_violations (violation_id, rule_id, symbol, filepath, line, message)
-
-    sql: Read-only SQL query (SELECT, WITH, PRAGMA, EXPLAIN, DESCRIBE, SHOW).
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    limit: Maximum number of rows to return or export (defaults to 100 in memory; unlimited when output_path is provided).
-    output_path: Optional file path to export the complete result set as JSON for downstream agent analysis.
+    - compliance_rules (rule_id, description, severity)
+    - compliance_violations (violation_id, rule_id, symbol, filepath, line, message, origin)
+    - diagnostics (filepath, symbol, line, col, severity, code, message, tags)
+    - system_metadata (key, value)
     """
     try:
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
@@ -612,16 +477,10 @@ async def clusters(
 ) -> str:
     """
     Performs parameter-free hierarchical graph clustering, containment scoring, and architectural drift diagnostics.
-    Decomposes the workspace graph bottom-up into a multi-level dendrogram with dominance-gated hub ejection (LCA invariant).
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    cluster: Cluster ID (e.g. 'c1', 'c2.1'), target symbol/file to inspect, 'unreferenced', or None for root overview.
+    cluster: Cluster ID (e.g. 'c1', 'c2.1'), target symbol/file, 'residuals', 'unreferenced', or None for root overview.
     depth: Hierarchy expansion depth below focal cluster (default: 2).
-    unit: Analysis unit: 'symbol' (default) or 'file'.
-    view: Output view: 'both' (default), 'tree', or 'mermaid'.
-    scope: Directory prefix or list of prefixes to constrain workspace analysis.
-    language: Target programming language filter.
-    include_tests: Include test files and symbols (default: False).
-    include_drift: Append split-brain file/class and misplaced symbol diagnostics (default: True).
+    unit: 'symbol' (default) or 'file'.
+    view: 'both' (default), 'summary', 'tree', or 'mermaid'.
     """
     ok_v, view_or_err = validate_cluster_view(view)
     if not ok_v:
@@ -641,7 +500,11 @@ async def clusters(
     try:
         filepath_hint = (
             cluster
-            if isinstance(cluster, str) and ("/" in cluster or "\\" in cluster or cluster.endswith(".dart") or cluster.endswith(".py") or cluster.endswith(".rs") or cluster.endswith(".go") or cluster.endswith(".ts") or cluster.endswith(".js"))
+            if isinstance(cluster, str) and (
+                "/" in cluster
+                or "\\" in cluster
+                or cluster.endswith((".dart", ".py", ".rs", ".go", ".ts", ".js"))
+            )
             else None
         )
         resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)

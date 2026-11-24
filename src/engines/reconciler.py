@@ -6,6 +6,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from utils.helpers import demangle_scip_symbol
+from utils.symbol_id import parse_canonical_id
 
 
 def normalize_leaf(name: str) -> str:
@@ -51,8 +52,8 @@ def reconcile_symbol_id(
             for sym_id, s_line in occ_list:
                 delta = abs(start_line - s_line)
                 if delta <= 2:
-                    scip_clean = demangle_scip_symbol(sym_id)
-                    cand_leaf = normalize_leaf(scip_clean)
+                    leaf_cand = parse_canonical_id(sym_id)[2] or demangle_scip_symbol(sym_id)
+                    cand_leaf = normalize_leaf(leaf_cand)
                     if cand_leaf == target_leaf and delta < min_delta:
                         min_delta = delta
                         best_match = sym_id

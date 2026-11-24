@@ -3,8 +3,8 @@
 Maintains independent Watchdog observers and debounced re-indexing workers per workspace.
 """
 import atexit
+import logging
 import os
-import sys
 import threading
 import time
 from pathlib import Path
@@ -12,7 +12,6 @@ from typing import Dict, Optional, Set, Union
 
 from change_tracker.tracker import calculate_sha256
 from change_tracker.watcher import (
-    _FFI_BRIDGE_INDICATORS,
     _WATCHED_EXTENSIONS,
     _has_ffi_bridge_files,
     _resolve_package_root,
@@ -22,12 +21,13 @@ from db.repository import Repository
 from engines.registry import LanguageRegistry
 from engines.sync_pipeline import sync_workspace
 from engines.treesitter import sync_file_to_db
-from utils.exclusions import load_include_dirs
+from utils.exclusions import DEFAULT_EXCLUDED_DIRS, load_include_dirs
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_path(path: Union[str, Path]) -> str:
-    p = Path(path).resolve()
-    return str(p).replace("\\", "/")
+    return str(Path(path).resolve()).replace("\\", "/")
 
 
 class ProjectWatcher:
@@ -59,13 +59,14 @@ class ProjectWatcher:
             self._db_conn = DbConnection(self.db_path)
             self._repository = Repository(self._db_conn)
         except Exception:
+            logger.exception("Failed to initialize watcher DB connection for %s", self.project_root)
             return False
 
         try:
-            from watchdog.observers import Observer
             from watchdog.events import FileSystemEventHandler
+            from watchdog.observers import Observer
         except ImportError:
-            print("[Arch Watcher] watchdog not installed. Skipping watcher.", file=sys.stderr)
+            logger.warning("watchdog not installed. Skipping watcher for %s.", self.project_root)
             return False
 
         include_dirs = load_include_dirs(self.project_root)
@@ -83,10 +84,7 @@ class ProjectWatcher:
                 except ValueError:
                     return
 
-                # Exclude dotfiles, build/target/node_modules/venv
-                if any(part.startswith(".") for part in rel_parts):
-                    return
-                if any(part in ("venv", ".venv", "bin", "build", "target", "node_modules") for part in rel_parts):
+                if any(part.startswith(".") or part in DEFAULT_EXCLUDED_DIRS for part in rel_parts):
                     return
 
                 if include_dirs and not any(part in include_dirs for part in rel_parts):
@@ -100,13 +98,12 @@ class ProjectWatcher:
                     watcher_self._pending = True
                     watcher_self._changed_files.add(path)
 
-                # Tier 1: Fast Tree-sitter AST sync (< 2ms)
                 if path.exists() and path.is_file() and watcher_self._repository:
                     try:
                         with watcher_self._db_lock:
                             sync_file_to_db(watcher_self._repository, path, project_root=project_root)
                     except Exception:
-                        pass
+                        logger.debug("Tier-1 watcher AST sync failed for %s", path, exc_info=True)
 
         self._observer = Observer()
         self._observer.schedule(Handler(), str(self.project_root), recursive=True)
@@ -121,7 +118,6 @@ class ProjectWatcher:
         return True
 
     def _debounce_worker(self):
-        """Worker loop for Tier 2 debounced SCIP re-indexing and auditing."""
         while not self._stop_event.is_set():
             time.sleep(0.5)
 
@@ -137,8 +133,8 @@ class ProjectWatcher:
 
             try:
                 self._run_scip_reindex(batch)
-            except Exception as e:
-                print(f"[Arch Watcher] Error updating {self.project_root.name}: {e}", file=sys.stderr)
+            except Exception:
+                logger.exception("Error updating %s", self.project_root.name)
 
     def _run_scip_reindex(self, batch: list):
         if not self.db_path.exists() or not self._repository:
@@ -209,7 +205,6 @@ class ProjectWatcher:
                             auditor.run_audit(filepath_filter=fp)
 
     def stop(self):
-        """Stops the observer, worker thread, and closes database connection."""
         self._stop_event.set()
         if self._observer is not None:
             try:
@@ -255,7 +250,6 @@ class WatcherManager:
                 cls._instance = None
 
     def ensure_watcher(self, project_root: Union[str, Path], debounce: float = 3.0) -> bool:
-        """Starts a background watcher for the project root if not already watching."""
         root_path = Path(project_root).resolve()
         norm_key = normalize_path(root_path)
 
@@ -264,8 +258,7 @@ class WatcherManager:
                 return True
 
             watcher = ProjectWatcher(root_path, debounce=debounce)
-            started = watcher.start()
-            if started:
+            if watcher.start():
                 self._watchers[norm_key] = watcher
                 return True
             return False
@@ -285,7 +278,6 @@ class WatcherManager:
             return norm_key in self._watchers
 
     def stop_all(self):
-        """Stops all active watchers on daemon termination."""
         with self._lock:
             for watcher in self._watchers.values():
                 watcher.stop()
@@ -293,4 +285,3 @@ class WatcherManager:
 
 
 atexit.register(lambda: WatcherManager.get_instance().stop_all())
-

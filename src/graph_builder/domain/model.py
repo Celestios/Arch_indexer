@@ -244,7 +244,9 @@ class GraphModel:
             node_size = base_size + min(conn_w * 0.5, 10)
 
             parent_cls_id = None
-            if ntype in (NodeType.METHOD, NodeType.CONSTRUCTOR, NodeType.FIELD):
+            if s.get("parent_symbol"):
+                parent_cls_id = f"sym:{s['parent_symbol']}"
+            elif ntype in (NodeType.METHOD, NodeType.CONSTRUCTOR, NodeType.FIELD):
                 f_classes = file_classes.get(sym_filepath, [])
                 candidates = [c for c in f_classes if s["symbol"].startswith(c["symbol"]) and s["symbol"] != c["symbol"]]
                 if candidates:
@@ -261,13 +263,13 @@ class GraphModel:
             if sym_filepath and line and end_line:
                 code_text = extract_code_slice(sym_filepath, line, end_line, project_root=self.project_root)
 
-            node_label = s["label"]
+            node_label = s.get("name") or s["label"]
             if (parent_cls_id or ntype in (NodeType.METHOD, NodeType.CONSTRUCTOR)) and "#" in node_label:
                 node_label = node_label.split("#")[-1]
-            if "." in node_label or "/" in node_label or "\\" in node_label:
+            if "." in node_label or "/" in node_label or "\\" in node_label or "::" in node_label:
                 has_parens = node_label.endswith("()") or node_label.endswith("().")
                 base = node_label[:-3] if node_label.endswith("().") else (node_label[:-2] if node_label.endswith("()") else node_label)
-                leaf = re.split(r"[/:\\.]", base)[-1]
+                leaf = re.split(r"[/:\\.]|::", base)[-1]
                 if "#" in leaf:
                     leaf = leaf.split("#")[-1]
                 node_label = (leaf + "()") if has_parens else leaf

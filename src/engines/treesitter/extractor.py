@@ -1,23 +1,31 @@
-"""Tree-sitter AST symbol declaration extractor."""
+"""Tree-sitter AST canonical symbol declaration extractor."""
 import hashlib
 import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
 import tree_sitter
 
 from engines.registry import LanguageRegistry
-from engines.treesitter.loader import detect_language, get_parser
 from engines.treesitter.annotations import extract_annotations
+from engines.treesitter.loader import detect_language, get_parser
 from engines.treesitter.metrics import calculate_metrics
+from utils.symbol_id import (
+    build_canonical_id,
+    format_dart_leaf_name,
+    format_rust_impl_scope,
+    normalize_symbol_path,
+    strip_rust_generics,
+)
 
 
 class SymbolDeclaration:
-    """Represents a symbol declaration extracted via Tree-sitter AST."""
+    """Represents a canonical symbol declaration extracted via Tree-sitter AST."""
 
     def __init__(
         self,
         name: str,
-        clean_symbol: str,
+        symbol: str,
         kind: str,
         filepath: str,
         start_line: int,
@@ -34,26 +42,9 @@ class SymbolDeclaration:
         loc: int = 1,
     ):
         self.name = name
-        if clean_symbol:
-            cs = re.sub(r"^[a-zA-Z]:[./\\]*", "", clean_symbol).replace("\\", "/")
-            for root_marker in ("/src/", "/lib/", "/app/", "/test/", "/tests/", ".src.", ".lib.", ".app.", ".test.", ".tests."):
-                if root_marker in cs:
-                    cs = cs[cs.rfind(root_marker) + len(root_marker):]
-                    break
-            for prefix in ("src/", "lib/", "app/", "test/", "tests/", "src.", "lib.", "app.", "test.", "tests."):
-                if cs.startswith(prefix):
-                    cs = cs[len(prefix):]
-                    break
-            cs = re.sub(r"\.+", ".", cs.lstrip("./\\").replace("/", ".")).strip(".")
-            clean_symbol = cs
-
-        self.clean_symbol = clean_symbol
-        self.symbol = clean_symbol
+        self.symbol = symbol
         self.kind = kind
-        norm_fp = str(filepath).replace("\\", "/")
-        if norm_fp.startswith("./"):
-            norm_fp = norm_fp[2:]
-        self.filepath = norm_fp
+        self.filepath = normalize_symbol_path(filepath) or filepath
         self.start_line = start_line
         self.start_col = start_col
         self.end_line = end_line
@@ -70,7 +61,7 @@ class SymbolDeclaration:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "symbol": self.symbol,
-            "clean_symbol": self.clean_symbol,
+            "name": self.name,
             "kind": self.kind,
             "filepath": self.filepath,
             "start_line": self.start_line,
@@ -86,22 +77,6 @@ class SymbolDeclaration:
             "nesting_depth": self.nesting_depth,
             "loc": self.loc,
         }
-
-
-def _derive_module_prefix(filepath: str) -> str:
-    p = re.sub(r"^[a-zA-Z]:/*", "", filepath.replace("\\", "/")).lstrip("/")
-    for root_marker in ("/src/", "/lib/", "/app/", "/test/", "/tests/"):
-        if root_marker in p:
-            p = p[p.rfind(root_marker) + 1:]
-            break
-    for prefix in ("src/", "lib/", "app/", "test/", "tests/"):
-        if p.startswith(prefix):
-            p = p[len(prefix):]
-            break
-    stem = (p.rsplit(".", 1)[0] if "." in p else p).replace("/", ".")
-    if stem.endswith(".__init__"):
-        stem = stem[:-9]
-    return re.sub(r"\.+", ".", stem).strip(".")
 
 
 def _extract_python_docstring(body_node: Optional[tree_sitter.Node], code_bytes: bytes) -> str:
@@ -144,10 +119,70 @@ def _extract_doc_comments(node: tree_sitter.Node, code_bytes: bytes) -> str:
     return "\n".join(comments)
 
 
+def _collect_local_rust_types(root: tree_sitter.Node, code_bytes: bytes) -> Set[Tuple[Tuple[str, ...], str]]:
+    """Pre-scans a Rust AST for locally declared types so cross-file impl blocks never fabricate ghost parents."""
+    declared: Set[Tuple[Tuple[str, ...], str]] = set()
+
+    def walk(node: tree_sitter.Node, scope: Tuple[str, ...]):
+        if node.type == "mod_item":
+            name_node = node.child_by_field_name("name")
+            body_node = node.child_by_field_name("body")
+            if name_node and body_node:
+                mod_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
+                walk(body_node, scope + (mod_name,))
+            return
+        if node.type in ("struct_item", "enum_item", "trait_item", "type_item"):
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                t_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
+                declared.add((scope, t_name))
+        for ch in node.children:
+            walk(ch, scope)
+
+    walk(root, ())
+    return declared
+
+
+def _extract_dart_constructor_name(
+    node: tree_sitter.Node,
+    code_bytes: bytes,
+    scope_chain: List[str],
+) -> Optional[str]:
+    """Extracts Dart constructor leaf name: 'new' for unnamed, or '<named>' for ClassName.<named>."""
+    ctor_node = node
+    if node.type != "constructor_signature":
+        for ch in node.children:
+            if ch.type == "constructor_signature":
+                ctor_node = ch
+                break
+
+    ident_parts: List[str] = []
+    for ch in ctor_node.children:
+        if ch.type == "identifier":
+            ident_parts.append(code_bytes[ch.start_byte:ch.end_byte].decode("utf-8", errors="replace"))
+        elif ch.type == "formal_parameter_list":
+            break
+
+    if not ident_parts:
+        name_node = ctor_node.child_by_field_name("name")
+        if name_node:
+            raw = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
+            ident_parts = [p for p in raw.split(".") if p]
+
+    if not ident_parts:
+        return None
+    if len(ident_parts) >= 2:
+        return ident_parts[-1]
+    single = ident_parts[0]
+    if scope_chain and single == scope_chain[-1]:
+        return "new"
+    return single
+
+
 def _build_declaration(
     node: tree_sitter.Node,
     name: str,
-    clean_symbol: str,
+    symbol: str,
     kind: str,
     filepath: str,
     signature: str,
@@ -156,21 +191,26 @@ def _build_declaration(
     code_bytes: bytes,
     parent_symbol: Optional[str],
     language: str,
+    end_point: Optional[Tuple[int, int]] = None,
 ) -> SymbolDeclaration:
     body_bytes = code_bytes[body_node.start_byte:body_node.end_byte] if body_node else b""
     b_hash = hashlib.sha256(body_bytes).hexdigest()[:16]
     annotations = extract_annotations(node, code_bytes, language)
-    metrics = calculate_metrics(node, code_bytes)
+    target_metric_node = body_node if body_node else node
+    metrics = calculate_metrics(target_metric_node, code_bytes)
+
+    end_row = (end_point[0] if end_point else node.end_point.row) + 1
+    end_col = end_point[1] if end_point else node.end_point.column
 
     return SymbolDeclaration(
         name=name,
-        clean_symbol=clean_symbol,
+        symbol=symbol,
         kind=kind,
         filepath=filepath,
         start_line=node.start_point.row + 1,
         start_col=node.start_point.column,
-        end_line=node.end_point.row + 1,
-        end_col=node.end_point.column,
+        end_line=end_row,
+        end_col=end_col,
         signature=signature,
         docstring=docstring,
         body_hash=b_hash,
@@ -186,7 +226,6 @@ def _extract_ast(
     root: tree_sitter.Node,
     code_bytes: bytes,
     filepath: str,
-    module_prefix: str,
     language: str,
 ) -> List[SymbolDeclaration]:
     symbols: List[SymbolDeclaration] = []
@@ -195,8 +234,15 @@ def _extract_ast(
     impl_types = spec.impl_node_types if spec and spec.impl_node_types else ()
     container_types = spec.container_node_types if spec and spec.container_node_types else ("Class", "Interface", "Struct", "Trait")
     has_doc_stmt = bool(spec and spec.docstring_node_type == "expression_statement")
+    norm_filepath = normalize_symbol_path(filepath) or filepath
+    local_rust_types = _collect_local_rust_types(root, code_bytes) if language == "rust" else set()
 
-    def visit(node: tree_sitter.Node, parent_scope: str, parent_clean: Optional[str]):
+    def visit(
+        node: tree_sitter.Node,
+        scope_chain: List[str],
+        parent_id: Optional[str],
+        body_override: Optional[tree_sitter.Node] = None,
+    ):
         actual_node = node
         if node.type in ("decorated_definition", "export_statement", "export_declaration"):
             for child in node.children:
@@ -206,15 +252,36 @@ def _extract_ast(
                     actual_node = child
                     break
 
+        # Rust impl_item handling: scope methods under Type or Type<Trait>; only set parent_symbol if Type is local
         if actual_node.type in impl_types:
             type_node = actual_node.child_by_field_name("type")
+            trait_node = actual_node.child_by_field_name("trait")
             body_node = actual_node.child_by_field_name("body")
             impl_name = code_bytes[type_node.start_byte:type_node.end_byte].decode("utf-8", errors="replace") if type_node else ""
-            clean_impl = f"{module_prefix}.{impl_name}" if impl_name else module_prefix
-            if body_node:
-                for child in body_node.children:
-                    visit(child, clean_impl, clean_impl)
+            trait_name = code_bytes[trait_node.start_byte:trait_node.end_byte].decode("utf-8", errors="replace") if trait_node else None
+
+            target_type = strip_rust_generics(impl_name)
+            scope_segment = format_rust_impl_scope(target_type, trait_name)
+            if target_type and (tuple(scope_chain), target_type) in local_rust_types:
+                impl_parent_id: Optional[str] = build_canonical_id(
+                    filepath=norm_filepath,
+                    scope_chain=scope_chain,
+                    name=target_type,
+                )
+            else:
+                impl_parent_id = None
+            if body_node and scope_segment:
+                _visit_children(body_node, scope_chain + [scope_segment], impl_parent_id)
             return
+
+        # Rust mod_item handling: preserve inline module hierarchy
+        if actual_node.type == "mod_item":
+            name_node = actual_node.child_by_field_name("name")
+            body_node = actual_node.child_by_field_name("body")
+            if name_node and body_node:
+                mod_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
+                _visit_children(body_node, scope_chain + [mod_name], parent_id)
+                return
 
         kind = node_kinds.get(actual_node.type)
         if not kind:
@@ -232,42 +299,81 @@ def _extract_ast(
                 kind = "Function"
 
         if kind:
-            name_node = actual_node.child_by_field_name("name")
-            if not name_node and actual_node.child_by_field_name("declarator"):
-                decl = actual_node.child_by_field_name("declarator")
-                while decl and decl.type in ("function_declarator", "pointer_declarator"):
-                    sub_decl = decl.child_by_field_name("declarator")
-                    if sub_decl:
-                        decl = sub_decl
-                    else:
-                        break
-                if decl and decl.type == "identifier":
-                    name_node = decl
-                elif decl:
-                    name_node = decl.child_by_field_name("declarator") or decl
+            dart_sub_kind = None
+            if actual_node.type == "getter_signature" or any(ch.type == "getter_signature" for ch in actual_node.children):
+                dart_sub_kind = "Getter"
+            elif actual_node.type == "setter_signature" or any(ch.type == "setter_signature" for ch in actual_node.children):
+                dart_sub_kind = "Setter"
+            elif actual_node.type == "constructor_signature" or any(ch.type == "constructor_signature" for ch in actual_node.children):
+                dart_sub_kind = "Constructor"
 
-            if not name_node:
+            item_name: Optional[str] = None
+            if dart_sub_kind == "Constructor":
+                kind = "Constructor"
+                item_name = _extract_dart_constructor_name(actual_node, code_bytes, scope_chain)
+            else:
+                name_node = actual_node.child_by_field_name("name")
+                if not name_node:
+                    for ch in actual_node.children:
+                        if ch.type in ("function_signature", "getter_signature", "setter_signature"):
+                            inner_name = ch.child_by_field_name("name")
+                            if inner_name:
+                                name_node = inner_name
+                                break
+                if not name_node and actual_node.child_by_field_name("declarator"):
+                    decl = actual_node.child_by_field_name("declarator")
+                    while decl and decl.type in ("function_declarator", "pointer_declarator"):
+                        sub_decl = decl.child_by_field_name("declarator")
+                        if sub_decl:
+                            decl = sub_decl
+                        else:
+                            break
+                    if decl and decl.type == "identifier":
+                        name_node = decl
+                    elif decl:
+                        name_node = decl.child_by_field_name("declarator") or decl
+
+                if not name_node:
+                    for ch in actual_node.children:
+                        if ch.type in ("identifier", "type_identifier"):
+                            name_node = ch
+                            break
+
+                if name_node:
+                    item_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
+
+            body_node = body_override if body_override is not None else actual_node.child_by_field_name("body")
+            if body_node is None and actual_node.type in ("extension_declaration", "mixin_declaration"):
                 for ch in actual_node.children:
-                    if ch.type in ("identifier", "type_identifier"):
-                        name_node = ch
+                    if ch.type in ("extension_body", "class_body"):
+                        body_node = ch
                         break
 
-            body_node = actual_node.child_by_field_name("body")
-            if name_node:
-                item_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8", errors="replace")
-                if kind in ("Function", "Method"):
+            end_point = body_node.end_point if body_override is not None else None
+            if item_name:
+                if dart_sub_kind == "Getter":
+                    kind = "Getter"
+                    item_name = format_dart_leaf_name(item_name, "Getter")
+                elif dart_sub_kind == "Setter":
+                    kind = "Setter"
+                    item_name = format_dart_leaf_name(item_name, "Setter")
+                elif dart_sub_kind == "Constructor":
+                    item_name = format_dart_leaf_name(item_name, "Constructor")
+                elif kind in ("Function", "Method"):
                     if item_name == "__init__":
                         kind = "Constructor"
-                    elif parent_clean:
+                    elif parent_id or (language == "rust" and scope_chain):
                         kind = "Method"
                     else:
                         kind = "Function"
 
-                is_callable = kind in ("Function", "Method", "Constructor")
-                if is_callable:
-                    clean_sym = f"{parent_scope}.{item_name}()" if parent_scope else f"{item_name}()"
-                else:
-                    clean_sym = f"{parent_scope}.{item_name}" if parent_scope else item_name
+                canonical_id = build_canonical_id(
+                    filepath=norm_filepath,
+                    scope_chain=scope_chain,
+                    name=item_name,
+                )
+
+                is_callable = kind in ("Function", "Method", "Constructor", "Getter", "Setter")
 
                 sig_bytes = (
                     code_bytes[actual_node.start_byte:body_node.start_byte].strip()
@@ -285,28 +391,53 @@ def _extract_ast(
                     _build_declaration(
                         node=actual_node,
                         name=item_name,
-                        clean_symbol=clean_sym,
+                        symbol=canonical_id,
                         kind=kind,
-                        filepath=filepath,
+                        filepath=norm_filepath,
                         signature=sig,
                         docstring=doc,
                         body_node=body_node,
                         code_bytes=code_bytes,
-                        parent_symbol=parent_clean,
+                        parent_symbol=parent_id,
                         language=language,
+                        end_point=end_point,
                     )
                 )
 
                 if body_node and kind in container_types:
-                    scope_prefix = clean_sym[:-2] if (is_callable and clean_sym.endswith("()")) else clean_sym
-                    for child in body_node.children:
-                        visit(child, scope_prefix, clean_sym)
+                    _visit_children(body_node, scope_chain + [item_name], canonical_id)
+                    return
+                if is_callable:
                     return
 
-        for child in node.children:
-            visit(child, parent_scope, parent_clean)
+        _visit_children(node, scope_chain, parent_id)
 
-    visit(root, module_prefix, None)
+    def _visit_children(parent: tree_sitter.Node, s_chain: List[str], p_id: Optional[str]):
+        children = parent.children
+        i = 0
+        n_children = len(children)
+        while i < n_children:
+            ch = children[i]
+            if ch.type in ("method_signature", "function_signature", "constructor_signature", "getter_signature", "setter_signature"):
+                next_body = None
+                j = i + 1
+                while j < n_children:
+                    next_ch = children[j]
+                    if next_ch.type in ("comment", "line_comment", "block_comment"):
+                        j += 1
+                        continue
+                    if next_ch.type == "function_body":
+                        next_body = next_ch
+                    break
+                if next_body is not None:
+                    visit(ch, s_chain, p_id, body_override=next_body)
+                    i = j + 1
+                    continue
+
+            visit(ch, s_chain, p_id)
+            i += 1
+
+    visit(root, [], None)
     return symbols
 
 
@@ -315,7 +446,7 @@ def extract_symbols_from_file(
     source: Optional[Union[str, bytes]] = None,
     project_root: Optional[Path] = None,
 ) -> List[SymbolDeclaration]:
-    """Extracts symbol declarations from a source file."""
+    """Extracts canonical symbol declarations from a source file."""
     fp = Path(filepath)
     if project_root:
         try:
@@ -348,7 +479,7 @@ def extract_symbols_from_file(
     if not tree or not tree.root_node:
         return []
 
-    return _extract_ast(tree.root_node, code_bytes, norm_fp, _derive_module_prefix(norm_fp), language)
+    return _extract_ast(tree.root_node, code_bytes, norm_fp, language)
 
 
 _DI_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
@@ -372,7 +503,6 @@ def extract_di_edges(
     """
     Declaratively scans AST call expressions matching LanguageSpec.di_call_patterns
     and returns raw DI dependency records: {source, target_name, call_line}.
-    Returns [] immediately for languages without configured di_call_patterns.
     """
     fp = Path(filepath)
     language = detect_language(fp)
@@ -402,7 +532,6 @@ def extract_di_edges(
     decls = declarations if declarations is not None else extract_symbols_from_file(fp, code_bytes, project_root=project_root)
     if not decls:
         return []
-    # Narrowest span first so inner methods win over enclosing classes
     sorted_decls = sorted(decls, key=lambda d: (d.end_line - d.start_line, d.start_line))
 
     patterns = spec.di_call_patterns
@@ -415,8 +544,12 @@ def extract_di_edges(
     seen = set()
 
     def visit(node: tree_sitter.Node):
-        # Match call/selector/expression nodes without hardcoding language-specific grammar names
-        if "call" in node.type or "selector" in node.type or node.type in ("expression_statement", "initialized_variable_definition", "return_statement", "assignment_expression"):
+        if "call" in node.type or "selector" in node.type or node.type in (
+            "expression_statement",
+            "initialized_variable_definition",
+            "return_statement",
+            "assignment_expression",
+        ):
             text = code_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
             for pat, regex in pattern_regexes:
                 if pat not in text:
@@ -431,7 +564,6 @@ def extract_di_edges(
                             target_name = m_type.group(1)
                         else:
                             first_arg = arg_body.split(",", 1)[0].strip()
-                            # Strip trailing selector like .notifier or .future
                             base_arg = first_arg.split(".", 1)[0].strip()
                             m_ident = _DI_IDENT_RE.search(base_arg)
                             if m_ident:

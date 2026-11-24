@@ -1,31 +1,41 @@
 import json
 import logging
-from typing import Dict, List, Any, Optional, Tuple
-from db.base import (
-    BaseRepository,
-    UPSERT_SYNTACTIC_SYMBOL_SQL,
-    UPSERT_SYNTACTIC_SYMBOLS_VECTORIZED_SQL,
-    UPSERT_SEMANTIC_SYMBOL_SQL,
-    UPSERT_SEMANTIC_SYMBOLS_VECTORIZED_SQL,
-    UPSERT_EDGE_SQL,
-    UPSERT_EDGES_VECTORIZED_SQL,
-    UPSERT_OCCURRENCES_VECTORIZED_SQL,
-    normalize_path,
-)
-from utils.helpers import demangle_scip_symbol
+from contextlib import contextmanager
+from typing import Any, Dict, List, Optional, Tuple
+
+from db.base import BaseRepository, normalize_path
+from utils.helpers import is_auxiliary_path
+from utils.symbol_id import canonical_display_name, parse_canonical_id
 
 logger = logging.getLogger(__name__)
 
 _SYMBOL_COLS = """
-    symbol, filepath, kind, signature, docstring, body_hash, connection_weight,
-    parent_symbol, classification, change_count, clean_symbol,
+    symbol, name, scip_id, filepath, kind, signature, docstring, body_hash, connection_weight,
+    parent_symbol, classification, change_count,
     start_line, start_col, end_line, end_col
 """
+
+_SYMBOL_STAGING_HEADERS = [
+    "symbol",
+    "name",
+    "scip_id",
+    "filepath",
+    "kind",
+    "signature",
+    "docstring",
+    "body_hash",
+    "connection_weight",
+    "parent_symbol",
+    "start_line",
+    "start_col",
+    "end_line",
+    "end_col",
+]
 
 
 class GraphStore(BaseRepository):
     """
-    Domain store owning symbols, edges, and reference occurrences.
+    Domain store owning canonical symbols, edges, and reference occurrences.
     Enforces POSIX path normalization on ingress and disjoint Tier-1/Tier-2 symbol upserts.
     """
 
@@ -36,30 +46,76 @@ class GraphStore(BaseRepository):
         res = dict(row)
         if res.get("filepath"):
             res["filepath"] = normalize_path(res["filepath"])
-        if not res.get("clean_symbol") and res.get("symbol"):
-            res["clean_symbol"] = demangle_scip_symbol(res["symbol"])
+        if not res.get("name") and res.get("symbol"):
+            res["name"] = parse_canonical_id(res["symbol"])[2] or res["symbol"]
         return res
 
-    @staticmethod
-    def _build_symbol_columns(symbols_list: List[Dict[str, Any]]) -> tuple:
-        syms, cleans, fps, kinds = [], [], [], []
-        sigs, docs, hashes, weights = [], [], [], []
-        parents, sl, sc, el, ec = [], [], [], [], []
-        for sym in symbols_list:
-            syms.append(sym["symbol"])
-            cleans.append(sym.get("clean_symbol") or demangle_scip_symbol(sym["symbol"]))
-            fps.append(normalize_path(sym.get("filepath")) if sym.get("filepath") else None)
-            kinds.append(sym["kind"])
-            sigs.append(sym.get("signature"))
-            docs.append(sym.get("docstring"))
-            hashes.append(sym.get("body_hash"))
-            weights.append(int(sym.get("connection_weight", 0)))
-            parents.append(sym.get("parent_symbol"))
-            sl.append(sym.get("start_line"))
-            sc.append(sym.get("start_col"))
-            el.append(sym.get("end_line"))
-            ec.append(sym.get("end_col"))
-        return (syms, cleans, fps, kinds, sigs, docs, hashes, weights, parents, sl, sc, el, ec)
+    @contextmanager
+    def _stage_symbols(self, temp_table: str, symbols_list: List[Dict[str, Any]]):
+        """Shared CSV staging pipeline for Tier-1 syntactic and Tier-2 semantic symbol upserts."""
+        rows = [
+            [
+                s["symbol"],
+                s.get("name") or parse_canonical_id(s["symbol"])[2] or s["symbol"],
+                s.get("scip_id"),
+                normalize_path(s.get("filepath")) if s.get("filepath") else None,
+                s.get("kind", "UnspecifiedKind"),
+                s.get("signature") or "",
+                s.get("docstring") or "",
+                s.get("body_hash") or "",
+                int(s.get("connection_weight", 0)),
+                s.get("parent_symbol"),
+                s.get("start_line"),
+                s.get("start_col"),
+                s.get("end_line"),
+                s.get("end_col"),
+            ]
+            for s in symbols_list
+        ]
+        with self._csv_staging(_SYMBOL_STAGING_HEADERS, rows) as csv_path:
+            with self._db_conn.session() as conn:
+                conn.execute(
+                    f"""
+                    CREATE TEMP TABLE IF NOT EXISTS {temp_table} (
+                        symbol VARCHAR, name VARCHAR, scip_id VARCHAR, filepath VARCHAR, kind VARCHAR,
+                        signature TEXT, docstring TEXT, body_hash VARCHAR, connection_weight INTEGER,
+                        parent_symbol VARCHAR, start_line INTEGER, start_col INTEGER, end_line INTEGER, end_col INTEGER
+                    )
+                    """
+                )
+                conn.execute(f"DELETE FROM {temp_table}")
+                conn.execute(
+                    f"""
+                    INSERT INTO {temp_table} SELECT * FROM read_csv(
+                        '{csv_path}',
+                        header=true,
+                        delim=',',
+                        quote='"',
+                        escape='"',
+                        nullstr='',
+                        columns={{
+                            'symbol': 'VARCHAR',
+                            'name': 'VARCHAR',
+                            'scip_id': 'VARCHAR',
+                            'filepath': 'VARCHAR',
+                            'kind': 'VARCHAR',
+                            'signature': 'VARCHAR',
+                            'docstring': 'VARCHAR',
+                            'body_hash': 'VARCHAR',
+                            'connection_weight': 'INTEGER',
+                            'parent_symbol': 'VARCHAR',
+                            'start_line': 'INTEGER',
+                            'start_col': 'INTEGER',
+                            'end_line': 'INTEGER',
+                            'end_col': 'INTEGER'
+                        }}
+                    )
+                    """
+                )
+                try:
+                    yield conn
+                finally:
+                    conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
 
     # ------------------ Symbols Domain ------------------
 
@@ -67,187 +123,150 @@ class GraphStore(BaseRepository):
         """Tier-1 (Tree-sitter) bulk upsert owning syntactic columns and declaration coordinates."""
         if not symbols_list:
             return
-        headers = [
-            'symbol', 'clean_symbol', 'filepath', 'kind', 'signature', 'docstring',
-            'body_hash', 'connection_weight', 'parent_symbol', 'start_line', 'start_col', 'end_line', 'end_col'
-        ]
-        rows = [
-            [
-                s["symbol"],
-                s.get("clean_symbol") or demangle_scip_symbol(s["symbol"]),
-                normalize_path(s.get("filepath")) if s.get("filepath") else None,
-                s["kind"],
-                s.get("signature") or "",
-                s.get("docstring") or "",
-                s.get("body_hash") or "",
-                int(s.get("connection_weight", 0)),
-                s.get("parent_symbol"),
-                s.get("start_line"),
-                s.get("start_col"),
-                s.get("end_line"),
-                s.get("end_col"),
-            ]
-            for s in symbols_list
-        ]
-        with self._csv_staging(headers, rows) as csv_path:
-            with self._db_conn.session() as conn:
-                conn.execute("""
-                    CREATE TEMP TABLE IF NOT EXISTS _stg_syn_symbols (
-                        symbol VARCHAR, clean_symbol VARCHAR, filepath VARCHAR, kind VARCHAR,
-                        signature TEXT, docstring TEXT, body_hash VARCHAR, connection_weight INTEGER,
-                        parent_symbol VARCHAR, start_line INTEGER, start_col INTEGER, end_line INTEGER, end_col INTEGER
-                    )
-                """)
-                conn.execute("DELETE FROM _stg_syn_symbols")
-                conn.execute(f"""
-                    INSERT INTO _stg_syn_symbols SELECT * FROM read_csv(
-                        '{csv_path}',
-                        header=true,
-                        delim=',',
-                        quote='"',
-                        escape='"',
-                        nullstr='',
-                        columns={{
-                            'symbol': 'VARCHAR',
-                            'clean_symbol': 'VARCHAR',
-                            'filepath': 'VARCHAR',
-                            'kind': 'VARCHAR',
-                            'signature': 'VARCHAR',
-                            'docstring': 'VARCHAR',
-                            'body_hash': 'VARCHAR',
-                            'connection_weight': 'INTEGER',
-                            'parent_symbol': 'VARCHAR',
-                            'start_line': 'INTEGER',
-                            'start_col': 'INTEGER',
-                            'end_line': 'INTEGER',
-                            'end_col': 'INTEGER'
-                        }}
-                    )
-                """)
-
-                conn.execute("""
-                    UPDATE symbols
-                    SET clean_symbol = COALESCE(NULLIF(stg.clean_symbol, ''), symbols.clean_symbol),
-                        filepath = COALESCE(stg.filepath, symbols.filepath),
-                        kind = CASE WHEN stg.kind IS NOT NULL AND stg.kind <> 'UnspecifiedKind' THEN stg.kind ELSE symbols.kind END,
-                        signature = CASE WHEN stg.signature IS NOT NULL AND stg.signature <> '' THEN stg.signature ELSE symbols.signature END,
-                        docstring = CASE WHEN stg.docstring IS NOT NULL AND stg.docstring <> '' THEN stg.docstring ELSE symbols.docstring END,
-                        change_count = CASE WHEN symbols.body_hash IS NOT NULL AND stg.body_hash IS NOT NULL AND symbols.body_hash <> stg.body_hash THEN COALESCE(symbols.change_count, 1) + 1 ELSE COALESCE(symbols.change_count, 1) END,
-                        last_modified = CASE WHEN symbols.body_hash IS NOT NULL AND stg.body_hash IS NOT NULL AND symbols.body_hash <> stg.body_hash THEN now() ELSE symbols.last_modified END,
-                        body_hash = COALESCE(stg.body_hash, symbols.body_hash),
-                        parent_symbol = COALESCE(stg.parent_symbol, symbols.parent_symbol),
-                        start_line = COALESCE(stg.start_line, symbols.start_line),
-                        start_col = COALESCE(stg.start_col, symbols.start_col),
-                        end_line = COALESCE(stg.end_line, symbols.end_line),
-                        end_col = COALESCE(stg.end_col, symbols.end_col)
-                    FROM _stg_syn_symbols stg
-                    WHERE symbols.symbol = stg.symbol
-                """)
-
-                conn.execute("""
-                    INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, start_line, start_col, end_line, end_col)
-                    SELECT DISTINCT ON (symbol)
-                        symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, start_line, start_col, end_line, end_col
-                    FROM _stg_syn_symbols stg
-                    WHERE NOT EXISTS (SELECT 1 FROM symbols s WHERE s.symbol = stg.symbol)
-                """)
-                conn.execute("DROP TABLE IF EXISTS _stg_syn_symbols")
+        with self._stage_symbols("_stg_syn_symbols", symbols_list) as conn:
+            conn.execute(
+                """
+                UPDATE symbols
+                SET name = COALESCE(NULLIF(stg.name, ''), symbols.name),
+                    scip_id = COALESCE(stg.scip_id, symbols.scip_id),
+                    filepath = COALESCE(stg.filepath, symbols.filepath),
+                    kind = CASE WHEN stg.kind IS NOT NULL AND stg.kind <> 'UnspecifiedKind' THEN stg.kind ELSE symbols.kind END,
+                    signature = CASE WHEN stg.signature IS NOT NULL AND stg.signature <> '' THEN stg.signature ELSE symbols.signature END,
+                    docstring = CASE WHEN stg.docstring IS NOT NULL AND stg.docstring <> '' THEN stg.docstring ELSE symbols.docstring END,
+                    change_count = CASE
+                        WHEN symbols.body_hash IS NOT NULL AND stg.body_hash IS NOT NULL AND symbols.body_hash <> stg.body_hash
+                        THEN COALESCE(symbols.change_count, 1) + 1
+                        ELSE COALESCE(symbols.change_count, 1)
+                    END,
+                    last_modified = CASE
+                        WHEN symbols.body_hash IS NOT NULL AND stg.body_hash IS NOT NULL AND symbols.body_hash <> stg.body_hash
+                        THEN now()
+                        ELSE symbols.last_modified
+                    END,
+                    body_hash = COALESCE(stg.body_hash, symbols.body_hash),
+                    parent_symbol = COALESCE(NULLIF(stg.parent_symbol, ''), symbols.parent_symbol),
+                    start_line = COALESCE(stg.start_line, symbols.start_line),
+                    start_col = COALESCE(stg.start_col, symbols.start_col),
+                    end_line = COALESCE(stg.end_line, symbols.end_line),
+                    end_col = COALESCE(stg.end_col, symbols.end_col)
+                FROM _stg_syn_symbols stg
+                WHERE symbols.symbol = stg.symbol
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO symbols (symbol, name, scip_id, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, start_line, start_col, end_line, end_col)
+                SELECT DISTINCT ON (symbol)
+                    symbol, name, scip_id, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, start_line, start_col, end_line, end_col
+                FROM _stg_syn_symbols stg
+                WHERE NOT EXISTS (SELECT 1 FROM symbols s WHERE s.symbol = stg.symbol)
+                """
+            )
 
     def upsert_semantic_symbols(self, symbols_list: List[Dict[str, Any]]):
-        """Tier-2 (SCIP) bulk upsert preserving Tier-1 syntactic columns and populating SCIP-only symbols."""
+        """Tier-2 (SCIP) bulk upsert owning semantic identity (scip_id, canonical parent_symbol) and filling absent syntactic fields."""
         if not symbols_list:
             return
-        headers = [
-            'symbol', 'clean_symbol', 'filepath', 'kind', 'signature', 'docstring',
-            'body_hash', 'connection_weight', 'parent_symbol', 'start_line', 'start_col', 'end_line', 'end_col'
-        ]
-        rows = [
-            [
-                s["symbol"],
-                s.get("clean_symbol") or demangle_scip_symbol(s["symbol"]),
-                normalize_path(s.get("filepath")) if s.get("filepath") else None,
-                s.get("kind", "Unknown"),
-                s.get("signature") or "",
-                s.get("docstring") or "",
-                s.get("body_hash") or "",
-                int(s.get("connection_weight", 0)),
-                s.get("parent_symbol"),
-                s.get("start_line"),
-                s.get("start_col"),
-                s.get("end_line"),
-                s.get("end_col"),
-            ]
-            for s in symbols_list
-        ]
-        with self._csv_staging(headers, rows) as csv_path:
-            with self._db_conn.session() as conn:
-                conn.execute("""
-                    CREATE TEMP TABLE IF NOT EXISTS _stg_sem_symbols (
-                        symbol VARCHAR, clean_symbol VARCHAR, filepath VARCHAR, kind VARCHAR,
-                        signature TEXT, docstring TEXT, body_hash VARCHAR, connection_weight INTEGER,
-                        parent_symbol VARCHAR, start_line INTEGER, start_col INTEGER, end_line INTEGER, end_col INTEGER
-                    )
-                """)
-                conn.execute("DELETE FROM _stg_sem_symbols")
-                conn.execute(f"""
-                    INSERT INTO _stg_sem_symbols SELECT * FROM read_csv(
-                        '{csv_path}',
-                        header=true,
-                        delim=',',
-                        quote='"',
-                        escape='"',
-                        nullstr='',
-                        columns={{
-                            'symbol': 'VARCHAR',
-                            'clean_symbol': 'VARCHAR',
-                            'filepath': 'VARCHAR',
-                            'kind': 'VARCHAR',
-                            'signature': 'VARCHAR',
-                            'docstring': 'VARCHAR',
-                            'body_hash': 'VARCHAR',
-                            'connection_weight': 'INTEGER',
-                            'parent_symbol': 'VARCHAR',
-                            'start_line': 'INTEGER',
-                            'start_col': 'INTEGER',
-                            'end_line': 'INTEGER',
-                            'end_col': 'INTEGER'
-                        }}
-                    )
-                """)
-
-                conn.execute("""
-                    UPDATE symbols
-                    SET clean_symbol = COALESCE(NULLIF(symbols.clean_symbol, ''), stg.clean_symbol),
-                        filepath = COALESCE(symbols.filepath, stg.filepath),
-                        kind = CASE WHEN symbols.kind IS NOT NULL AND symbols.kind <> 'UnspecifiedKind' THEN symbols.kind ELSE stg.kind END,
-                        signature = CASE WHEN symbols.signature IS NOT NULL AND symbols.signature <> '' THEN symbols.signature ELSE stg.signature END,
-                        docstring = CASE WHEN symbols.docstring IS NOT NULL AND symbols.docstring <> '' THEN symbols.docstring ELSE stg.docstring END,
-                        body_hash = COALESCE(symbols.body_hash, stg.body_hash),
-                        parent_symbol = COALESCE(symbols.parent_symbol, stg.parent_symbol),
-                        start_line = COALESCE(symbols.start_line, stg.start_line),
-                        start_col = COALESCE(symbols.start_col, stg.start_col),
-                        end_line = COALESCE(symbols.end_line, stg.end_line),
-                        end_col = COALESCE(symbols.end_col, stg.end_col)
-                    FROM _stg_sem_symbols stg
-                    WHERE symbols.symbol = stg.symbol
-                """)
-
-                conn.execute("""
-                    INSERT INTO symbols (symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, start_line, start_col, end_line, end_col)
-                    SELECT DISTINCT ON (symbol)
-                        symbol, clean_symbol, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, start_line, start_col, end_line, end_col
-                    FROM _stg_sem_symbols stg
-                    WHERE NOT EXISTS (SELECT 1 FROM symbols s WHERE s.symbol = stg.symbol)
-                """)
-                conn.execute("DROP TABLE IF EXISTS _stg_sem_symbols")
+        with self._stage_symbols("_stg_sem_symbols", symbols_list) as conn:
+            conn.execute(
+                """
+                UPDATE symbols
+                SET name = COALESCE(NULLIF(stg.name, ''), symbols.name),
+                    scip_id = COALESCE(stg.scip_id, symbols.scip_id),
+                    filepath = COALESCE(symbols.filepath, stg.filepath),
+                    kind = CASE WHEN symbols.kind IS NOT NULL AND symbols.kind <> 'UnspecifiedKind' THEN symbols.kind ELSE stg.kind END,
+                    signature = CASE WHEN symbols.signature IS NOT NULL AND symbols.signature <> '' THEN symbols.signature ELSE stg.signature END,
+                    docstring = CASE WHEN symbols.docstring IS NOT NULL AND symbols.docstring <> '' THEN symbols.docstring ELSE stg.docstring END,
+                    body_hash = COALESCE(symbols.body_hash, stg.body_hash),
+                    parent_symbol = COALESCE(NULLIF(stg.parent_symbol, ''), symbols.parent_symbol),
+                    start_line = COALESCE(symbols.start_line, stg.start_line),
+                    start_col = COALESCE(symbols.start_col, stg.start_col),
+                    end_line = COALESCE(symbols.end_line, stg.end_line),
+                    end_col = COALESCE(symbols.end_col, stg.end_col)
+                FROM _stg_sem_symbols stg
+                WHERE symbols.symbol = stg.symbol
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO symbols (symbol, name, scip_id, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, start_line, start_col, end_line, end_col)
+                SELECT DISTINCT ON (symbol)
+                    symbol, name, scip_id, filepath, kind, signature, docstring, body_hash, connection_weight, parent_symbol, start_line, start_col, end_line, end_col
+                FROM _stg_sem_symbols stg
+                WHERE NOT EXISTS (SELECT 1 FROM symbols s WHERE s.symbol = stg.symbol)
+                """
+            )
 
     def get_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Retrieves details of a registered symbol declaration by ID or clean_symbol."""
+        """Retrieves a registered symbol declaration by exact canonical primary key."""
         row = self._fetch_one(
-            f"SELECT {_SYMBOL_COLS} FROM symbols WHERE symbol = ? OR clean_symbol = ?",
-            (symbol, symbol),
+            """
+            SELECT s.symbol, s.name, s.scip_id, s.filepath, s.kind, s.signature, s.docstring, s.body_hash, s.connection_weight,
+                   s.parent_symbol, s.classification, s.change_count,
+                   COALESCE(s.start_line, o.start_line) AS start_line,
+                   COALESCE(s.start_col, o.start_col) AS start_col,
+                   COALESCE(s.end_line, o.end_line) AS end_line,
+                   COALESCE(s.end_col, o.end_col) AS end_col
+            FROM symbols s
+            LEFT JOIN (
+                SELECT symbol, start_line, start_col, end_line, end_col
+                FROM occurrences
+                WHERE (role & 1) = 1
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY start_line ASC) = 1
+            ) o ON s.symbol = o.symbol
+            WHERE s.symbol = ?
+            """,
+            (symbol,),
         )
         return self._format_symbol_dict(row)
+
+    def resolve_symbol(self, target: str) -> Optional[Dict[str, Any]]:
+        """Resolves a canonical ID, qualified scope::name, or leaf name to a single symbol dict."""
+        target_clean = target.strip()
+        if not target_clean:
+            return None
+
+        exact = self.get_symbol(target_clean)
+        if exact:
+            return exact
+
+        t = target_clean[:-2] if target_clean.endswith("()") else target_clean
+        patterns = [t]
+        if "::" in t:
+            parts = [p for p in t.split("::") if p]
+            if parts:
+                patterns.append(parts[-1])
+        elif "." in t:
+            parts = [p for p in t.split(".") if p]
+            if parts:
+                patterns.append(parts[-1])
+
+        for pattern in patterns:
+            raw_cands = self.search_symbols(pattern, limit=50)
+            candidates = [
+                s for s in raw_cands
+                if not s["symbol"].startswith("local ")
+                and s.get("kind") != "Parameter"
+            ]
+            if candidates:
+                def _score(s: Dict[str, Any]) -> Tuple[int, int, int, str]:
+                    sid = s["symbol"]
+                    leaf = s.get("name") or parse_canonical_id(sid)[2]
+                    disp = canonical_display_name(sid, leaf)
+                    is_aux = is_auxiliary_path(s.get("filepath"))
+                    is_exact = (
+                        sid == target_clean
+                        or disp == t
+                        or leaf == t
+                        or leaf == pattern
+                        or sid.endswith("::" + t)
+                    )
+                    return (0 if is_exact else 1, 1 if is_aux else 0, len(sid), sid)
+
+                candidates.sort(key=_score)
+                return candidates[0]
+
+        return None
 
     def get_symbols_for_files(self, filepaths: List[str]) -> List[Dict[str, Any]]:
         """Retrieves all symbols declared across the given filepaths."""
@@ -263,11 +282,26 @@ class GraphStore(BaseRepository):
         return [self._format_symbol_dict(r) for r in rows if r]
 
     def get_symbols_by_ids(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Batch-fetches symbol records keyed by symbol ID."""
+        """Batch-fetches symbol records keyed by canonical symbol ID."""
         if not symbols:
             return {}
         rows = self._fetch_all(
-            f"SELECT {_SYMBOL_COLS} FROM symbols WHERE symbol IN (SELECT UNNEST(?::VARCHAR[]))",
+            """
+            SELECT s.symbol, s.name, s.scip_id, s.filepath, s.kind, s.signature, s.docstring, s.body_hash, s.connection_weight,
+                   s.parent_symbol, s.classification, s.change_count,
+                   COALESCE(s.start_line, o.start_line) AS start_line,
+                   COALESCE(s.start_col, o.start_col) AS start_col,
+                   COALESCE(s.end_line, o.end_line) AS end_line,
+                   COALESCE(s.end_col, o.end_col) AS end_col
+            FROM symbols s
+            LEFT JOIN (
+                SELECT symbol, start_line, start_col, end_line, end_col
+                FROM occurrences
+                WHERE (role & 1) = 1
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY start_line ASC) = 1
+            ) o ON s.symbol = o.symbol
+            WHERE s.symbol IN (SELECT UNNEST(?::VARCHAR[]))
+            """,
             (list(symbols),),
         )
         return {r["symbol"]: self._format_symbol_dict(r) for r in rows if r}
@@ -277,23 +311,27 @@ class GraphStore(BaseRepository):
         rows = self._fetch_all(f"SELECT {_SYMBOL_COLS} FROM symbols")
         return [self._format_symbol_dict(r) for r in rows if r]
 
+    def get_scip_id_map(self) -> Dict[str, str]:
+        """Returns mapping of {scip_id: symbol} for all indexed rows with non-null scip_id."""
+        rows = self._fetch_all("SELECT scip_id, symbol FROM symbols WHERE scip_id IS NOT NULL")
+        return {r["scip_id"]: r["symbol"] for r in rows if r.get("scip_id")}
+
     def get_member_symbols(self, parent_symbol: str) -> List[Dict[str, Any]]:
-        """Retrieves member methods and constructors belonging to a class symbol."""
-        prefix = parent_symbol if parent_symbol.endswith("#") else parent_symbol + "#"
+        """Retrieves member methods, fields, and constructors belonging to a canonical parent symbol."""
+        prefix = parent_symbol + "::"
         return self._fetch_all(
-            """SELECT symbol, kind, signature, docstring FROM symbols
-               WHERE parent_symbol = ?
-                  OR (symbol LIKE ? AND (kind IN ('Method', 'Constructor') OR symbol LIKE '%().'))
+            """SELECT symbol, name, kind, signature, docstring FROM symbols
+               WHERE parent_symbol = ? OR starts_with(symbol, ?)
                ORDER BY symbol""",
-            (parent_symbol, prefix + "%"),
+            (parent_symbol, prefix),
         )
 
     def search_symbols(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Case-insensitive substring search over clean_symbol and symbol."""
+        """Case-insensitive substring search over name and canonical symbol ID."""
         pattern = f"%{query}%"
         rows = self._fetch_all(
             f"""SELECT {_SYMBOL_COLS} FROM symbols
-                WHERE LOWER(clean_symbol) LIKE LOWER(?) OR LOWER(symbol) LIKE LOWER(?)
+                WHERE LOWER(name) LIKE LOWER(?) OR LOWER(symbol) LIKE LOWER(?)
                 LIMIT ?""",
             (pattern, pattern, limit),
         )
@@ -319,7 +357,8 @@ class GraphStore(BaseRepository):
     def recalculate_connection_weights(self):
         """Recomputes connection_weight for each symbol from incoming and outgoing edge counts."""
         self._execute("UPDATE symbols SET connection_weight = 0")
-        self._execute("""
+        self._execute(
+            """
             UPDATE symbols
             SET connection_weight = COALESCE(e_in.cnt, 0) + COALESCE(e_out.cnt, 0)
             FROM (
@@ -328,7 +367,8 @@ class GraphStore(BaseRepository):
                 SELECT source AS sym, COUNT(*) AS cnt FROM edges GROUP BY source
             ) e_out ON e_in.sym = e_out.sym
             WHERE symbols.symbol = COALESCE(e_in.sym, e_out.sym)
-        """)
+            """
+        )
 
     def delete_symbols(
         self,
@@ -350,7 +390,7 @@ class GraphStore(BaseRepository):
         """Bulk upsert of edges via CSV staging and set-based update/insert."""
         if not edges_list:
             return
-        headers = ['source', 'target', 'relation', 'weight', 'call_line']
+        headers = ["source", "target", "relation", "weight", "call_line"]
         rows = [
             [
                 e["source"],
@@ -363,13 +403,16 @@ class GraphStore(BaseRepository):
         ]
         with self._csv_staging(headers, rows) as csv_path:
             with self._db_conn.session() as conn:
-                conn.execute("""
+                conn.execute(
+                    """
                     CREATE TEMP TABLE IF NOT EXISTS _stg_edges (
                         source VARCHAR, target VARCHAR, relation VARCHAR, weight FLOAT, call_line INTEGER
                     )
-                """)
+                    """
+                )
                 conn.execute("DELETE FROM _stg_edges")
-                conn.execute(f"""
+                conn.execute(
+                    f"""
                     INSERT INTO _stg_edges SELECT * FROM read_csv(
                         '{csv_path}',
                         header=true,
@@ -385,9 +428,10 @@ class GraphStore(BaseRepository):
                             'call_line': 'INTEGER'
                         }}
                     )
-                """)
-
-                conn.execute("""
+                    """
+                )
+                conn.execute(
+                    """
                     UPDATE edges
                     SET weight = stg.weight,
                         call_line = COALESCE(stg.call_line, edges.call_line)
@@ -396,9 +440,10 @@ class GraphStore(BaseRepository):
                         FROM _stg_edges
                     ) stg
                     WHERE edges.source = stg.source AND edges.target = stg.target AND edges.relation = stg.relation
-                """)
-
-                conn.execute("""
+                    """
+                )
+                conn.execute(
+                    """
                     INSERT INTO edges (source, target, relation, weight, call_line)
                     SELECT DISTINCT ON (source, target, relation) source, target, relation, weight, call_line
                     FROM _stg_edges stg
@@ -406,23 +451,30 @@ class GraphStore(BaseRepository):
                         SELECT 1 FROM edges e
                         WHERE e.source = stg.source AND e.target = stg.target AND e.relation = stg.relation
                     )
-                """)
+                    """
+                )
                 conn.execute("DROP TABLE IF EXISTS _stg_edges")
 
     def get_edges(
         self,
         source: Optional[str] = None,
+        sources: Optional[List[str]] = None,
         target: Optional[str] = None,
         targets: Optional[List[str]] = None,
         symbol: Optional[str] = None,
         relation: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Queries edges matching optional source, target(s), incident symbol, or relation filters."""
+        """Queries edges matching optional source(s), target(s), incident symbol, or relation filters."""
         query = "SELECT source, target, relation, weight, call_line FROM edges WHERE 1=1"
         params: List[Any] = []
         if source:
             query += " AND source = ?"
             params.append(source)
+        if sources is not None:
+            if not sources:
+                return []
+            query += " AND source IN (SELECT UNNEST(?::VARCHAR[]))"
+            params.append(list(sources))
         if target:
             query += " AND target = ?"
             params.append(target)
@@ -491,25 +543,6 @@ class GraphStore(BaseRepository):
             (weights, sources, targets, relations),
         )
 
-    def remap_edge_symbols(self, id_map: Dict[str, str]):
-        """Remaps edge source and target symbols when Tier-1 IDs are upgraded to Tier-2 IDs."""
-        if not id_map:
-            return
-        old_ids = list(id_map.keys())
-        new_ids = list(id_map.values())
-        self._execute("""
-            UPDATE edges
-            SET source = u.new_id
-            FROM (SELECT UNNEST(?::VARCHAR[]) AS old_id, UNNEST(?::VARCHAR[]) AS new_id) u
-            WHERE edges.source = u.old_id
-        """, (old_ids, new_ids))
-        self._execute("""
-            UPDATE edges
-            SET target = u.new_id
-            FROM (SELECT UNNEST(?::VARCHAR[]) AS old_id, UNNEST(?::VARCHAR[]) AS new_id) u
-            WHERE edges.target = u.old_id
-        """, (old_ids, new_ids))
-
     def delete_edges(
         self,
         relation: Optional[str] = None,
@@ -522,7 +555,6 @@ class GraphStore(BaseRepository):
         if filepaths:
             fps = [normalize_path(fp) for fp in filepaths if fp]
             if fps:
-                # Materialize target symbols into an unindexed temp table for linear hash semi-joins
                 self._execute(
                     "CREATE TEMP TABLE IF NOT EXISTS _stg_del_syms AS SELECT symbol FROM symbols WHERE filepath IN (SELECT UNNEST(?::VARCHAR[]))",
                     (fps,),
@@ -551,7 +583,7 @@ class GraphStore(BaseRepository):
         """Bulk insert of reference occurrences via CSV staging and direct append."""
         if not occurrences_list:
             return
-        headers = ['symbol', 'filepath', 'start_line', 'start_col', 'end_line', 'end_col', 'role']
+        headers = ["symbol", "filepath", "start_line", "start_col", "end_line", "end_col", "role"]
         rows = [
             [
                 occ["symbol"],
@@ -566,7 +598,8 @@ class GraphStore(BaseRepository):
         ]
         with self._csv_staging(headers, rows) as csv_path:
             with self._db_conn.session() as conn:
-                conn.execute(f"""
+                conn.execute(
+                    f"""
                     INSERT INTO occurrences (symbol, filepath, start_line, start_col, end_line, end_col, role)
                     SELECT symbol, filepath, start_line, start_col, end_line, end_col, role
                     FROM read_csv(
@@ -586,7 +619,29 @@ class GraphStore(BaseRepository):
                             'role': 'INTEGER'
                         }}
                     )
-                """)
+                    """
+                )
+
+    def get_definitions_map(self) -> Dict[str, Dict[str, Any]]:
+        """Returns all definition occurrences as {symbol: {filepath, start_line, ...}} in one query."""
+        res = self._fetch_all(
+            """
+            SELECT symbol, filepath, start_line, start_col, end_line, end_col, role
+            FROM occurrences
+            WHERE (role & 1) = 1
+            """
+        )
+        return {
+            r["symbol"]: {
+                "filepath": r["filepath"],
+                "start_line": r["start_line"],
+                "start_col": r["start_col"],
+                "end_line": r["end_line"],
+                "end_col": r["end_col"],
+                "role": r["role"],
+            }
+            for r in res
+        }
 
     def get_occurrences(
         self,
@@ -620,7 +675,7 @@ class GraphStore(BaseRepository):
         self._delete_by_filepaths("occurrences", filepaths)
 
     def delete_orphaned_records(self) -> Tuple[int, int]:
-        """Deletes edges and occurrences whose symbols no longer exist via linear anti-joins. Returns (edges_deleted, occs_deleted)."""
+        """Deletes edges and occurrences whose symbols no longer exist via linear anti-joins."""
         row1 = self._fetch_one("SELECT COUNT(*) AS cnt FROM edges WHERE source NOT IN (SELECT symbol FROM symbols)")
         row2 = self._fetch_one("SELECT COUNT(*) AS cnt FROM edges WHERE target NOT IN (SELECT symbol FROM symbols)")
         edge_cnt = (row1["cnt"] if row1 else 0) + (row2["cnt"] if row2 else 0)

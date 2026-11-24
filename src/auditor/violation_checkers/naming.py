@@ -1,4 +1,5 @@
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from auditor.path_tracer import get_simple_name
 from auditor.snapshot import AuditSnapshot
 from utils.arch_config import ArchConfig, build_rule_id
@@ -10,7 +11,7 @@ def check(
     snapshot: AuditSnapshot,
     symbol_classifications: Dict[str, Any],
     propagation_sources: Dict[str, Any],
-    config: Any,
+    config: ArchConfig,
     filepath_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Checks naming conventions for architectural boundary compliance."""
@@ -18,20 +19,16 @@ def check(
     if not config:
         return violations
 
-    cfg = config if isinstance(config, ArchConfig) else ArchConfig.from_dict(config)
-
     naming_rules = []
-    for prefix, prefix_conf in cfg.items():
-        for r in prefix_conf.rules:
-            if r.get("rule_type") == "naming_convention":
-                naming_rules.append((prefix, r, None))
+    for prefix, prefix_conf in config.items():
         for field_name, field_conf in prefix_conf.automatic_fields.items():
             for r in field_conf.get("rules", []):
                 if r.get("rule_type") == "naming_convention":
                     naming_rules.append((prefix, r, field_name))
 
     for sym, data in (symbol_classifications or {}).items():
-        filepath = data["symbol_info"]["filepath"]
+        sym_info = data["symbol_info"]
+        filepath = sym_info["filepath"]
         if not filepath or not matches_filter(filepath, filepath_filter):
             continue
 
@@ -43,7 +40,7 @@ def check(
                 prefix_pattern = rule.get("name_prefix")
                 if not any(f_val == classification for f_val in data["fields"].values()):
                     continue
-                simple_name = get_simple_name(sym)
+                simple_name = sym_info.get("name") or get_simple_name(sym)
                 violated = (suffix and not simple_name.endswith(suffix)) or (
                     prefix_pattern and not simple_name.startswith(prefix_pattern)
                 )
@@ -60,9 +57,9 @@ def check(
                     if def_info:
                         line_number = def_info.get("start_line")
                     if line_number is None:
-                        sym_info = snapshot.get_symbol(sym)
-                        if sym_info:
-                            line_number = sym_info.get("start_line")
+                        snap_info = snapshot.get_symbol(sym)
+                        if snap_info:
+                            line_number = snap_info.get("start_line")
                 if line_number is None:
                     line_number = 1
 

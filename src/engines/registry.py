@@ -37,37 +37,28 @@ class LanguageRegistry:
     _name_map: Dict[str, str] = {}
     _manifest_map: Dict[str, str] = {}
 
-    _DEFAULT_ALIASES: Dict[str, str] = {
-        "ts": "typescript",
-        "js": "javascript",
-        "jsx": "javascript",
-        "tsx": "javascript",
-        "c++": "cpp",
-        "c_sharp": "csharp",
-        "cs": "csharp",
-    }
-
     @classmethod
-    def register(cls,
-                  language: str,
-                  extensions: Optional[Sequence[str]] = None,
-                  tool_names: Optional[Sequence[str]] = None,
-                  manifest_names: Optional[Sequence[str]] = None,
-                  spec: Optional[LanguageSpec] = None,
-                  ts_module: Optional[str] = None,
-                  ts_factory: Optional[str] = None,
-                  scip_binary: Optional[str] = None,
-                  ast_node_kinds: Optional[Dict[str, str]] = None,
-                  docstring_node_type: Optional[str] = None,
-                  container_node_types: Optional[Sequence[str]] = None,
-                  impl_node_types: Optional[Sequence[str]] = None,
-                  di_call_patterns: Optional[Sequence[str]] = None,
-                  scip_command: Optional[Sequence[str]] = None,
-                  scip_prerequisites: Optional[Sequence[str]] = None,
-                  scip_index_subpath: Optional[str] = None,
-                  is_client_lang: bool = False,
-                  is_native_lang: bool = False,
-                  **kwargs) -> None:
+    def register(
+        cls,
+        language: str,
+        extensions: Optional[Sequence[str]] = None,
+        tool_names: Optional[Sequence[str]] = None,
+        manifest_names: Optional[Sequence[str]] = None,
+        spec: Optional[LanguageSpec] = None,
+        ts_module: Optional[str] = None,
+        ts_factory: Optional[str] = None,
+        scip_binary: Optional[str] = None,
+        ast_node_kinds: Optional[Dict[str, str]] = None,
+        docstring_node_type: Optional[str] = None,
+        container_node_types: Sequence[str] = ("Class", "Interface", "Struct", "Trait"),
+        impl_node_types: Sequence[str] = (),
+        di_call_patterns: Sequence[str] = (),
+        scip_command: Optional[Sequence[str]] = None,
+        scip_prerequisites: Sequence[str] = (),
+        scip_index_subpath: Optional[str] = None,
+        is_client_lang: bool = False,
+        is_native_lang: bool = False,
+    ) -> None:
         """Register a language with its file extensions, manifests, tool names, and backend bindings."""
         if spec is None:
             spec = LanguageSpec(
@@ -75,19 +66,19 @@ class LanguageRegistry:
                 extensions=tuple(extensions or ()),
                 manifest_names=tuple(manifest_names or ()),
                 tool_names=tuple(tool_names or ()),
-                ts_module=ts_module if ts_module is not None else kwargs.get("ts_module"),
-                ts_factory=ts_factory if ts_factory is not None else kwargs.get("ts_factory"),
-                scip_binary=scip_binary if scip_binary is not None else kwargs.get("scip_binary"),
-                ast_node_kinds=ast_node_kinds if ast_node_kinds is not None else kwargs.get("ast_node_kinds"),
-                docstring_node_type=docstring_node_type if docstring_node_type is not None else kwargs.get("docstring_node_type"),
-                container_node_types=tuple(container_node_types) if container_node_types is not None else kwargs.get("container_node_types", ("Class", "Interface", "Struct", "Trait")),
-                impl_node_types=tuple(impl_node_types or ()) if impl_node_types is not None else kwargs.get("impl_node_types", ()),
-                di_call_patterns=tuple(di_call_patterns or ()) if di_call_patterns is not None else kwargs.get("di_call_patterns", ()),
-                scip_command=tuple(scip_command) if scip_command is not None else kwargs.get("scip_command"),
-                scip_prerequisites=tuple(scip_prerequisites or ()) if scip_prerequisites is not None else kwargs.get("scip_prerequisites", ()),
-                scip_index_subpath=scip_index_subpath if scip_index_subpath is not None else kwargs.get("scip_index_subpath"),
-                is_client_lang=is_client_lang if is_client_lang is not None else kwargs.get("is_client_lang", False),
-                is_native_lang=is_native_lang if is_native_lang is not None else kwargs.get("is_native_lang", False),
+                ts_module=ts_module,
+                ts_factory=ts_factory,
+                scip_binary=scip_binary,
+                ast_node_kinds=ast_node_kinds,
+                docstring_node_type=docstring_node_type,
+                container_node_types=tuple(container_node_types),
+                impl_node_types=tuple(impl_node_types),
+                di_call_patterns=tuple(di_call_patterns),
+                scip_command=tuple(scip_command) if scip_command is not None else None,
+                scip_prerequisites=tuple(scip_prerequisites),
+                scip_index_subpath=scip_index_subpath,
+                is_client_lang=is_client_lang,
+                is_native_lang=is_native_lang,
             )
 
         cls._languages.add(language)
@@ -103,14 +94,8 @@ class LanguageRegistry:
 
     @classmethod
     def get_spec(cls, language: str) -> Optional[LanguageSpec]:
-        """Get LanguageSpec by language name or alias."""
-        lang_key = language.lower()
-        if lang_key in cls._specs:
-            return cls._specs[lang_key]
-        canonical = cls._DEFAULT_ALIASES.get(lang_key)
-        if canonical and canonical in cls._specs:
-            return cls._specs[canonical]
-        return None
+        """Get LanguageSpec by canonical language name."""
+        return cls._specs.get(language.lower())
 
     @classmethod
     def list_extensions(cls) -> Set[str]:
@@ -120,7 +105,7 @@ class LanguageRegistry:
     @classmethod
     def get_client_extensions(cls) -> Set[str]:
         """List file extensions for client-tier languages (e.g. Dart, TS, JS, Python)."""
-        exts = set()
+        exts: Set[str] = set()
         for spec in cls._specs.values():
             if spec.is_client_lang:
                 exts.update(spec.extensions)
@@ -129,7 +114,7 @@ class LanguageRegistry:
     @classmethod
     def get_native_extensions(cls) -> Set[str]:
         """List file extensions for native-tier languages (e.g. Rust, C, C++)."""
-        exts = set()
+        exts: Set[str] = set()
         for spec in cls._specs.values():
             if spec.is_native_lang:
                 exts.update(spec.extensions)
@@ -167,7 +152,7 @@ class LanguageRegistry:
     @classmethod
     def list_languages(cls) -> List[str]:
         """List all registered languages."""
-        return sorted(list(cls._languages))
+        return sorted(cls._languages)
 
     @classmethod
     def clear(cls) -> None:
@@ -212,12 +197,18 @@ class LanguageRegistry:
             scip_binary="dart",
             scip_command=("dart", "pub", "global", "run", "scip_dart", "."),
             di_call_patterns=("ref.watch", "ref.read", "context.read", "GetIt.instance.get"),
+            container_node_types=("Class", "Interface", "Struct", "Trait", "Enum", "Extension", "Mixin"),
             is_client_lang=True,
             ast_node_kinds={
                 "class_definition": "Class",
                 "enum_declaration": "Enum",
+                "extension_declaration": "Extension",
+                "mixin_declaration": "Mixin",
                 "function_signature": "Function",
                 "method_signature": "Method",
+                "constructor_signature": "Constructor",
+                "getter_signature": "Getter",
+                "setter_signature": "Setter",
             },
         )
         cls.register(
@@ -369,24 +360,10 @@ class LanguageRegistry:
                 "method_declaration": "Method",
             },
         )
-        cls.register(
-            "html",
-            extensions=(".html", ".htm"),
-        )
-        cls.register(
-            "css",
-            extensions=(".css", ".scss", ".less"),
-        )
-        cls.register(
-            "bash",
-            extensions=(".sh", ".bash"),
-        )
-        cls.register(
-            "powershell",
-            extensions=(".ps1", ".psm1"),
-        )
+        cls.register("html", extensions=(".html", ".htm"))
+        cls.register("css", extensions=(".css", ".scss", ".less"))
+        cls.register("bash", extensions=(".sh", ".bash"))
+        cls.register("powershell", extensions=(".ps1", ".psm1"))
 
 
-# Register built-in languages
 LanguageRegistry.register_defaults()
-

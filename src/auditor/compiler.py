@@ -1,21 +1,20 @@
+import heapq
 import io
 import json
 import re
-import heapq
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
 
 from db.repository import Repository
-from utils.helpers import (
-    load_config as _load_config,
-    demangle_scip_symbol,
-    sanitize_docstring,
-    resolve_symbol_in_repo,
-    format_classification_badge,
-    extract_code_slice,
-)
-from engines.registry import LanguageRegistry
 from engines.polymorphism import IMPLEMENTS_RELATION, expand_virtual_neighbors
+from engines.registry import LanguageRegistry
+from utils.helpers import (
+    extract_code_slice,
+    format_classification_badge,
+    load_config as _load_config,
+    sanitize_docstring,
+)
+from utils.symbol_id import canonical_display_name, parse_canonical_id
 
 
 class ContextCompiler:
@@ -24,6 +23,12 @@ class ContextCompiler:
     def __init__(self, repository: Repository, project_root: Path):
         self.repository = repository
         self.project_root = project_root
+
+    def extract_raw_code(self, filepath: str, start_line: int, end_line: int) -> str:
+        code = extract_code_slice(filepath, start_line, end_line, project_root=self.project_root)
+        if code is None:
+            return f"_Error: Source file '{filepath}' not found on disk._"
+        return code
 
     def traverse_subgraph(
         self,
@@ -74,7 +79,11 @@ class ContextCompiler:
         type_kinds = ("Class", "Struct", "Interface", "Trait", "TypeAlias", "Enum")
 
         outgoing = self.repository.graph.get_edges(source=focal_symbol)
-        type_targets = [e["target"] for e in outgoing if e.get("relation") in ("TypeDefinition", "Implements", "Inherits")]
+        type_targets = [
+            e["target"]
+            for e in outgoing
+            if e.get("relation") in ("TypeDefinition", "Implements", "Inherits")
+        ]
         for tgt in type_targets:
             if tgt not in seen_syms:
                 seen_syms.add(tgt)
@@ -92,15 +101,15 @@ class ContextCompiler:
             for cand in re.findall(r"\b[A-Z][a-zA-Z0-9_]+\b", sig):
                 if cand in builtins:
                     continue
-                for m in self.repository.graph.search_symbols(cand, limit=3):
+                for m in self.repository.graph.search_symbols(cand, limit=5):
                     sym_id = m.get("symbol")
-                    if sym_id not in seen_syms and m.get("kind") in type_kinds:
-                        clean = demangle_scip_symbol(sym_id)
-                        short = clean.split(".")[-1]
-                        if short == cand or clean.endswith(f".{cand}") or clean == cand:
+                    if sym_id and sym_id not in seen_syms and m.get("kind") in type_kinds:
+                        leaf = m.get("name") or parse_canonical_id(sym_id)[2]
+                        if leaf == cand:
                             seen_syms.add(sym_id)
                             types_found.append({
                                 "symbol": sym_id,
+                                "name": leaf,
                                 "filepath": m.get("filepath"),
                                 "kind": m.get("kind"),
                                 "signature": m.get("signature"),
@@ -135,7 +144,8 @@ class ContextCompiler:
             writer.write(json.dumps(config.to_dict(), indent=2) + "\n")
             writer.write("```\n\n")
 
-        clean_focal = demangle_scip_symbol(focal_symbol)
+        focal_info = metadata_map.get(focal_symbol, {})
+        clean_focal = canonical_display_name(focal_symbol, focal_info.get("name"))
         clean_traversed = [s for s in traversed_symbols if not str(s).startswith("local ")]
         writer.write("## 1. Architectural Context Bounds\n")
         writer.write(f"- **Focal Target**: `{clean_focal}`\n")
@@ -148,7 +158,6 @@ class ContextCompiler:
         writer.write("---\n")
         writer.write("## 2. Focal Core Target Node\n")
 
-        focal_info = metadata_map.get(focal_symbol, {})
         if focal_symbol in metadata_map:
             self._write_node_details(writer, focal_info, force_full=True, diagnostics_map=diags_lookup)
         else:
@@ -159,7 +168,7 @@ class ContextCompiler:
             writer.write("\n---\n")
             writer.write("## 2b. Referenced Data Structures & Type Signatures\n\n")
             for t in ref_types:
-                clean_t = demangle_scip_symbol(t["symbol"])
+                clean_t = canonical_display_name(t["symbol"], t.get("name"))
                 writer.write(f"### Type: `{clean_t}`\n")
                 writer.write(f"- **Filepath**: `{t.get('filepath') or 'External'}`\n")
                 writer.write(f"- **AST Kind**: `'{t.get('kind', 'Type')}'`\n")
@@ -177,11 +186,11 @@ class ContextCompiler:
             if sym == focal_symbol:
                 continue
             neighbor_index += 1
-            clean_sym = demangle_scip_symbol(sym)
+            node_data = metadata_map.get(sym)
+            clean_sym = canonical_display_name(sym, node_data.get("name") if node_data else None)
             writer.write(f"### Neighbor #{neighbor_index}: `{clean_sym}`\n")
 
-            if sym in metadata_map:
-                node_data = metadata_map[sym]
+            if node_data:
                 current_tokens = len(writer.getvalue()) // 4
                 is_degraded = False
                 node_res = "full" if resolution == "full" else "signature"
@@ -194,7 +203,12 @@ class ContextCompiler:
                         node_res = "signature"
                         is_degraded = True
 
-                self._write_node_details(writer, node_data, force_full=(node_res == "full"), diagnostics_map=diags_lookup)
+                self._write_node_details(
+                    writer,
+                    node_data,
+                    force_full=(node_res == "full"),
+                    diagnostics_map=diags_lookup,
+                )
                 if is_degraded:
                     writer.write(
                         f"> _Progressive Degradation: Degraded to signature resolution to fit within token budget ({max_tokens} tokens)._\n\n"
@@ -219,7 +233,7 @@ class ContextCompiler:
         start_line = node_info.get("start_line")
         end_line = node_info.get("end_line")
 
-        clean_sym = demangle_scip_symbol(node_info["symbol"])
+        clean_sym = canonical_display_name(node_info["symbol"], node_info.get("name"))
         badge = format_classification_badge(node_info.get("classification"))
         badge_header = f" `{badge}`" if badge else ""
         writer.write(f"- **Symbol ID**: `{clean_sym}`{badge_header}\n")
@@ -267,7 +281,7 @@ class ContextCompiler:
         out_filepath: Optional[str] = None,
         max_tokens: int = 4000,
     ) -> str:
-        resolved = resolve_symbol_in_repo(self.repository, focal_symbol)
+        resolved = self.repository.graph.resolve_symbol(focal_symbol)
         actual_focal = resolved["symbol"] if resolved else focal_symbol
 
         traversed_symbols = [
@@ -299,4 +313,3 @@ class ContextCompiler:
                 md_content = f"> [!WARNING]\n> Failed to write context to file: {e}\n\n" + md_content
 
         return md_content
-

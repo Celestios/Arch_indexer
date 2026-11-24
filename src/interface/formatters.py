@@ -1,6 +1,8 @@
 import json
 from typing import Any, Dict, List, Optional, Tuple
-from utils.helpers import demangle_scip_symbol, sanitize_docstring, infer_scip_kind, format_classification_badge
+
+from utils.helpers import format_classification_badge, sanitize_docstring
+from utils.symbol_id import canonical_display_name, parse_canonical_id
 
 
 def _clean_doc_summary(doc: Optional[str]) -> str:
@@ -11,15 +13,15 @@ def _clean_doc_summary(doc: Optional[str]) -> str:
     in_fence = False
     fence_char = None
     real_lines = []
-    for l in lines:
-        if not l:
+    for line in lines:
+        if not line:
             continue
-        if l.startswith("```") or l.startswith("'''") or l.startswith('"""'):
-            tag = l[:3]
+        if line.startswith("```") or line.startswith("\'\'\'") or line.startswith('"""'):
+            tag = line[:3]
             if not in_fence:
                 in_fence = True
                 fence_char = tag
-                if len(l) > 3 and l.endswith(tag):
+                if len(line) > 3 and line.endswith(tag):
                     in_fence = False
                 continue
             elif in_fence and tag == fence_char:
@@ -27,22 +29,19 @@ def _clean_doc_summary(doc: Optional[str]) -> str:
                 continue
         if in_fence:
             continue
-        real_lines.append(l)
+        real_lines.append(line)
 
     if not real_lines:
         return ""
 
     candidate = real_lines[0]
-    # Filter out fake docstrings that echo definition or SCIP type hints
-    if candidate.startswith("def ") or candidate.startswith("class ") or candidate.endswith(":"):
+    if candidate.startswith(("def ", "class ")) or candidate.endswith(":"):
         return ""
-    if candidate.startswith("(variable)") or candidate.startswith("(function)") or candidate.startswith("(method)"):
+    if candidate.startswith(("(variable)", "(function)", "(method)")):
         return ""
-    if candidate in ("builtins.str", "builtins.int", "builtins.dict", "builtins.list", "builtins.bool", "pathlib.Path"):
+    if candidate.startswith(("builtins.", "pathlib.", "typing.")):
         return ""
-    if candidate.startswith("builtins.") or candidate.startswith("pathlib.") or candidate.startswith("typing."):
-        return ""
-    if candidate.endswith("(") or candidate.endswith("()"):
+    if candidate.endswith(("(", "()")):
         return ""
     return candidate
 
@@ -50,10 +49,10 @@ def _clean_doc_summary(doc: Optional[str]) -> str:
 def _clean_method_signature(sig: str, name: str) -> str:
     """Extract a clean, single-line method signature."""
     if not sig:
-        return f"{name}()"
+        return f"`{name}()`"
     lines = [l.strip() for l in sig.strip().split("\n") if l.strip()]
     if not lines:
-        return f"{name}()"
+        return f"`{name}()`"
 
     decorators = [l for l in lines if l.startswith("@")]
     def_lines = [l for l in lines if not l.startswith("@")]
@@ -84,33 +83,29 @@ def format_context_results(
 
     processed_symbols = []
     for sym in symbols:
-        raw_name = sym["symbol"]
-        if raw_name.startswith("local "):
+        raw_id = sym["symbol"]
+        if raw_id.startswith("local "):
             continue
 
-        kind = sym.get("kind", "UnspecifiedKind")
-        if kind == "UnspecifiedKind" or not kind or (raw_name.endswith(")") and not raw_name.endswith("()")):
-            kind = infer_scip_kind(raw_name)
-
-        if kind.lower() in ("module", "package", "parameter") or raw_name.endswith("/__init__:") or raw_name.endswith("/"):
+        kind = sym.get("kind") or "Symbol"
+        if kind.lower() in ("module", "package", "parameter", "typeparameter"):
             continue
 
-        clean_name = demangle_scip_symbol(raw_name)
+        leaf_name = sym.get("name") or parse_canonical_id(raw_id)[2]
+        disp_name = canonical_display_name(raw_id, leaf_name)
 
         line_range = ""
-        if raw_name in symbol_to_lines:
-            start_line, end_line = symbol_to_lines[raw_name]
-            line_range = f"L{start_line}-{end_line}" if start_line != end_line else f"L{start_line}"
-        elif clean_name in symbol_to_lines:
-            start_line, end_line = symbol_to_lines[clean_name]
+        if raw_id in symbol_to_lines:
+            start_line, end_line = symbol_to_lines[raw_id]
             line_range = f"L{start_line}-{end_line}" if start_line != end_line else f"L{start_line}"
 
         badge = format_classification_badge(sym.get("classification"))
         doc = _clean_doc_summary(sym.get("docstring"))
 
         processed_symbols.append({
-            "raw_name": raw_name,
-            "clean_name": clean_name,
+            "raw_id": raw_id,
+            "name": leaf_name,
+            "display_name": disp_name,
             "kind": kind,
             "signature": sym.get("signature") or "",
             "docstring": doc,
@@ -120,20 +115,20 @@ def format_context_results(
         })
 
     classes = []
-    class_map = {}
+    class_map: Dict[str, Dict[str, Any]] = {}
     non_classes = []
 
+    container_kinds = ("class", "struct", "interface", "trait", "enum", "extension", "mixin")
     for s in processed_symbols:
-        if s["kind"].lower() in ("class", "struct", "interface"):
+        if s["kind"].lower() in container_kinds:
             cl_data = {
                 **s,
-                "short_name": s["clean_name"].split(".")[-1],
+                "short_name": s["name"],
                 "methods": [],
                 "fields": [],
             }
             classes.append(cl_data)
-            class_map[s["clean_name"]] = cl_data
-            class_map[s["raw_name"]] = cl_data
+            class_map[s["raw_id"]] = cl_data
         else:
             non_classes.append(s)
 
@@ -143,45 +138,27 @@ def format_context_results(
     for s in non_classes:
         parent_class = None
 
-        if s["parent_symbol"]:
-            p_clean = demangle_scip_symbol(s["parent_symbol"])
-            if p_clean in class_map:
-                parent_class = class_map[p_clean]
-            elif s["parent_symbol"] in class_map:
-                parent_class = class_map[s["parent_symbol"]]
+        if s["parent_symbol"] and s["parent_symbol"] in class_map:
+            parent_class = class_map[s["parent_symbol"]]
 
         if not parent_class:
             for cl in classes:
-                prefix = cl["clean_name"] + "."
-                if s["clean_name"].startswith(prefix):
+                if s["raw_id"].startswith(cl["raw_id"] + "::"):
                     parent_class = cl
                     break
 
-        if not parent_class and "#" in s["raw_name"]:
-            scip_prefix = s["raw_name"].split("#")[0] + "#"
-            if scip_prefix in class_map:
-                parent_class = class_map[scip_prefix]
-
         is_func = (
-            s["kind"].lower() in ("method", "function", "constructor")
-            or s["raw_name"].endswith(")")
-            or s["signature"].strip().startswith("def ")
-            or s["signature"].strip().startswith("@")
+            s["kind"].lower() in ("method", "function", "constructor", "getter", "setter", "staticmethod")
+            or s["signature"].strip().startswith(("def ", "@"))
         )
 
+        s["short_name"] = s["name"]
         if parent_class:
-            prefix = parent_class["clean_name"] + "."
-            if s["clean_name"].startswith(prefix):
-                s["short_name"] = s["clean_name"][len(prefix):]
-            else:
-                s["short_name"] = s["clean_name"].split(".")[-1]
-
             if is_func:
                 parent_class["methods"].append(s)
             else:
                 parent_class["fields"].append(s)
         else:
-            s["short_name"] = s["clean_name"].split(".")[-1]
             if is_func:
                 top_level_funcs.append(s)
             else:
@@ -214,10 +191,7 @@ def format_context_results(
             range_str = f" [{cl['line_range']}]" if cl["line_range"] else ""
             badge_str = f" `{cl['badge']}`" if cl.get("badge") else ""
             kind_label = cl["kind"].lower()
-            if kind_label in ("class", "struct", "interface"):
-                header_title = f"{kind_label} {cl['short_name']}"
-            else:
-                header_title = f"{cl['short_name']} ({cl['kind']})"
+            header_title = f"{kind_label} {cl['short_name']}"
             md.append(f"- **{header_title}**{badge_str}{range_str}")
 
             if cl["docstring"]:
@@ -268,9 +242,9 @@ def format_lookup_symbol(
     edges: List[Dict[str, Any]],
     symbol_filepath_map: Optional[Dict[str, str]] = None,
 ) -> str:
-    """Format lookup results for a code symbol as markdown with unified references and call graph."""
+    """Format lookup results for a canonical code symbol as markdown with unified references and call graph."""
     raw_symbol = str(exact_symbol.get("symbol", ""))
-    clean_symbol = exact_symbol.get("clean_symbol") or demangle_scip_symbol(raw_symbol)
+    disp_symbol = canonical_display_name(raw_symbol, exact_symbol.get("name"))
     filepath = exact_symbol.get("filepath")
     kind = exact_symbol.get("kind", "")
     signature = exact_symbol.get("signature")
@@ -283,7 +257,7 @@ def format_lookup_symbol(
     badge_header = f" `{badge}`" if badge else ""
 
     md = [
-        f"## Code Symbol: `{clean_symbol}`{badge_header}\n",
+        f"## Code Symbol: `{disp_symbol}`{badge_header}\n",
         f"- **Filepath**: `{filepath or 'External / Third-party'}`",
         f"- **Kind**: `{kind}`",
         f"- **Signature**: `{signature or 'None'}`",
@@ -291,16 +265,20 @@ def format_lookup_symbol(
     if badge:
         md.append(f"- **Classification**: `{badge}`")
     if parent_symbol:
-        md.append(f"- **Enclosing Symbol**: `{demangle_scip_symbol(parent_symbol)}`")
+        md.append(f"- **Enclosing Symbol**: `{canonical_display_name(parent_symbol)}`")
     if change_count is not None:
-        churn_str = f"⚡ High Churn ({change_count} modifications)" if change_count >= 3 else f"Stable ({change_count} edits)"
+        churn_str = f"High Churn ({change_count} modifications)" if change_count >= 3 else f"Stable ({change_count} edits)"
         md.append(f"- **Stability**: {churn_str}")
     doc = sanitize_docstring(docstring).strip() if docstring else "No docstring available."
     md.append(f"- **Docstring**:\n  {doc.replace(chr(10), chr(10) + '  ')}\n")
 
     file_occs: Dict[str, Dict[str, Any]] = {}
-    if filepath and exact_symbol.get("start_line") is not None:
-        norm_def_fp = str(filepath).replace("\\", "/")
+    norm_def_fp = str(filepath).replace("\\", "/") if filepath else None
+    has_def_in_occs = any(
+        str(o.get("filepath", "")).replace("\\", "/") == norm_def_fp and (o.get("role", 0) & 1)
+        for o in (occurrences or [])
+    )
+    if norm_def_fp and not has_def_in_occs and exact_symbol.get("start_line") is not None:
         s_line = exact_symbol["start_line"]
         e_line = exact_symbol.get("end_line") or s_line
         file_occs[norm_def_fp] = {"lines": [(s_line, e_line)], "roles": {"Definition"}, "has_def": True}
@@ -319,6 +297,8 @@ def format_lookup_symbol(
             entry["roles"].add("[Mutates]")
         if role & 8:
             entry["roles"].add("[Reads]")
+        if role & 0x20:
+            entry["roles"].add("[Test]")
 
     def _format_lines(line_tuples: List[Tuple[int, int]]) -> str:
         unique_ranges = []
@@ -332,7 +312,7 @@ def format_lookup_symbol(
         if "Definition" in role_set and len(role_set) == 1:
             return "Definition"
         is_ref = "Reference" in role_set or not role_set
-        tags = [t for t in ("[Mutates]", "[Reads]") if t in role_set]
+        tags = [t for t in ("[Mutates]", "[Reads]", "[Test]") if t in role_set]
         if "Definition" in role_set:
             tags.append("[Def]")
         tag_str = " ".join(tags)
@@ -347,49 +327,29 @@ def format_lookup_symbol(
     sym_edges: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for e in clean_edges:
         src_raw, tgt_raw, rel = str(e["source"]), str(e["target"]), str(e["relation"])
-        if tgt_raw == raw_symbol or demangle_scip_symbol(tgt_raw) == clean_symbol:
+        if tgt_raw == raw_symbol:
             direction, rel_raw = "←", src_raw
-        elif src_raw == raw_symbol or demangle_scip_symbol(src_raw) == clean_symbol:
+        elif src_raw == raw_symbol:
             direction, rel_raw = "→", tgt_raw
         else:
             direction, rel_raw = "←", src_raw
 
-        rel_clean = demangle_scip_symbol(rel_raw)
+        rel_disp = canonical_display_name(rel_raw)
         key = (rel_raw, direction)
         if key not in sym_edges:
-            fp = None
-            if symbol_filepath_map and rel_raw in symbol_filepath_map:
-                fp = symbol_filepath_map[rel_raw]
-            elif symbol_filepath_map and rel_clean in symbol_filepath_map:
-                fp = symbol_filepath_map[rel_clean]
-            elif rel_raw.replace("\\", "/") in file_occs:
-                fp = rel_raw.replace("\\", "/")
-            else:
-                for ofp in file_occs:
-                    stem = ofp.rsplit("/", 1)[-1].split(".", 1)[0]
-                    if stem and stem in rel_clean.split("."):
-                        fp = ofp
-                        break
-
+            fp = symbol_filepath_map.get(rel_raw) if symbol_filepath_map else None
+            if not fp:
+                parsed_fp, _, _ = parse_canonical_id(rel_raw)
+                if parsed_fp and not parsed_fp.startswith("ext::"):
+                    fp = parsed_fp
             sym_edges[key] = {
                 "raw": rel_raw,
-                "clean": rel_clean,
+                "display": rel_disp,
                 "direction": direction,
                 "relations": set(),
                 "fp": fp.replace("\\", "/") if fp else None,
             }
         sym_edges[key]["relations"].add(rel)
-
-    def _display_sym(rel_clean: str, fp: Optional[str]) -> str:
-        if not fp:
-            return rel_clean
-        stem = fp.rsplit("/", 1)[-1].split(".", 1)[0]
-        parts = rel_clean.split(".")
-        if stem in parts:
-            subparts = parts[parts.index(stem) + 1:]
-            if subparts:
-                return ".".join(subparts)
-        return rel_clean
 
     matched_files = set()
     table_rows = []
@@ -399,16 +359,16 @@ def format_lookup_symbol(
             matched_files.add(fp)
             table_rows.append({
                 "loc": f"`{fp}:{_format_lines(occ_data['lines'])}`",
-                "sym": f"`{clean_symbol}`",
+                "sym": f"`{disp_symbol}`",
                 "rel": "—",
                 "role": "Definition",
-                "order": (0, fp, clean_symbol),
+                "order": (0, fp, disp_symbol),
             })
 
     for (_, _), data in sym_edges.items():
         fp = data["fp"]
         rel_str = f"{data['direction']} {', '.join(sorted(data['relations']))}"
-        sym_label = f"`{_display_sym(data['clean'], fp)}`"
+        sym_label = f"`{data['display']}`"
 
         if fp and fp in file_occs:
             matched_files.add(fp)
@@ -417,7 +377,7 @@ def format_lookup_symbol(
                 "sym": sym_label,
                 "rel": rel_str,
                 "role": _format_roles(file_occs[fp]["roles"]),
-                "order": (1, fp, data["clean"]),
+                "order": (1, fp, data["display"]),
             })
         else:
             table_rows.append({
@@ -425,7 +385,7 @@ def format_lookup_symbol(
                 "sym": sym_label,
                 "rel": rel_str,
                 "role": "—",
-                "order": (2, fp or "zzz", data["clean"]),
+                "order": (2, fp or "zzz", data["display"]),
             })
 
     for fp, occ_data in file_occs.items():
@@ -478,11 +438,9 @@ def format_lookup_file(
         md.append("| :--- | :--- |")
         for s in non_local_symbols:
             raw_s = s["symbol"]
-            clean_s = s.get("clean_symbol") or demangle_scip_symbol(raw_s)
-            k = s.get("kind", "")
-            kind = infer_scip_kind(raw_s) if (k == "UnspecifiedKind" or not k) else k
-            md.append(f"| `{clean_s}` | {kind} |")
+            disp_s = canonical_display_name(raw_s, s.get("name"))
+            kind = s.get("kind") or "Symbol"
+            md.append(f"| `{disp_s}` | {kind} |")
         md.append("")
 
     return "\n".join(md)
-

@@ -1,7 +1,14 @@
 import json
 import logging
-from typing import Dict, List, Any, Optional
-from db.base import BaseRepository, UPSERT_FILE_SQL, UPSERT_AST_FILE_SQL, UPSERT_FILES_VECTORIZED_SQL, normalize_path
+from typing import Any, Dict, List, Optional
+
+from db.base import (
+    BaseRepository,
+    UPSERT_AST_FILE_SQL,
+    UPSERT_FILE_SQL,
+    UPSERT_FILES_VECTORIZED_SQL,
+    normalize_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +26,7 @@ def _parse_manual_fields(raw: Any) -> Dict[str, Any]:
 
 class WorkspaceStore(BaseRepository):
     """
-    Domain store owning workspace files, system metadata, and file co-changes.
+    Domain store owning workspace files and system metadata.
     Enforces POSIX path normalization on ingress.
     """
 
@@ -45,6 +52,19 @@ class WorkspaceStore(BaseRepository):
             (norm_fp,),
         )
         return self._format_file_dict(row)
+
+    def resolve_filepath(self, raw_path: str) -> Optional[str]:
+        """Resolves a filepath against tracked files via exact match then POSIX suffix fallback."""
+        norm_raw = normalize_path(raw_path)
+        if not norm_raw:
+            return None
+        if self.get_file(norm_raw):
+            return norm_raw
+        row = self._fetch_one(
+            "SELECT filepath FROM files WHERE ends_with(filepath, ?) ORDER BY length(filepath) ASC LIMIT 1",
+            (norm_raw,),
+        )
+        return normalize_path(row["filepath"]) if row else None
 
     def get_all_files(self) -> List[Dict[str, Any]]:
         """Returns all tracked files with metadata."""
@@ -148,60 +168,3 @@ class WorkspaceStore(BaseRepository):
                ON CONFLICT (key) DO UPDATE SET value = excluded.value""",
             (key, value),
         )
-
-    # ------------------ Co-changes Coupling Domain ------------------
-
-    def upsert_co_changes(self, records: List[Any]):
-        """Upserts a batch of co-change records into file_co_changes."""
-        if not records:
-            return
-        data = []
-        for r in records:
-            if hasattr(r, "filepath_a"):
-                fa, fb, cnt = r.filepath_a, r.filepath_b, r.co_change_count
-                freq = getattr(r, "frequency", 0.0)
-            elif isinstance(r, (list, tuple)):
-                fa, fb, cnt = r[0], r[1], r[2]
-                freq = r[3] if len(r) > 3 else 0.0
-            else:
-                continue
-            data.append((normalize_path(fa), normalize_path(fb), int(cnt), float(freq)))
-
-        self._executemany(
-            """INSERT INTO file_co_changes (filepath_a, filepath_b, co_change_count, frequency)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT (filepath_a, filepath_b) DO UPDATE SET
-                   co_change_count = excluded.co_change_count,
-                   frequency = excluded.frequency""",
-            data,
-        )
-
-    def get_co_changes(
-        self,
-        filepath: str,
-        min_count: int = 1,
-        min_frequency: float = 0.0,
-        limit: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
-        """Returns files that historically change together with the given filepath."""
-        norm_fp = normalize_path(filepath)
-        query = """SELECT filepath_b, co_change_count, frequency
-                   FROM file_co_changes
-                   WHERE filepath_a = ? AND co_change_count >= ? AND frequency >= ?
-                   ORDER BY frequency DESC, co_change_count DESC"""
-        params: List[Any] = [norm_fp, min_count, min_frequency]
-        if limit:
-            query += f" LIMIT {int(limit)}"
-        rows = self._fetch_all(query, params)
-        return [
-            {
-                "filepath": normalize_path(r["filepath_b"]),
-                "co_change_count": r["co_change_count"],
-                "frequency": round(float(r["frequency"]), 2),
-            }
-            for r in rows
-        ]
-
-    def delete_co_changes(self):
-        """Deletes all records from file_co_changes."""
-        self._execute("DELETE FROM file_co_changes")

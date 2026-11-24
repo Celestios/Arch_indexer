@@ -1,10 +1,9 @@
 """Architectural drift and filesystem/class boundary diagnostics."""
 from collections import Counter, defaultdict
-from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from utils.helpers import demangle_scip_symbol
 from clustering.models import ClusterNode, DriftReport
+from utils.symbol_id import canonical_display_name
 
 
 def _find_top_subsystem(node_id: str, index_by_id: Dict[str, ClusterNode]) -> str:
@@ -12,7 +11,17 @@ def _find_top_subsystem(node_id: str, index_by_id: Dict[str, ClusterNode]) -> st
     curr = index_by_id.get(node_id)
     if not curr or curr.cluster_id == "root":
         return node_id
-    while curr.parent_id and curr.parent_id != "root":
+
+    root_node = index_by_id.get("root")
+    effective_root_id = "root"
+    if root_node and len(root_node.children) == 1:
+        single_child = root_node.children[0]
+        if single_child.children:
+            effective_root_id = single_child.cluster_id
+            if curr.cluster_id == effective_root_id:
+                return curr.cluster_id
+
+    while curr.parent_id and curr.parent_id != effective_root_id and curr.parent_id != "root":
         curr = index_by_id.get(curr.parent_id, curr)
     return curr.cluster_id
 
@@ -22,9 +31,9 @@ def compute_drift_report(
     symbol_to_leaf: Dict[str, str],
     active_symbols_map: Dict[str, Dict[str, Any]],
     index_by_id: Dict[str, ClusterNode],
+    parent_map: Optional[Dict[str, str]] = None,
 ) -> DriftReport:
     """Computes split_files, split_classes, misplaced_symbols, and scattered-cluster notes."""
-    # Group symbols by file
     symbols_by_file: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for s_info in active_symbols_map.values():
         fp = s_info.get("filepath")
@@ -39,7 +48,6 @@ def compute_drift_report(
         if len(clustered) < 2:
             continue
 
-        # Check top-level subsystem purity first to prevent false-positive storms on cohesive sub-clusters
         top_counts = Counter(
             _find_top_subsystem(symbol_to_leaf[s["symbol"]], index_by_id)
             for s in clustered
@@ -54,10 +62,12 @@ def compute_drift_report(
         dom_leaf, dom_leaf_count = leaf_counts.most_common(1)[0]
         leaf_purity = dom_leaf_count / total_m
 
-        # Flag as split-brain only if fractured across distinct top-level subsystems
         if top_purity < 0.75 and outside_top >= 2:
             sorted_items = sorted(leaf_counts.items(), key=lambda x: (-x[1], x[0]))
-            dist = {c: f"{cnt}s" for c, cnt in sorted_items}
+            dist = {c: f"{cnt}s" for c, cnt in sorted_items[:3]}
+            if len(sorted_items) > 3:
+                other_cnt = sum(cnt for _, cnt in sorted_items[3:])
+                dist[f"+{len(sorted_items) - 3} others"] = f"{other_cnt}s"
             split_files.append({
                 "filepath": fp,
                 "purity_pct": round(top_purity * 100.0, 1),
@@ -65,7 +75,6 @@ def compute_drift_report(
                 "distribution": dist,
             })
         elif leaf_purity >= 0.75 or top_purity >= 0.75:
-            # File has a clear dominant cluster / subsystem; flag outliers
             dom_c = dom_leaf if leaf_purity >= 0.75 else dom_top
             for s in clustered:
                 s_c = symbol_to_leaf[s["symbol"]]
@@ -73,13 +82,12 @@ def compute_drift_report(
                 if (leaf_purity >= 0.75 and s_c != dom_c) or (leaf_purity < 0.75 and s_top != dom_top):
                     misplaced_symbols.append({
                         "symbol": s["symbol"],
-                        "clean_symbol": s.get("clean_symbol") or demangle_scip_symbol(s["symbol"]),
+                        "name": canonical_display_name(s["symbol"], s.get("name")),
                         "filepath": fp,
                         "assigned_cluster": s_c,
                         "file_cluster": dom_c,
                     })
 
-    # Group misplaced symbols and annotate cluster drift_notes
     misplaced_counts: Dict[Tuple[str, str], int] = Counter()
     for ms in misplaced_symbols:
         misplaced_counts[(ms["assigned_cluster"], ms["filepath"])] += 1
@@ -90,10 +98,10 @@ def compute_drift_report(
             sym_word = "symbol" if cnt == 1 else "symbols"
             target_node.drift_notes.append(f"misplaced: {cnt} {sym_word} physically in {fp}")
 
-    # 2. Split-Brain Classes
+    effective_parent_map = parent_map if parent_map is not None else {}
     symbols_by_class: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for s_info in active_symbols_map.values():
-        p = s_info.get("parent_symbol")
+    for sym, s_info in active_symbols_map.items():
+        p = effective_parent_map.get(sym)
         if p and p in active_symbols_map:
             symbols_by_class[p].append(s_info)
 
@@ -117,7 +125,10 @@ def compute_drift_report(
             cls_info = active_symbols_map.get(cls_sym, {})
             fp = cls_info.get("filepath") or members[0].get("filepath")
             sorted_items = sorted(leaf_counts.items(), key=lambda x: (-x[1], x[0]))
-            dist = {c: f"{cnt} methods" for c, cnt in sorted_items}
+            dist = {c: f"{cnt} methods" for c, cnt in sorted_items[:3]}
+            if len(sorted_items) > 3:
+                other_cnt = sum(cnt for _, cnt in sorted_items[3:])
+                dist[f"+{len(sorted_items) - 3} others"] = f"{other_cnt} methods"
             split_classes.append({
                 "class_symbol": cls_sym,
                 "filepath": fp,
@@ -126,14 +137,12 @@ def compute_drift_report(
                 "distribution": dist,
             })
 
-    # 3. Scattered-cluster check on non-leaf clusters
     for c_id, node in index_by_id.items():
         if c_id == "root" or not node.filepaths:
             continue
         top_dirs: Counter = Counter()
         for fp in node.filepaths:
             norm = fp.replace("\\", "/").strip("/")
-            # Strip filename to get directory parts only
             parts = norm.split("/")[:-1]
             for p in ("lib", "src", "packages"):
                 if parts and parts[0] == p:

@@ -1,17 +1,11 @@
 """
 Centralized on-the-fly Git evolution, hotspot, thrash, temporal coupling,
 growth, test-gap, and symbol archaeology engine.
-
-Designed to resist non-atomic commits via:
-- Single-pass exponential decay weighted by log line magnitude (--numstat)
-- Inverse commit-size weighting (1 / (m - 1)) and Lift/PMI for co-change coupling
-- Static SCIP/AST call-graph subtraction (HIDDEN vs STRUCTURAL coupling)
-- Hunk-to-symbol interval intersection for targeted file/symbol analysis
 """
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from itertools import combinations
-import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -28,13 +22,14 @@ from utils.exclusions import (
     load_include_dirs,
 )
 from utils.helpers import (
-    demangle_scip_symbol,
     is_auxiliary_path,
     is_test_caller,
     load_config,
-    resolve_filepath,
-    resolve_symbol_in_repo,
+    normalize_scopes,
 )
+from utils.symbol_id import canonical_display_name
+
+logger = logging.getLogger(__name__)
 
 NON_CODE_EXTENSIONS: Set[str] = {
     ".lock", ".md", ".txt", ".rst", ".surql", ".toml", ".yaml", ".yml", ".json",
@@ -60,12 +55,12 @@ _RENAME_BRACE_RE = re.compile(r"(.*)\{([^{}]*) => ([^{}]*)\}(.*)")
 class CommitRecord:
     """Normalized representation of a single non-merge Git commit."""
     commit_hash: str
-    index: int  # 0 = HEAD, increasing with age
+    index: int
     timestamp: int
     subject: str
     is_revert: bool
     is_fix_msg: bool
-    files: Dict[str, Tuple[int, int]] = field(default_factory=dict)  # filepath -> (added, deleted)
+    files: Dict[str, Tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -90,7 +85,7 @@ def _norm_posix(path_str: Optional[str]) -> str:
 
 
 def _clean_numstat_path(raw_path: str) -> str:
-    """Resolves git rename notation (e.g. 'a/{old.py => new.py}' or 'old.py => new.py') to the new path."""
+    """Resolves git rename notation to the destination POSIX path."""
     path = raw_path.strip()
     if path.startswith('"') and path.endswith('"'):
         path = path[1:-1]
@@ -105,7 +100,6 @@ def _clean_numstat_path(raw_path: str) -> str:
 
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:
-    """Kills a timed-out subprocess and its children so inherited pipes cannot hang communicate()."""
     if sys.platform == "win32":
         try:
             subprocess.run(
@@ -158,7 +152,7 @@ def _run_git(args: List[str], project_root: Path, timeout: int = 20) -> Optional
         stdout, stderr = proc.communicate(timeout=timeout)
         if proc.returncode != 0:
             if stderr and stderr.strip():
-                print(f"[git_analyzer] git {' '.join(args[:3])} failed: {stderr.strip()}", file=sys.stderr)
+                logger.warning("git %s failed: %s", " ".join(args[:3]), stderr.strip())
             return None
         return stdout
     except subprocess.TimeoutExpired:
@@ -170,41 +164,18 @@ def _run_git(args: List[str], project_root: Path, timeout: int = 20) -> Optional
                         pipe.close()
                     except Exception:
                         pass
-        print(f"[git_analyzer] git {' '.join(args[:3])} timed out after {timeout}s", file=sys.stderr)
+        logger.warning("git %s timed out after %ds", " ".join(args[:3]), timeout)
         return None
     except (FileNotFoundError, OSError) as e:
-        print(f"[git_analyzer] git execution error: {e}", file=sys.stderr)
+        logger.warning("git execution error: %s", e)
         return None
 
 
 def is_git_repo(project_root: Path) -> bool:
-    """Returns True if project_root is inside a Git working tree."""
     if (project_root / ".git").exists():
         return True
     out = _run_git(["rev-parse", "--is-inside-work-tree"], project_root, timeout=5)
     return bool(out and out.strip().lower() == "true")
-
-
-def _normalize_scopes(scope: Optional[Union[str, List[str]]]) -> Optional[List[str]]:
-    if scope is None:
-        return None
-    if isinstance(scope, str):
-        stripped = scope.strip()
-        if stripped.startswith("["):
-            try:
-                loaded = json.loads(stripped)
-                if isinstance(loaded, list):
-                    raw_items = [str(s).strip() for s in loaded if str(s).strip()]
-                else:
-                    raw_items = [stripped]
-            except Exception:
-                raw_items = [s.strip() for s in stripped.split(",") if s.strip()]
-        else:
-            raw_items = [s.strip() for s in stripped.split(",") if s.strip()]
-    else:
-        raw_items = [str(s).strip() for s in scope if str(s).strip()]
-    cleaned = [_norm_posix(s) for s in raw_items if s not in (".", "./", "*", "all")]
-    return cleaned or None
 
 
 def _matches_scope(norm_path: str, scope_prefixes: Optional[List[str]]) -> bool:
@@ -225,7 +196,6 @@ def _is_auditable_source(
     scope_prefixes: Optional[List[str]] = None,
     require_exists: bool = True,
 ) -> bool:
-    """Determines whether a repository-relative POSIX path is auditable production source code."""
     if not norm_path:
         return False
     suffix = Path(norm_path).suffix.lower()
@@ -248,11 +218,6 @@ def _is_auditable_source(
 
 
 def parse_git_history(project_root: Path, commits: int = 100) -> List[CommitRecord]:
-    """
-    Runs a single `git log --no-merges --numstat` pass and returns normalized CommitRecords.
-    Retains all touched paths per commit so downstream evaluators can detect co-modified tests
-    while applying auditable production filtering independently.
-    """
     if commits <= 0 or not is_git_repo(project_root):
         return []
 
@@ -265,15 +230,13 @@ def parse_git_history(project_root: Path, commits: int = 100) -> List[CommitReco
         return []
 
     records: List[CommitRecord] = []
-    blocks = raw.split(_COMMIT_MARKER)
     commit_idx = 0
 
-    for block in blocks:
+    for block in raw.split(_COMMIT_MARKER):
         if not block.strip():
             continue
         lines = block.splitlines()
-        header = lines[0]
-        parts = header.split(_FIELD_SEP, 2)
+        parts = lines[0].split(_FIELD_SEP, 2)
         if len(parts) < 3:
             continue
         commit_hash = parts[0].strip()
@@ -321,7 +284,6 @@ def parse_git_history(project_root: Path, commits: int = 100) -> List[CommitReco
 
 
 def _build_graph_context(repository) -> _GraphContext:
-    """Builds a single-pass file-level structural graph context from DuckDB."""
     ctx = _GraphContext()
     if repository is None:
         return ctx
@@ -330,6 +292,7 @@ def _build_graph_context(repository) -> _GraphContext:
         sym_rows = repository.graph.get_all_symbols()
         edge_rows = repository.graph.get_edges()
     except Exception:
+        logger.debug("Failed to load graph snapshot for git enrichment", exc_info=True)
         return ctx
 
     for s in sym_rows:
@@ -338,7 +301,7 @@ def _build_graph_context(repository) -> _GraphContext:
         if not sid or not fp:
             continue
         ctx.symbol_to_fp[sid] = fp
-        if not sid.startswith("local ") and not (sid.endswith(")") and not sid.endswith("()")):
+        if not sid.startswith("local ") and s.get("kind") != "Parameter":
             ctx.file_symbol_count[fp] += 1
             conn_w = int(s.get("connection_weight") or 0)
             if conn_w > ctx.file_max_conn[fp]:
@@ -377,10 +340,6 @@ def _count_non_empty_loc(abs_path: Path) -> int:
 
 
 def _compute_file_ast_metrics(abs_path: Path, project_root: Path) -> Tuple[int, int, float]:
-    """
-    Computes (non_empty_loc, max_cyclomatic_complexity, avg_cyclomatic_complexity)
-    on the fly using Tree-sitter metrics with graceful fallback.
-    """
     loc = _count_non_empty_loc(abs_path)
     if loc == 0:
         return 0, 1, 1.0
@@ -396,7 +355,6 @@ def _compute_file_ast_metrics(abs_path: Path, project_root: Path) -> Tuple[int, 
 
 
 def _resolve_domain_label(norm_path: str, arch_config: Any) -> str:
-    """Assigns a dynamic architectural domain label from .arch/config.json prefixes or top-2 dirs."""
     if arch_config:
         prefix = arch_config.get_applicable_prefix(norm_path)
         if prefix and prefix != ".":
@@ -417,11 +375,6 @@ def compute_file_evolution_metrics(
     scope_prefixes: Optional[List[str]] = None,
     require_exists: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
-    """
-    Aggregates single-pass evolutionary metrics per auditable file:
-    exponentially decayed churn magnitude, burstiness, rework balance, reverts,
-    net line growth, and test co-modification counts.
-    """
     stats: Dict[str, Dict[str, Any]] = {}
 
     for commit in commits_data:
@@ -483,7 +436,6 @@ def compute_file_evolution_metrics(
         added = entry["added"]
         deleted = entry["deleted"]
         total_lines = added + deleted
-        # Peaks at 1.0 when lines are repeatedly added & deleted in equal measure; 0.0 for pure addition or deletion
         churn_balance = (2.0 * min(added, deleted) / total_lines) if total_lines > 0 else 0.0
         rework_ratio = deleted / max(added, 1)
         thrash_score = (burst_score * 2.0) + (churn_balance * entry["decayed_churn"] * 0.6) + (entry["reverts"] * 3.0)
@@ -517,10 +469,6 @@ def _analyze_file_symbol_hotspots(
     commits: int = 100,
     limit: int = 10,
 ) -> List[Dict[str, Any]]:
-    """
-    Intersects unified diff hunks (`git log -U0`) against DuckDB symbol line ranges
-    to isolate hot functions/methods inside a single target file.
-    """
     if repository is None:
         return []
     syms = repository.graph.get_symbols_for_files([filepath])
@@ -528,13 +476,11 @@ def _analyze_file_symbol_hotspots(
         s for s in syms
         if s.get("start_line") is not None
         and not str(s.get("symbol", "")).startswith("local ")
-        and not (str(s.get("symbol", "")).endswith(")") and not str(s.get("symbol", "")).endswith("()"))
         and str(s.get("kind", "")).lower() not in ("module", "package", "parameter")
     ]
     if not callable_syms:
         return []
 
-    # Sort narrowest span first so methods win over enclosing classes
     callable_syms.sort(
         key=lambda s: ((s.get("end_line") or s["start_line"]) - s["start_line"], s["start_line"])
     )
@@ -548,10 +494,9 @@ def _analyze_file_symbol_hotspots(
         return []
 
     sym_touches: Dict[str, Dict[str, Any]] = {}
-    blocks = raw.split(_COMMIT_MARKER)
     commit_idx = 0
 
-    for block in blocks:
+    for block in raw.split(_COMMIT_MARKER):
         if not block.strip():
             continue
         lines = block.splitlines()
@@ -577,7 +522,7 @@ def _analyze_file_symbol_hotspots(
                 s_end = int(s.get("end_line") or s_start)
                 if s_start <= new_end and new_start <= s_end:
                     touched_in_commit[s["symbol"]] += span_lines
-                    break  # Narrowest enclosing symbol
+                    break
 
         for sid, delta_lines in touched_in_commit.items():
             rec = sym_touches.setdefault(
@@ -604,7 +549,7 @@ def _analyze_file_symbol_hotspots(
             1,
         )
         results.append({
-            "symbol": s.get("clean_symbol") or demangle_scip_symbol(sid),
+            "symbol": canonical_display_name(sid, s.get("name")),
             "raw_symbol": sid,
             "kind": s.get("kind") or "Symbol",
             "filepath": filepath,
@@ -633,14 +578,9 @@ def analyze_hotspots(
     file_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
     require_exists: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Centralized Hotspot Identifier shared by `history` and `impact`.
-    Combines decayed churn magnitude, thrash/burstiness, structural fan-in from DuckDB,
-    and on-the-fly AST cyclomatic complexity.
-    """
     include_dirs = load_include_dirs(project_root)
     exclude_patterns = load_exclude_patterns(project_root)
-    scope_prefixes = _normalize_scopes(scope)
+    scope_prefixes = normalize_scopes(scope)
     gctx = graph_ctx if graph_ctx is not None else _build_graph_context(repository)
     arch_config = load_config(project_root)
 
@@ -654,7 +594,6 @@ def analyze_hotspots(
             require_exists=require_exists,
         )
 
-    # Pre-rank candidates before disk AST parsing to stay sub-second on large repos
     prelim: List[Tuple[float, str, Dict[str, Any]]] = []
     for fp, m in file_metrics.items():
         if target and fp != target:
@@ -731,14 +670,9 @@ def analyze_coupling(
     graph_ctx: Optional[_GraphContext] = None,
     require_exists: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Non-atomic-resistant temporal co-change analyzer.
-    Uses inverse commit-size weighting (1 / (m - 1)) and Weighted Lift/Confidence,
-    intersected against DuckDB static edges to separate HIDDEN vs STRUCTURAL coupling.
-    """
     include_dirs = load_include_dirs(project_root)
     exclude_patterns = load_exclude_patterns(project_root)
-    scope_prefixes = _normalize_scopes(scope)
+    scope_prefixes = normalize_scopes(scope)
     gctx = graph_ctx if graph_ctx is not None else _build_graph_context(repository)
 
     file_w: Dict[str, float] = defaultdict(float)
@@ -764,7 +698,6 @@ def analyze_coupling(
         if m < 2 or m > max_bulk:
             continue
 
-        # Inverse size weight discounts non-atomic mixed commits cleanly
         w_c = 1.0 / (m - 1)
         total_w += w_c
         qualifying_commits += 1
@@ -798,7 +731,6 @@ def analyze_coupling(
         p_b = file_w[f2] / total_w
         lift = (p_ab / (p_a * p_b)) if (p_a > 0 and p_b > 0) else 0.0
 
-        # Suppress random collisions in workspace-wide view
         if not target and lift < 1.15:
             continue
 
@@ -846,14 +778,13 @@ def analyze_thrash(
     file_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
     require_exists: bool = True,
 ) -> Dict[str, Any]:
-    """Identifies files caught in rework loops, short-interval bursts, and reverts."""
     if file_metrics is None:
         file_metrics = compute_file_evolution_metrics(
             commits_data,
             project_root,
             load_include_dirs(project_root),
             load_exclude_patterns(project_root),
-            scope_prefixes=_normalize_scopes(scope),
+            scope_prefixes=normalize_scopes(scope),
             require_exists=require_exists,
         )
 
@@ -889,14 +820,13 @@ def analyze_growth(
     file_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
     require_exists: bool = True,
 ) -> Dict[str, Any]:
-    """Tracks net line expansion paired with current LOC and AST cyclomatic complexity."""
     if file_metrics is None:
         file_metrics = compute_file_evolution_metrics(
             commits_data,
             project_root,
             load_include_dirs(project_root),
             load_exclude_patterns(project_root),
-            scope_prefixes=_normalize_scopes(scope),
+            scope_prefixes=normalize_scopes(scope),
             require_exists=require_exists,
         )
 
@@ -938,7 +868,6 @@ def analyze_test_gaps(
     file_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
     require_exists: bool = True,
 ) -> Dict[str, Any]:
-    """Identifies high-churn production files evolving without test co-edits or static test callers."""
     gctx = graph_ctx if graph_ctx is not None else _build_graph_context(repository)
     if file_metrics is None:
         file_metrics = compute_file_evolution_metrics(
@@ -946,7 +875,7 @@ def analyze_test_gaps(
             project_root,
             load_include_dirs(project_root),
             load_exclude_patterns(project_root),
-            scope_prefixes=_normalize_scopes(scope),
+            scope_prefixes=normalize_scopes(scope),
             require_exists=require_exists,
         )
 
@@ -983,10 +912,6 @@ def _resolve_target(
     project_root: Path,
     target: Optional[str],
 ) -> Tuple[str, Optional[str], Optional[Dict[str, Any]]]:
-    """
-    Resolves a user target string into ('file', filepath, None),
-    ('symbol', filepath, symbol_record), or ('unknown', norm_target, None).
-    """
     if not target or not target.strip():
         return "none", None, None
 
@@ -1004,11 +929,11 @@ def _resolve_target(
         return "file", norm, None
 
     if repository is not None:
-        resolved_fp = resolve_filepath(repository, norm)
+        resolved_fp = repository.workspace.resolve_filepath(norm)
         if resolved_fp:
             return "file", _norm_posix(resolved_fp), None
 
-        sym_rec = resolve_symbol_in_repo(repository, raw)
+        sym_rec = repository.graph.resolve_symbol(raw)
         if sym_rec:
             sym_fp = _norm_posix(sym_rec.get("filepath")) if sym_rec.get("filepath") else None
             return "symbol", sym_fp, sym_rec
@@ -1023,10 +948,6 @@ def analyze_archaeology(
     commits: int = 100,
     limit: int = 8,
 ) -> Dict[str, Any]:
-    """
-    Produces a compact historical commit timeline for a specific file or symbol.
-    Uses `git log -L start,end:file` for symbols and `git log --follow --numstat` for files.
-    """
     if not target:
         return {"error": "target (file path or symbol) is required for 'archaeology' section.", "items": []}
     if not is_git_repo(project_root):
@@ -1042,7 +963,7 @@ def analyze_archaeology(
     if kind == "symbol" and sym_rec and sym_rec.get("start_line"):
         start_line = int(sym_rec["start_line"])
         end_line = int(sym_rec.get("end_line") or start_line)
-        clean_sym = sym_rec.get("clean_symbol") or demangle_scip_symbol(sym_rec["symbol"])
+        clean_sym = canonical_display_name(sym_rec["symbol"], sym_rec.get("name"))
         raw = _run_git(
             [
                 "log",
@@ -1090,7 +1011,6 @@ def analyze_archaeology(
             "items": items[:limit],
         }
 
-    # File-level archaeology
     raw = _run_git(
         [
             "log",
@@ -1153,10 +1073,6 @@ def run_history_analysis(
     commits: int = 100,
     limit: int = 10,
 ) -> Dict[str, Any]:
-    """
-    Executes any requested combination of Git analysis sections using a single
-    `git log` stream and a single DuckDB structural snapshot.
-    """
     root = Path(project_root).resolve()
     if not is_git_repo(root):
         return {
@@ -1177,7 +1093,7 @@ def run_history_analysis(
 
     include_dirs = load_include_dirs(root)
     exclude_patterns = load_exclude_patterns(root)
-    scope_prefixes = _normalize_scopes(scope)
+    scope_prefixes = normalize_scopes(scope)
 
     file_metrics = (
         compute_file_evolution_metrics(
@@ -1270,11 +1186,6 @@ def get_file_impact_telemetry(
     commits: int = 100,
     coupling_limit: int = 5,
 ) -> Dict[str, Any]:
-    """
-    Centralized on-the-fly Git hotspot & coupling telemetry hook consumed by `impact`.
-    Executes a single `git log` pass to return the focal file's hotspot risk profile
-    and its top Lift-ranked HIDDEN/STRUCTURAL co-change partners.
-    """
     if not filepath or not project_root:
         return {}
     root = Path(project_root).resolve()

@@ -1,8 +1,8 @@
 import json
-from typing import Dict, List, Any, Optional, Union, Tuple
 from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from utils.helpers import demangle_scip_symbol
+from utils.symbol_id import canonical_display_name
 
 
 def _normalize_target(t: Dict[str, Any], default_ext: bool = False) -> Dict[str, Any]:
@@ -13,14 +13,9 @@ def _normalize_target(t: Dict[str, Any], default_ext: bool = False) -> Dict[str,
         path = raw_path.replace("\\", "/").strip("/")
 
     tree_depth = int(t.get("tree_depth", 1))
-    detail_raw = t.get("detail_level", "folder")
-    if isinstance(detail_raw, int):
-        int_map = {1: "folder", 2: "folder", 3: "file", 4: "class", 5: "symbol"}
-        detail_level = int_map.get(detail_raw, "folder")
-    else:
-        detail_level = str(detail_raw).lower()
-        if detail_level not in ("folder", "file", "class", "symbol"):
-            detail_level = "folder"
+    detail_level = str(t.get("detail_level", "folder")).lower()
+    if detail_level not in ("folder", "file", "class", "symbol"):
+        detail_level = "folder"
 
     include_external = bool(t.get("include_external", default_ext))
     return {
@@ -53,37 +48,32 @@ def _compute_group_name(
     norm_fp = fp.replace("\\", "/").strip("/")
 
     if detail_level == "symbol":
-        clean = sym_info.get("clean_symbol") or demangle_scip_symbol(sym_info.get("symbol", ""))
-        return clean or sym_info.get("symbol", "unknown")
+        return canonical_display_name(sym_info.get("symbol", ""), sym_info.get("name")) or "unknown"
 
     if detail_level == "class":
         parent = sym_info.get("parent_symbol")
         if parent:
-            return demangle_scip_symbol(parent)
+            return canonical_display_name(parent)
         kind = (sym_info.get("kind") or "").lower()
-        if kind in ("class", "struct", "interface") or sym_info.get("symbol", "").endswith("#"):
-            return demangle_scip_symbol(sym_info.get("symbol", ""))
+        if kind in ("class", "struct", "interface", "trait", "enum", "extension", "mixin"):
+            return canonical_display_name(sym_info.get("symbol", ""), sym_info.get("name"))
         return norm_fp
 
     if detail_level == "file":
         return norm_fp
 
-    # Default: "folder"
     if target_path and norm_fp.startswith(target_path + "/"):
-        rel = norm_fp[len(target_path) + 1 :]
+        rel = norm_fp[len(target_path) + 1:]
         base = target_path + "/"
     elif target_path and norm_fp == target_path:
         rel = ""
         base = target_path + "/"
-    elif not target_path:
-        rel = norm_fp
-        base = ""
     else:
         rel = norm_fp
         base = ""
 
     parts = [p for p in rel.split("/") if p]
-    dir_parts = parts[:-1]  # Exclude filename
+    dir_parts = parts[:-1]
 
     if tree_depth == 0:
         return (target_path + "/") if target_path else "./"
@@ -102,11 +92,7 @@ def handle_map(
     detail_level: str = "folder",
     include_external: bool = False,
 ) -> str:
-    """
-    Provides a structured, hierarchical architectural blueprint map of the repository.
-    Use this tool when exploring an unfamiliar codebase, understanding subsystem boundaries and topologies, discovering inter-module call dependencies, identifying central architectural hubs, or surveying code organization at configurable depths.
-    """
-    # 1. Parse and normalize target queries
+    """Provides a structured, hierarchical architectural blueprint map of the repository."""
     parsed_targets: List[Dict[str, Any]] = []
     if isinstance(targets, str):
         try:
@@ -135,18 +121,13 @@ def handle_map(
             )
         ]
 
-    # Global external flag: true if any target requests external symbols
     global_allow_ext = any(t["include_external"] for t in parsed_targets)
 
-    # 2. Fetch repository totals & raw entities
     totals = repository.analytics.get_repo_totals()
-
     sym_rows = repository.graph.get_all_symbols()
     edge_rows = repository.graph.get_edges()
-
     symbols_dict: Dict[str, Dict[str, Any]] = {r["symbol"]: r for r in sym_rows}
 
-    # 3. Compute degree and call weights per symbol
     in_degrees: Dict[str, int] = defaultdict(int)
     out_degrees: Dict[str, int] = defaultdict(int)
     for edge in edge_rows:
@@ -162,7 +143,6 @@ def handle_map(
         out_degrees[src] += w
         in_degrees[tgt] += w
 
-    # 4. Map symbols to target queries & groups
     symbol_to_group: Dict[str, str] = {}
     groups: Dict[str, Dict[str, Any]] = {}
 
@@ -174,7 +154,7 @@ def handle_map(
 
         for sym_id, s in symbols_dict.items():
             if sym_id in symbol_to_group:
-                continue  # First matching target wins
+                continue
             fp = s.get("filepath")
             if _matches_target(fp, t_path, t_ext):
                 grp_name = _compute_group_name(fp, s, t_path, t_depth, t_detail)
@@ -191,7 +171,6 @@ def handle_map(
                     groups[grp_name]["filepaths"].add(fp)
                 groups[grp_name]["symbols"].append(s)
 
-    # 5. Compute in/out calls between groups
     group_inbound: Dict[str, int] = defaultdict(int)
     group_outbound: Dict[str, int] = defaultdict(int)
     inter_group_calls: Dict[Tuple[str, str], int] = defaultdict(int)
@@ -202,19 +181,16 @@ def handle_map(
         weight = edge.get("weight", 1)
         src_grp = symbol_to_group.get(src)
         tgt_grp = symbol_to_group.get(tgt)
-        if not src_grp or not tgt_grp:
+        if not src_grp or not tgt_grp or src_grp == tgt_grp:
             continue
-        if src_grp != tgt_grp:
-            w = max(1, round(float(weight))) if weight is not None else 1
-            if w > 0:
-                group_outbound[src_grp] += w
-                group_inbound[tgt_grp] += w
-                inter_group_calls[(src_grp, tgt_grp)] += w
+        w = max(1, round(float(weight))) if weight is not None else 1
+        if w > 0:
+            group_outbound[src_grp] += w
+            group_inbound[tgt_grp] += w
+            inter_group_calls[(src_grp, tgt_grp)] += w
 
-    # 6. Build Markdown Output
     md: List[str] = ["## Repository Architectural Blueprint Map\n"]
 
-    # Section A: Totals
     md.append("### Project Totals")
     md.append("| Files Indexed | Symbols Registered | Dependencies (Call Graph) | Active Violations |")
     md.append("| :---: | :---: | :---: | :---: |")
@@ -223,13 +199,12 @@ def handle_map(
         f"{totals.get('edges', 0)} | {totals.get('violations', 0)} |\n"
     )
 
-    # Section B: Target Tables
     for t_idx, tgt in enumerate(parsed_targets):
         t_path = tgt["path"]
         t_depth = tgt["tree_depth"]
         t_detail = tgt["detail_level"]
         path_label = f"`{t_path}/`" if t_path else "`./` (Root)"
-        header_title = f"Architecture Nodes ({path_label}, tree_depth={t_depth}, detail=\"{t_detail}\")"
+        header_title = f'Architecture Nodes ({path_label}, tree_depth={t_depth}, detail="{t_detail}")'
 
         tgt_groups = [g for g in groups.values() if g["target_idx"] == t_idx]
         tgt_groups.sort(key=lambda x: len(x["symbols"]), reverse=True)
@@ -246,11 +221,9 @@ def handle_map(
                 g_syms = g["symbols"]
                 top_sym = max(g_syms, key=lambda s: in_degrees[s["symbol"]] + out_degrees[s["symbol"]])
                 deg = in_degrees[top_sym["symbol"]] + out_degrees[top_sym["symbol"]]
-                hub_label = top_sym.get("clean_symbol") or demangle_scip_symbol(top_sym["symbol"]) or top_sym["symbol"]
+                hub_label = canonical_display_name(top_sym["symbol"], top_sym.get("name"))
                 hub_display = f"`{hub_label}` ({deg})" if deg > 0 else f"`{hub_label}`"
-                in_c = group_inbound[g["name"]]
-                out_c = group_outbound[g["name"]]
-                md.append(f"| `{g['name']}` | {len(g['filepaths'])} | {len(g_syms)} | {in_c} | {out_c} | {hub_display} |")
+                md.append(f"| `{g['name']}` | {len(g['filepaths'])} | {len(g_syms)} | {group_inbound[g['name']]} | {group_outbound[g['name']]} | {hub_display} |")
 
         elif t_detail == "file":
             md.append("| File | Symbols | Inbound | Outbound | Top Hub Symbol (Connections) |")
@@ -259,11 +232,9 @@ def handle_map(
                 g_syms = g["symbols"]
                 top_sym = max(g_syms, key=lambda s: in_degrees[s["symbol"]] + out_degrees[s["symbol"]])
                 deg = in_degrees[top_sym["symbol"]] + out_degrees[top_sym["symbol"]]
-                hub_label = top_sym.get("clean_symbol") or demangle_scip_symbol(top_sym["symbol"]) or top_sym["symbol"]
+                hub_label = canonical_display_name(top_sym["symbol"], top_sym.get("name"))
                 hub_display = f"`{hub_label}` ({deg})" if deg > 0 else f"`{hub_label}`"
-                in_c = group_inbound[g["name"]]
-                out_c = group_outbound[g["name"]]
-                md.append(f"| `{g['name']}` | {len(g_syms)} | {in_c} | {out_c} | {hub_display} |")
+                md.append(f"| `{g['name']}` | {len(g_syms)} | {group_inbound[g['name']]} | {group_outbound[g['name']]} | {hub_display} |")
 
         elif t_detail == "class":
             md.append("| Component / Class | Kind | File | Symbols | Inbound | Outbound | Top Hub Symbol |")
@@ -272,13 +243,11 @@ def handle_map(
                 g_syms = g["symbols"]
                 top_sym = max(g_syms, key=lambda s: in_degrees[s["symbol"]] + out_degrees[s["symbol"]])
                 deg = in_degrees[top_sym["symbol"]] + out_degrees[top_sym["symbol"]]
-                hub_label = top_sym.get("clean_symbol") or demangle_scip_symbol(top_sym["symbol"]) or top_sym["symbol"]
+                hub_label = canonical_display_name(top_sym["symbol"], top_sym.get("name"))
                 hub_display = f"`{hub_label}` ({deg})" if deg > 0 else f"`{hub_label}`"
                 first_fp = next(iter(g["filepaths"]), "-")
                 first_kind = top_sym.get("kind", "Class")
-                in_c = group_inbound[g["name"]]
-                out_c = group_outbound[g["name"]]
-                md.append(f"| `{g['name']}` | {first_kind} | `{first_fp}` | {len(g_syms)} | {in_c} | {out_c} | {hub_display} |")
+                md.append(f"| `{g['name']}` | {first_kind} | `{first_fp}` | {len(g_syms)} | {group_inbound[g['name']]} | {group_outbound[g['name']]} | {hub_display} |")
 
         elif t_detail == "symbol":
             md.append("| Symbol | Kind | File | Inbound | Outbound | Signature |")
@@ -297,15 +266,12 @@ def handle_map(
                 s_sig = s.get("signature") or "-"
                 if len(s_sig) > 40:
                     s_sig = s_sig[:37] + "..."
-                in_c = in_degrees[sid]
-                out_c = out_degrees[sid]
-                md.append(f"| `{g['name']}` | {s_kind} | `{s_fp}` | {in_c} | {out_c} | `{s_sig}` |")
+                md.append(f"| `{g['name']}` | {s_kind} | `{s_fp}` | {in_degrees[sid]} | {out_degrees[sid]} | `{s_sig}` |")
             if len(display_syms) > limit:
                 md.append(f"\n*(Showing top {limit} of {len(display_syms)} symbols sorted by connections)*")
 
         md.append("")
 
-    # Section C: Inter-Module Call Dependencies (Directional arrows)
     md.append("### Inter-Module Call Dependencies")
     filtered_calls = [item for item in inter_group_calls.items() if item[1] > 0]
     if not filtered_calls:
@@ -318,4 +284,3 @@ def handle_map(
         md.append("")
 
     return "\n".join(md)
-

@@ -1,20 +1,28 @@
 """Tree-sitter AST intelligence engine functions for Arch-mcp."""
 import hashlib
+import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Union, Set
+from typing import Any, Dict, List, Optional, Set, Union
 
 from engines.registry import LanguageRegistry
-from engines.reconciler import reconcile_symbol_id
-from engines.treesitter.loader import detect_language, get_parser, get_language, is_available
-from engines.treesitter.extractor import extract_symbols_from_file, extract_di_edges, SymbolDeclaration
-from engines.treesitter.folding import fold_code
-from engines.treesitter.rules import check_file
-from engines.treesitter.metrics import calculate_metrics
-from engines.treesitter.control_flow import get_context_tags, format_context
-from engines.treesitter.types_extractor import extract_types
 from engines.treesitter.annotations import extract_annotations
-from utils.exclusions import load_include_dirs, load_exclude_patterns, is_included, is_excluded
+from engines.treesitter.control_flow import format_context, get_context_tags
+from engines.treesitter.extractor import SymbolDeclaration, extract_di_edges, extract_symbols_from_file
+from engines.treesitter.folding import fold_code
+from engines.treesitter.loader import detect_language, get_language, get_parser, is_available
+from engines.treesitter.metrics import calculate_metrics
+from engines.treesitter.rules import check_file
+from engines.treesitter.types_extractor import extract_types
+from utils.exclusions import (
+    DEFAULT_EXCLUDED_DIRS,
+    is_excluded,
+    is_included,
+    load_exclude_patterns,
+    load_include_dirs,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def extract_symbols(
@@ -22,7 +30,7 @@ def extract_symbols(
     source: Optional[Union[str, bytes]] = None,
     project_root: Optional[Path] = None,
 ) -> List[SymbolDeclaration]:
-    """Extract all symbol declarations from a file."""
+    """Extract all canonical symbol declarations from a file."""
     return extract_symbols_from_file(filepath, source, project_root)
 
 
@@ -78,40 +86,11 @@ def sync_file_to_db(
     sha256_hash = hashlib.sha256(code_bytes).hexdigest()
     lang = detect_language(fp) or "unknown"
 
-    query_paths = [norm_fp]
-    try:
-        abs_fp = str(fp.resolve()).replace("\\", "/")
-        if abs_fp != norm_fp:
-            query_paths.append(abs_fp)
-    except Exception:
-        pass
-
-    clean_to_existing: Dict[str, str] = {}
-    line_to_existing: Dict[int, str] = {}
-    coord_list: List[tuple] = []
-    for data in repository.graph.get_symbols_for_files(query_paths):
-        sym_id = data["symbol"]
-        clean_to_existing[data.get("clean_symbol") or sym_id] = sym_id
-        s_line = data.get("start_line")
-        if s_line is not None:
-            line_to_existing[s_line] = sym_id
-            coord_list.append((sym_id, s_line))
-
-    symbols_to_upsert = []
-    for decl in declarations:
-        target_symbol_id = reconcile_symbol_id(
-            clean_symbol=decl.clean_symbol,
-            start_line=decl.start_line,
-            clean_to_existing=clean_to_existing,
-            line_to_existing=line_to_existing,
-            occ_list=coord_list,
-            decl_name=decl.name,
-        ) or decl.clean_symbol
-
-        decl.symbol = target_symbol_id
-        symbols_to_upsert.append({
-            "symbol": target_symbol_id,
-            "clean_symbol": decl.clean_symbol,
+    symbols_to_upsert = [
+        {
+            "symbol": decl.symbol,
+            "name": decl.name,
+            "scip_id": None,
             "filepath": norm_fp,
             "kind": decl.kind,
             "signature": decl.signature,
@@ -122,7 +101,9 @@ def sync_file_to_db(
             "start_col": decl.start_col,
             "end_line": decl.end_line,
             "end_col": decl.end_col,
-        })
+        }
+        for decl in declarations
+    ]
 
     raw_di_edges = extract_di_edges(fp, code_bytes, project_root=project_root, declarations=declarations)
     injects_to_upsert: List[Dict[str, Any]] = []
@@ -132,11 +113,8 @@ def sync_file_to_db(
             t_name = item["target_name"]
             resolved_target = leaf_symbol_map.get(t_name) if leaf_symbol_map is not None else None
             if not resolved_target and leaf_symbol_map is None:
-                matches = repository.graph.search_symbols(t_name, limit=10)
-                for m in matches:
-                    clean_m = m.get("clean_symbol") or m["symbol"]
-                    leaf = clean_m.rstrip("()").split(".")[-1]
-                    if leaf == t_name:
+                for m in repository.graph.search_symbols(t_name, limit=10):
+                    if m.get("name") == t_name:
                         resolved_target = m["symbol"]
                         break
             if resolved_target and resolved_target != item["source"]:
@@ -151,7 +129,6 @@ def sync_file_to_db(
                         "call_line": item["call_line"],
                     })
 
-    # Deduplicate symbols_to_upsert by symbol to prevent duplicate key errors in DuckDB UNNEST
     deduped_symbols = list({s["symbol"]: s for s in symbols_to_upsert}.values())
 
     if commit:
@@ -188,7 +165,6 @@ def sync_project_to_db(
             if p.exists() and p.is_file():
                 target_files.append(p)
     else:
-        ignore_dirs = {".git", "target", "build", ".dart_tool", "node_modules", ".venv", "__pycache__", ".arch", "dist", "bin"}
         target_roots = [project_root / d for d in include_dirs] if include_dirs else [project_root]
         valid_exts = LanguageRegistry.list_extensions()
 
@@ -199,7 +175,7 @@ def sync_project_to_db(
                 target_files.append(root_path)
                 continue
             for root, dirs, files in os.walk(root_path):
-                dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".")]
+                dirs[:] = [d for d in dirs if d not in DEFAULT_EXCLUDED_DIRS and not d.startswith(".")]
                 for f in files:
                     if os.path.splitext(f)[1].lower() in valid_exts:
                         p = Path(root) / f
@@ -216,12 +192,10 @@ def sync_project_to_db(
                             continue
 
     with repository.transaction():
-        # Pre-build in-memory leaf map from existing DB symbols to avoid slow per-call LIKE scans
         existing_syms = repository.graph.get_all_symbols()
         leaf_map: Dict[str, str] = {}
         for s in existing_syms:
-            clean = s.get("clean_symbol") or s["symbol"]
-            leaf = clean.rstrip("()").split(".")[-1]
+            leaf = s.get("name")
             if leaf and leaf not in leaf_map:
                 leaf_map[leaf] = s["symbol"]
 
@@ -239,7 +213,7 @@ def sync_project_to_db(
                         leaf_map[d.name] = d.symbol
                 total_symbols += len(decls)
             except Exception:
-                pass
+                logger.exception("Failed Tree-sitter AST sync for %s", p)
 
     return total_symbols
 
@@ -264,4 +238,3 @@ __all__ = [
     "sync_file_to_db",
     "sync_project_to_db",
 ]
-

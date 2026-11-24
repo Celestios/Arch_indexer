@@ -1,8 +1,9 @@
-import sys
-from typing import Any
+import logging
 
 from db.repository import Repository
 from utils.arch_config import ArchConfig
+
+logger = logging.getLogger(__name__)
 
 
 class FieldValidator:
@@ -11,12 +12,11 @@ class FieldValidator:
     def __init__(self, repository: Repository):
         self.repository = repository
 
-    def reset_invalid_manual_fields(self, config: Any):
-        cfg = config if isinstance(config, ArchConfig) else ArchConfig.from_dict(config)
+    def reset_invalid_manual_fields(self, config: ArchConfig):
         file_metadata = self.repository.workspace.get_all_files_metadata()
 
         for filepath, meta in file_metadata.items():
-            prefix_conf = cfg.get_applicable_config(filepath)
+            prefix_conf = config.get_applicable_config(filepath)
             if not prefix_conf:
                 continue
 
@@ -39,10 +39,13 @@ class FieldValidator:
                 curr_val = current_manual_fields.get(field_name)
 
                 if curr_val is not None and allowed_values is not None and curr_val not in allowed_values:
-                    print(
-                        f"warning: value '{curr_val}' for manual field '{field_name}' in '{filepath}' is no longer allowed. "
-                        f"Resetting to default '{default_val}' and marking for audit.",
-                        file=sys.stderr,
+                    logger.warning(
+                        "Value '%s' for manual field '%s' in '%s' is no longer allowed. "
+                        "Resetting to default '%s' and marking for audit.",
+                        curr_val,
+                        field_name,
+                        filepath,
+                        default_val,
                     )
                     updated_fields[field_name] = default_val
                     fields_changed = True

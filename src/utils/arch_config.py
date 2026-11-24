@@ -1,13 +1,7 @@
-"""Typed, normalized domain model for `.arch/config.json`.
-
-This module is deliberately dependency-free (stdlib only) and JSON-round-trippable.
-It centralizes two invariants that were previously duplicated across consumers:
-
-* top-level ``exclude`` is separated from directory ``prefixes``;
-* every field configuration carries a single canonical ``barrier_field`` (the
-  field's own name when not explicitly configured).
-"""
+"""Typed, normalized domain model for `.arch/config.json`."""
 from dataclasses import dataclass, field
+import json
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 
@@ -17,6 +11,7 @@ def _normalize_exclude(value: Any) -> List[str]:
     if isinstance(value, str) and value:
         return [value]
     return []
+
 
 def build_rule_id(
     prefix: Optional[str],
@@ -28,26 +23,27 @@ def build_rule_id(
 ) -> str:
     """Canonical rule_id builder shared by config ingestion and violation checkers."""
     parts: List[str] = []
-    if prefix:
-        parts.append(prefix)
-    if field_name:
-        parts.append(field_name)
 
     if rule_type == "package_restriction":
+        if field_name:
+            parts.append(field_name)
         parts.extend(["pkg", source or "*"])
     elif rule_type == "naming_convention":
         parts.extend(["naming", classification or "*"])
     else:
+        if prefix:
+            parts.append(prefix)
+        if field_name:
+            parts.append(field_name)
         parts.extend([source or "*", target or "*"])
 
     return "_".join(parts).lower().replace("/", "_").replace(".", "_")
 
 
-
 class _MappingMixin:
     """Small read-only mapping helper shared by the config dataclasses."""
 
-    def get(self, key: str, default: Any = None) -> Any:  # pragma: no cover - overridden
+    def get(self, key: str, default: Any = None) -> Any:
         raise NotImplementedError
 
     def __getitem__(self, key: str) -> Any:
@@ -72,7 +68,6 @@ class FieldConfig(_MappingMixin):
     @classmethod
     def from_dict(cls, name: str, raw: Any) -> "FieldConfig":
         conf = dict(raw) if isinstance(raw, dict) else {}
-        # Single source of truth for barrier resolution: explicit value, else own name.
         conf["barrier_field"] = conf.get("barrier_field") or name
         return cls(name=name, raw=conf)
 
@@ -97,39 +92,12 @@ class FieldConfig(_MappingMixin):
 
 
 @dataclass
-class RuleConfig(_MappingMixin):
-    """A single rule definition (kept dict-like for backwards compatibility)."""
-
-    raw: Dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_dict(cls, raw: Any) -> "RuleConfig":
-        return cls(raw=dict(raw) if isinstance(raw, dict) else {})
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.raw.get(key, default)
-
-    def keys(self):
-        return self.raw.keys()
-
-    def values(self):
-        return self.raw.values()
-
-    def items(self):
-        return self.raw.items()
-
-    def to_dict(self) -> Dict[str, Any]:
-        return dict(self.raw)
-
-
-@dataclass
 class PrefixConfig(_MappingMixin):
     """Configuration for one directory prefix."""
 
     name: str
     automatic_fields: Dict[str, FieldConfig] = field(default_factory=dict)
     manual_fields: Dict[str, FieldConfig] = field(default_factory=dict)
-    rules: List[RuleConfig] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -137,31 +105,29 @@ class PrefixConfig(_MappingMixin):
         conf = dict(raw) if isinstance(raw, dict) else {}
 
         auto_raw = conf.get("automatic_fields")
-        auto_fields = {}
-        if isinstance(auto_raw, dict):
-            auto_fields = {
+        auto_fields = (
+            {
                 field_name: FieldConfig.from_dict(field_name, field_conf)
                 for field_name, field_conf in auto_raw.items()
             }
+            if isinstance(auto_raw, dict)
+            else {}
+        )
 
         manual_raw = conf.get("manual_fields")
-        manual_fields = {}
-        if isinstance(manual_raw, dict):
-            manual_fields = {
+        manual_fields = (
+            {
                 field_name: FieldConfig.from_dict(field_name, field_conf)
                 for field_name, field_conf in manual_raw.items()
             }
-
-        rules_raw = conf.get("rules")
-        rules = []
-        if isinstance(rules_raw, list):
-            rules = [RuleConfig.from_dict(r) for r in rules_raw if isinstance(r, dict)]
+            if isinstance(manual_raw, dict)
+            else {}
+        )
 
         return cls(
             name=name,
             automatic_fields=auto_fields,
             manual_fields=manual_fields,
-            rules=rules,
             raw=conf,
         )
 
@@ -170,8 +136,6 @@ class PrefixConfig(_MappingMixin):
             return self.automatic_fields
         if key == "manual_fields":
             return self.manual_fields
-        if key == "rules":
-            return self.rules
         return self.raw.get(key, default)
 
     def keys(self):
@@ -193,18 +157,12 @@ class PrefixConfig(_MappingMixin):
             name: field_conf.to_dict()
             for name, field_conf in self.manual_fields.items()
         }
-        conf["rules"] = [rule.to_dict() for rule in self.rules]
         return conf
 
 
 @dataclass
 class ArchConfig(_MappingMixin):
-    """Normalized representation of the whole architecture configuration.
-
-    Dict-like access (``items``/``keys``/``values``/``get``/``in``/``len``/
-    iteration) exposes **only** the directory prefixes. The top-level
-    ``exclude`` list is available via the ``exclude`` attribute.
-    """
+    """Normalized representation of the whole architecture configuration."""
 
     prefixes: Dict[str, PrefixConfig] = field(default_factory=dict)
     exclude: List[str] = field(default_factory=list)
@@ -276,9 +234,7 @@ class ArchConfig(_MappingMixin):
             all_fields = {**manual_fields, **auto_fields}
 
             def get_field_cfg(name: str):
-                if name in auto_fields:
-                    return auto_fields[name]
-                return manual_fields.get(name)
+                return auto_fields[name] if name in auto_fields else manual_fields.get(name)
 
             for field_name, field_conf in all_fields.items():
                 if not isinstance(field_conf, dict):
@@ -288,7 +244,6 @@ class ArchConfig(_MappingMixin):
                 default_val = field_conf.get("default")
                 allowed_values = field_conf.get("values")
 
-                # Reachability checks
                 if allowed_values is not None and field_name in auto_fields:
                     if not isinstance(allowed_values, list):
                         errors.append(f"Prefix '{prefix}' field '{field_name}' allowed values list must be a list")
@@ -309,7 +264,6 @@ class ArchConfig(_MappingMixin):
                                 f"Prefix '{prefix}' field '{field_name}': Values that are defined but not used: {unused_values}"
                             )
 
-                # Dependency rules referential integrity
                 rules = field_conf.get("rules", [])
                 if rules:
                     if not isinstance(rules, list):
@@ -349,7 +303,6 @@ class ArchConfig(_MappingMixin):
                                     if target not in allowed_values:
                                         errors.append(f"Prefix '{prefix}' field '{field_name}' rule target '{target}' is not in allowed values list {allowed_values}")
 
-                # Propagation barriers referential integrity
                 barriers = field_conf.get("barriers", [])
                 if barriers:
                     if not isinstance(barriers, list):
@@ -374,19 +327,10 @@ class ArchConfig(_MappingMixin):
         return {"success": len(errors) == 0, "errors": errors, "warnings": warnings}
 
     @classmethod
-    def parse_and_validate(cls, path: Union[str, Any]) -> Tuple[Optional["ArchConfig"], Dict[str, Any]]:
-        """Parses and validates the configuration from a project root or config file path.
-        Returns a tuple (arch_config_or_none, validation_result_dict).
-        """
-        import json
-        from pathlib import Path
+    def parse_and_validate(cls, path: Union[str, Path]) -> Tuple[Optional["ArchConfig"], Dict[str, Any]]:
+        """Parses and validates the configuration from a project root or config file path."""
         p = Path(path)
-        if p.is_dir():
-            target = p / ".arch" / "config.json"
-        elif p.name == "config.json":
-            target = p
-        else:
-            target = p
+        target = (p / ".arch" / "config.json") if p.is_dir() else p
 
         if not target.exists():
             return None, {"success": False, "errors": [f"Configuration file not found at {target}"], "warnings": []}
@@ -456,5 +400,3 @@ class ArchConfig(_MappingMixin):
             result[name] = prefix_conf.to_dict()
         result.update(self.extra)
         return result
-
-

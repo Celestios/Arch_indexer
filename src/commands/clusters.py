@@ -14,7 +14,7 @@ def register(subparsers):
     p.add_argument("--cluster", default=None, help="Cluster ID or target symbol/filepath to inspect")
     p.add_argument("--depth", type=int, default=2, help="Hierarchy expansion depth (default: 2)")
     p.add_argument("--unit", choices=["symbol", "file"], default="symbol", help="Unit of analysis (default: symbol)")
-    p.add_argument("--view", choices=["both", "tree", "mermaid"], default="both", help="Output view (default: both)")
+    p.add_argument("--view", choices=["both", "tree", "mermaid", "summary"], default="both", help="Output view (default: both)")
     p.add_argument("--scope", default=None, help="Comma-separated directory prefix scope filter")
     p.add_argument("--language", default=None, help="Language filter")
     p.add_argument("--include-tests", action="store_true", default=False, help="Include test files and symbols")

@@ -22,6 +22,7 @@ Select Arch tools based on the abstraction level and lifecycle phase of your tas
 | Situation / Objective | Recommended Tool | Purpose |
 | :--- | :--- | :--- |
 | **High-Level Orientation** | `map` | Architectural overview: symbol communities, module couplings, and key hub symbols. |
+| **Emergent Architecture & Drift** | `clusters` | Parameter-free hierarchical clustering, containment scoring, macro subsystems overview, and architectural drift diagnostics. |
 | **Locating Code Elements** | `lookup` | Keyword and semantic search across symbols, docstrings, and filenames. |
 | **File Outline & Structure** | `context` | Structural Table of Contents (classes, functions, methods, line ranges) without loading full file bodies into memory. |
 | **Call Paths & Dependencies** | `graph` | Query caller/callee relationships and dependency links between symbols. |
@@ -33,7 +34,7 @@ Select Arch tools based on the abstraction level and lifecycle phase of your tas
 | **Audit Workflow Closure** | `clear_pending` | Clear pending audit flags after reviewing or updating compliant modules. |
 | **Audit Timeline & Audit Trail** | `history` | Inspect past audit runs, state transitions, and compliance history. |
 | **Index Synchronization** | `update` | Trigger incremental or full re-indexing of modified or newly added files. |
-| **Custom Graph / Component Analytics** | `query` | Read-only SQL queries on DuckDB index (`.arch/arch.db`) with optional file JSON export. |
+| **Custom Graph / Component Analytics** | `query` | Read-only SQL on DuckDB index (`.arch/arch.db`). **Last resort only**: Do not use frequently; only when no other tool can answer the question. |
 
 ---
 
@@ -50,12 +51,16 @@ Select Arch tools based on the abstraction level and lifecycle phase of your tas
    - Full SCIP index updates may lag behind recent file edits, though Arch MCP performs fast Tree-sitter updates for immediate symbol/structural changes.
    - When files are modified, created, or deleted during work, call `update` to refresh the index or use alternative methods (such as targeted, bounded line reads).
 
+4. **Query Tool Discipline (Last Resort)**:
+   - Do **NOT** use `query` frequently. Always prefer specialized tools (`lookup`, `context`, `graph`, `impact`, `compile_context`, `clusters`, `map`, `audit`).
+   - Use `query` only when you have no other better way to retrieve specific graph telemetry or ad-hoc relational joins that no domain tool provides.
+
 ---
 
 ## 3. Recommended Workflow
 
 ```
-1. Orient:       map (if starting fresh) or lookup (if searching known term)
+1. Orient:       map or clusters (overview of subsystems, hubs, and drift) or lookup (known term)
 2. Outline:      context (inspect structure and exact line bounds)
 3. Safety Check: impact (assess blast radius before touching code)
 4. Contextualize: compile_context (gather caller/callee code context if needed)

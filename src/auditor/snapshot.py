@@ -52,6 +52,11 @@ class AuditSnapshot:
                     "end_col": int(sym["end_col"]) if sym.get("end_col") is not None else 0,
                 }
 
+        if hasattr(repository, "graph") and hasattr(repository.graph, "get_definitions_map"):
+            for sid, dinfo in repository.graph.get_definitions_map().items():
+                if sid not in definitions_by_symbol:
+                    definitions_by_symbol[sid] = dinfo
+
         outgoing_map: Dict[str, List[str]] = {}
         incoming_map: Dict[str, List[Dict[str, Any]]] = {}
         for edge in edges:

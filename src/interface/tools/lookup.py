@@ -1,6 +1,8 @@
 from typing import List, Union
+
 from interface.formatters import format_lookup_file, format_lookup_symbol
-from utils.helpers import demangle_scip_symbol, resolve_symbol_in_repo, is_test_caller
+from utils.helpers import is_test_caller
+from utils.symbol_id import canonical_display_name
 
 
 def _lookup_single(target: str, repository) -> str:
@@ -8,7 +10,7 @@ def _lookup_single(target: str, repository) -> str:
     target_normalized = target.strip()
     target_slashes = target_normalized.replace(".", "/")
 
-    exact_symbol = resolve_symbol_in_repo(repository, target_normalized)
+    exact_symbol = repository.graph.resolve_symbol(target_normalized)
     matching_symbols = []
     if not exact_symbol:
         raw_matches = repository.graph.search_symbols(target_normalized, 10)
@@ -51,7 +53,6 @@ def _lookup_single(target: str, repository) -> str:
             meta_batch = repository.graph.get_symbols_by_ids(list(other_syms))
             sym_fp_map = {s: meta["filepath"] for s, meta in meta_batch.items() if meta.get("filepath")}
 
-        # Keep test callers/references out of the main table; they are listed under Covered By Tests
         filtered_occs = [
             o for o in occs
             if (o.get("filepath") or "").replace("\\", "/") == focal_fp
@@ -87,7 +88,7 @@ def _lookup_single(target: str, repository) -> str:
             for s in up_syms:
                 fp = meta_batch.get(s, {}).get("filepath")
                 if is_test_caller(s, fp):
-                    clean_test = demangle_scip_symbol(s)
+                    clean_test = canonical_display_name(s)
                     if clean_test not in seen_clean:
                         seen_clean.add(clean_test)
                         tests_found.append((clean_test, fp))
@@ -112,7 +113,7 @@ def _lookup_single(target: str, repository) -> str:
                 "| :--- | :--- | :--- | :--- | :--- |",
             ]
             for d in file_diags:
-                sym_str = f"`{demangle_scip_symbol(d['symbol'])}`" if d.get("symbol") else "-"
+                sym_str = f"`{canonical_display_name(d['symbol'])}`" if d.get("symbol") else "-"
                 code_str = f"`{d['code']}`" if d.get("code") else ""
                 diag_lines.append(f"| {sym_str} | L{d['line']}:{d['col']} | `{d['severity']}` | {code_str} | {d['message']} |")
             file_md += "\n" + "\n".join(diag_lines) + "\n"
@@ -128,8 +129,8 @@ def _lookup_single(target: str, repository) -> str:
         if matching_symbols:
             md.append("### Matching Code Symbols Found")
             for s in matching_symbols:
-                clean_name = s.get("clean_symbol") or demangle_scip_symbol(s["symbol"])
-                md.append(f"- **{clean_name}** (`{s.get('kind', 'UnspecifiedKind')}` in `{s.get('filepath') or 'External'}`)")
+                disp = canonical_display_name(s["symbol"], s.get("name"))
+                md.append(f"- **{disp}** (`{s.get('kind', 'UnspecifiedKind')}` in `{s.get('filepath') or 'External'}`)")
             md.append("")
 
         if not matching_files and not matching_symbols:

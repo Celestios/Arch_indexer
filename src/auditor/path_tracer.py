@@ -1,18 +1,19 @@
-"""Pure path-tracing, blocklist matching, and symbol-name formatting helpers."""
+"""Pure path-tracing, blocklist matching, and canonical symbol-name helpers."""
 import fnmatch
 from typing import List, Optional, TYPE_CHECKING
+
+from utils.symbol_id import parse_canonical_id
 
 if TYPE_CHECKING:
     from auditor.snapshot import AuditSnapshot
 
 
 def get_simple_name(symbol: str) -> str:
-    """Extracts the simple class or function name from a SCIP FQN."""
-    sym = symbol.strip()
-    for separator in (" ", "::", ".", "/"):
-        if separator in sym:
-            sym = sym.split(separator)[-1]
-    return sym
+    """Extracts the leaf symbol name from a canonical symbol ID."""
+    if not symbol:
+        return ""
+    _, _, leaf = parse_canonical_id(symbol)
+    return leaf
 
 
 def format_path_trace(path: List[str], snapshot: Optional["AuditSnapshot"] = None) -> str:
@@ -47,9 +48,32 @@ def format_path_trace(path: List[str], snapshot: Optional["AuditSnapshot"] = Non
     return "\nPath:\n" + "\n".join(trace_lines)
 
 
-def matches_blocklist(symbol: str, blocklist: List[str]) -> bool:
-    """Checks if a symbol matches any pattern in a blocklist."""
-    for pattern in blocklist:
-        if fnmatch.fnmatch(symbol, pattern):
-            return True
+def matches_blocklist(symbol: str, blocklist: List[str], alt_symbols: Optional[List[str]] = None) -> bool:
+    """Checks if a canonical external symbol (or its raw scip_id/name) matches any glob in a blocklist."""
+    candidates = [symbol]
+    if alt_symbols:
+        candidates.extend(s for s in alt_symbols if s)
+
+    if symbol.startswith("ext::"):
+        pkg_prefix, scope_parts, leaf = parse_canonical_id(symbol)
+        # pkg_prefix is 'ext::<mgr>/<pkg>'
+        rest = pkg_prefix[5:] if pkg_prefix else ""
+        candidates.append(rest)
+        if "/" in rest:
+            _, pkg = rest.split("/", 1)
+            sub_segments = [s for s in (*scope_parts, leaf) if s]
+            sub_path = "/".join(sub_segments)
+            candidates.append(pkg)
+            candidates.append(f"package:{pkg}")
+            if sub_path:
+                candidates.append(f"{pkg}/{sub_path}")
+                candidates.append(f"package:{pkg}/{sub_path}")
+            else:
+                candidates.append(f"{pkg}/")
+                candidates.append(f"package:{pkg}/")
+
+    for s in candidates:
+        for pattern in blocklist:
+            if fnmatch.fnmatch(s, pattern):
+                return True
     return False

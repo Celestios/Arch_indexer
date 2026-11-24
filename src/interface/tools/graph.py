@@ -1,9 +1,7 @@
 """MCP tool handler for building the interactive Electronic PCB Circuit Diagram HTML visualizer."""
-import contextlib
 import os
-import sys
 from pathlib import Path
-from typing import Optional, List, Union
+from typing import List, Optional, Union
 
 
 def handle_graph(
@@ -23,13 +21,12 @@ def handle_graph(
     if not db_path.exists():
         return f"Error: Arch database not found at {db_path}. Please run 'arch init' in '{project_root}' first."
 
-    # If no scope explicitly provided, default to registered directories in .arch/config.json
     if scope is None:
         try:
             from utils.exclusions import load_include_dirs
             inc_dirs = load_include_dirs(project_root)
             if inc_dirs:
-                scope = sorted(list(inc_dirs))
+                scope = sorted(inc_dirs)
         except Exception:
             pass
 
@@ -45,23 +42,20 @@ def handle_graph(
     try:
         from graph_builder.cli import build_graph_html
 
-        # Redirect stdout to stderr to protect stdio JSON-RPC streams
-        with contextlib.redirect_stdout(sys.stderr):
-            abs_output = build_graph_html(
-                db_path=str(db_path),
-                output_path=out_file,
-                include_occurrences=include_occurrences,
-                max_refs_per_symbol=max_refs,
-                include_external=include_external,
-                exclude_tests=not include_tests,
-                exclude_parameters=not include_parameters,
-                exclude_boilerplate=exclude_boilerplate,
-                scope=scope,
-                config_path=config_path,
-                open_browser=open_browser,
-                project_root=project_root,
-            )
-
+        abs_output = build_graph_html(
+            db_path=str(db_path),
+            output_path=out_file,
+            include_occurrences=include_occurrences,
+            max_refs_per_symbol=max_refs,
+            include_external=include_external,
+            exclude_tests=not include_tests,
+            exclude_parameters=not include_parameters,
+            exclude_boilerplate=exclude_boilerplate,
+            scope=scope,
+            config_path=config_path,
+            open_browser=open_browser,
+            project_root=project_root,
+        )
         return f"Successfully generated architecture circuit visualizer at: {abs_output}"
     except Exception as e:
         return f"Error generating architecture circuit visualizer: {e}"

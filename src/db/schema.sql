@@ -1,4 +1,4 @@
--- Schema for Arch-mcp code intelligence database (DuckDB)
+-- Schema for Arch-mcp code intelligence database (DuckDB, schema_version = 4)
 
 -- 1. Track files in the workspace, their hashes, and when they were indexed
 CREATE TABLE IF NOT EXISTS files (
@@ -16,15 +16,16 @@ CREATE TABLE IF NOT EXISTS files (
 
 -- 2. Track symbols (classes, functions, methods, structs)
 CREATE TABLE IF NOT EXISTS symbols (
-    symbol VARCHAR PRIMARY KEY,
-    clean_symbol VARCHAR,
+    symbol VARCHAR PRIMARY KEY, -- Canonical ID: <filepath>::<ScopeChain>::<name> or ext::<mgr>/<pkg>::<ScopeChain>::<name>
+    name VARCHAR NOT NULL, -- Clean leaf identifier only
+    scip_id VARCHAR, -- Nullable opaque raw SCIP string (isolated to SCIP ingress & package blocklists)
     filepath VARCHAR, -- Nullable for external third-party library dependencies
     kind VARCHAR NOT NULL, -- Class, Struct, Function, Method, etc.
     signature TEXT,
     docstring TEXT,
-    body_hash VARCHAR, -- AST body hash to skip edge update if unchanged
+    body_hash VARCHAR, -- AST body hash to detect edits and skip redundant updates
     connection_weight INTEGER DEFAULT 0,
-    parent_symbol VARCHAR, -- Enclosing symbol (AST parent scope)
+    parent_symbol VARCHAR, -- Canonical enclosing symbol ID
     classification VARCHAR DEFAULT '{}', -- Architectural metadata fields (layer, tier, etc.)
     change_count INTEGER DEFAULT 1,
     last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -49,7 +50,7 @@ CREATE TABLE IF NOT EXISTS occurrences (
 CREATE TABLE IF NOT EXISTS edges (
     source VARCHAR,
     target VARCHAR,
-    relation VARCHAR NOT NULL, -- e.g., 'Calls', 'Inherits', 'Implements'
+    relation VARCHAR NOT NULL, -- e.g., 'Calls', 'Inherits', 'Implements', 'FFI_Binds'
     weight FLOAT NOT NULL DEFAULT 1.0,
     call_line INTEGER,
     PRIMARY KEY (source, target, relation)
@@ -74,7 +75,7 @@ CREATE TABLE IF NOT EXISTS compliance_violations (
     origin VARCHAR DEFAULT 'automatic' -- 'automatic' or 'manual'
 );
 
--- 7. Track system metadata (e.g. config hashes, indexing state)
+-- 7. Track system metadata (e.g. schema_version, config_hash)
 CREATE TABLE IF NOT EXISTS system_metadata (
     key VARCHAR PRIMARY KEY,
     value VARCHAR NOT NULL
@@ -90,13 +91,4 @@ CREATE TABLE IF NOT EXISTS diagnostics (
     code VARCHAR,
     message TEXT NOT NULL,
     tags VARCHAR
-);
-
--- 9. Track historical git co-change coupling
-CREATE TABLE IF NOT EXISTS file_co_changes (
-    filepath_a VARCHAR NOT NULL,
-    filepath_b VARCHAR NOT NULL,
-    co_change_count INTEGER NOT NULL,
-    frequency FLOAT NOT NULL,
-    PRIMARY KEY (filepath_a, filepath_b)
 );

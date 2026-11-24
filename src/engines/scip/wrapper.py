@@ -1,12 +1,16 @@
 import shutil
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List
 
-from utils.exclusions import load_include_dirs, is_included
 from engines.registry import LanguageRegistry
-from engines.scip.indexers import run_indexer, _move_index_to_arch
-from engines.scip.parser import parse_index
+from engines.scip.indexers import _move_index_to_arch, run_indexer
 from engines.scip.ingester import ingest_index
+from engines.scip.parser import parse_index
+from utils.exclusions import DEFAULT_EXCLUDED_DIRS, is_included, load_include_dirs
+
+
+def _has_excluded_part(p: Path) -> bool:
+    return any(part in DEFAULT_EXCLUDED_DIRS for part in p.parts)
 
 
 def detect_languages(project_dir: Path) -> List[str]:
@@ -27,8 +31,7 @@ def detect_languages(project_dir: Path) -> List[str]:
         if not detected and spec.manifest_names:
             for manifest in spec.manifest_names:
                 for p in project_dir.rglob(manifest):
-                    p_str = str(p).replace("\\", "/")
-                    if any(skip in p_str for skip in (".dart_tool", "dart_analyzer", "/target/", "/.arch/", "/node_modules/", "/.git/")):
+                    if _has_excluded_part(p):
                         continue
                     if _is_path_included(p):
                         detected = True
@@ -39,8 +42,7 @@ def detect_languages(project_dir: Path) -> List[str]:
         if not detected and spec.extensions:
             for ext in spec.extensions:
                 for p in project_dir.glob(f"**/*{ext}"):
-                    p_str = str(p).replace("\\", "/")
-                    if any(skip in p_str for skip in (".dart_tool", "/target/", "/.arch/", "/node_modules/", "/.git/", "/__pycache__/")):
+                    if _has_excluded_part(p):
                         continue
                     if _is_path_included(p):
                         detected = True

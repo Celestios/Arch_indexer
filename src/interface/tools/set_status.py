@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from auditor.analyzer import Auditor
-from utils.helpers import resolve_filepath
 from utils.violation_id import generate_violation_id
 
 
@@ -26,7 +25,7 @@ def handle_set_status(
     if status_upper == "VIOLATION_DETECTED" and not justification:
         return "Error: Justification must be provided when flagging a file as VIOLATION_DETECTED.", False
 
-    resolved = resolve_filepath(repository, filepath)
+    resolved = repository.workspace.resolve_filepath(filepath)
     if not resolved:
         return f"Error: File '{filepath}' is not registered in the database.", False
 

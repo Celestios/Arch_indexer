@@ -78,7 +78,7 @@ def parse_scip_symbol(
     symbol_str: str,
     filepath: Optional[str] = None,
     known_files: Optional[Set[str]] = None,
-    clean_symbol: Optional[str] = None,
+    name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Parses a SCIP symbol string into structured components without hardcoded repo names."""
     if not symbol_str:
@@ -150,11 +150,11 @@ def parse_scip_symbol(
             "is_parameter": is_parameter,
         }
 
-    source_text = clean_symbol or symbol_str
+    source_text = name or symbol_str
     cleaned = source_text.replace("`", "").rstrip("#/.")
     has_parens = cleaned.endswith("()") or cleaned.endswith("().")
     base = cleaned[:-3] if cleaned.endswith("().") else (cleaned[:-2] if cleaned.endswith("()") else cleaned)
-    leaf = re.split(r"[/:\\.#]", base)[-1]
+    leaf = re.split(r"[/:\\.#]|::", base)[-1]
     label = (leaf + "()") if has_parens else leaf
     return {
         "raw": symbol_str,
@@ -167,3 +167,8 @@ def parse_scip_symbol(
         "is_external": False,
         "is_parameter": is_parameter,
     }
+
+
+class ScipParser:
+    parse_signature_ports = staticmethod(parse_signature_ports)
+    parse_scip_symbol = staticmethod(parse_scip_symbol)

@@ -1,13 +1,14 @@
-import sys
 import json
+import sys
 from pathlib import Path
 
-from setup.initializer import initialize_workspace
 from db.connection import DbConnection
 from db.repository import Repository
+from engines.registry import LanguageRegistry
 from engines.scip.wrapper import detect_languages, verify_environment
 from engines.sync_pipeline import sync_workspace
-from engines.registry import LanguageRegistry
+from setup.initializer import initialize_workspace
+from utils.exclusions import DEFAULT_EXCLUDED_DIRS
 from utils.session import get_project_root
 
 
@@ -72,9 +73,7 @@ def _select_include_dirs(project_root: Path, arch_dir: Path, force: bool = False
         print(f"[Force] Preserving existing {config_path.name} (no directory prefixes configured; indexing workspace root).")
         return []
 
-    skip_dirs = {".git", ".arch", ".venv", "__pycache__", "node_modules", ".mypy_cache", ".pytest_cache", "build", "dist"}
     code_exts = LanguageRegistry.list_extensions()
-
     code_dirs = set()
     for ext in code_exts:
         for f in project_root.rglob(f"*{ext}"):
@@ -85,7 +84,7 @@ def _select_include_dirs(project_root: Path, arch_dir: Path, force: bool = False
             if len(rel.parts) <= 1:
                 continue
             top = rel.parts[0]
-            if top not in skip_dirs and not top.startswith(".") and (project_root / top).is_dir():
+            if top not in DEFAULT_EXCLUDED_DIRS and not top.startswith(".") and (project_root / top).is_dir():
                 code_dirs.add(top)
 
     code_dirs = sorted(code_dirs, key=str.lower)
@@ -129,7 +128,6 @@ def cmd_init(args):
     project_root = get_project_root(args)
     force = getattr(args, "force", False)
 
-    # 1. Workspace init
     if force:
         arch_dir = project_root / ".arch"
         db_path = arch_dir / "arch.db"
@@ -149,7 +147,6 @@ def cmd_init(args):
     arch_dir = initialize_workspace(project_root)
     print(f"\nWorkspace folder initialized at {arch_dir}")
 
-    # 2. Auto-recognition
     languages = detect_languages(project_root)
     print("\n[Auto-Recognition] System Status:")
     if not languages:
@@ -161,15 +158,12 @@ def cmd_init(args):
             status_str = "Available" if available else "NOT found on PATH"
             print(f"    * {lang.capitalize()} Toolchain: {status_str}")
 
-    # 3. User selections
     selected_languages = _select_languages(languages)
     _select_include_dirs(project_root, arch_dir, force=force)
 
-    # 4. Create shared repository for indexing and linking
     db_conn = DbConnection(arch_dir / "arch.db")
     repository = Repository(db_conn)
 
-    # Sync compliance rules from config.json now that it is configured
     try:
         from setup.initializer import sync_rules_to_db
         from utils.helpers import load_config
@@ -177,7 +171,6 @@ def cmd_init(args):
     except Exception as e:
         print(f"Warning: Failed to sync compliance rules: {e}", file=sys.stderr)
 
-    # 5. Run Unified Synchronization Pipeline (Tree-sitter AST, SCIP Semantic, and FFI)
     print("\n--- Running Workspace Synchronization Pipeline ---")
     sync_res = sync_workspace(
         repository,
@@ -195,7 +188,6 @@ def cmd_init(args):
 
     db_conn.close()
 
-    # 6. Summary
     if selected_languages:
         if indexed_any:
             print("\nIndexing completed successfully!")

@@ -85,13 +85,14 @@ class DatabaseReader:
             filepath = sym.get("filepath")
             signature = sym.get("signature")
             docstring = sym.get("docstring")
-            clean_sym = sym.get("clean_symbol")
+            name = sym.get("name") or raw_sym
 
-            parsed = parse_scip_symbol(raw_sym, filepath=filepath, known_files=known_files, clean_symbol=clean_sym)
+            parsed = parse_scip_symbol(raw_sym, filepath=filepath, known_files=known_files, name=name)
             ports = parse_signature_ports(docstring, signature)
             symbols.append({
                 "symbol": raw_sym,
-                "clean_symbol": clean_sym,
+                "name": name,
+                "parent_symbol": sym.get("parent_symbol"),
                 "filepath": filepath,
                 "kind": sym.get("kind") or "Symbol",
                 "signature": signature,
