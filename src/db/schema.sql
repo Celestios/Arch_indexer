@@ -1,15 +1,15 @@
--- Schema for Arch-mcp code intelligence database (DuckDB, schema_version = 4)
+-- Schema for Arch-mcp code intelligence database (DuckDB, schema_version = 5)
 
--- 1. Track files in the workspace, their hashes, and when they were indexed
+-- 1. Track files in the workspace, their hashes, and 3-axis compliance state
 CREATE TABLE IF NOT EXISTS files (
     filepath VARCHAR PRIMARY KEY,
     sha256 VARCHAR NOT NULL,
     ast_sha256 VARCHAR DEFAULT '',
     language VARCHAR NOT NULL,
     last_indexed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    status VARCHAR NOT NULL DEFAULT 'COMPLIANT', -- 'COMPLIANT' or 'VIOLATION_DETECTED'
-    manual_status VARCHAR NOT NULL DEFAULT 'COMPLIANT', -- 'COMPLIANT' or 'VIOLATION_DETECTED'
-    pending_audit BOOLEAN NOT NULL DEFAULT TRUE,
+    status VARCHAR NOT NULL DEFAULT 'COMPLIANT', -- Axis 1: Automatic config rules ('COMPLIANT' | 'VIOLATION_DETECTED')
+    manual_status VARCHAR DEFAULT NULL,          -- Axis 3: Manual agent review (NULL | 'COMPLIANT' | 'VIOLATION_DETECTED')
+    pending_audit BOOLEAN NOT NULL DEFAULT TRUE, -- Axis 2: Changed-file review queue (TRUE | FALSE)
     manual_fields VARCHAR NOT NULL DEFAULT '{}', -- JSON string containing manual metadata fields
     justification TEXT
 );
@@ -60,10 +60,10 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE TABLE IF NOT EXISTS compliance_rules (
     rule_id VARCHAR PRIMARY KEY,
     description TEXT NOT NULL,
-    severity VARCHAR NOT NULL -- e.g., 'Error', 'Warning', 'Info'
+    severity VARCHAR NOT NULL -- 'Critical' | 'Error' | 'Warning' | 'Info'
 );
 
--- 6. Track violations discovered during compliance audits
+-- 6. Track automatic and manual violations discovered during compliance audits
 CREATE TABLE IF NOT EXISTS compliance_violations (
     violation_id VARCHAR PRIMARY KEY,
     rule_id VARCHAR,
@@ -71,8 +71,9 @@ CREATE TABLE IF NOT EXISTS compliance_violations (
     filepath VARCHAR NOT NULL,
     line INTEGER NOT NULL,
     message TEXT NOT NULL,
+    severity VARCHAR NOT NULL DEFAULT 'Warning', -- 'Critical' | 'Error' | 'Warning' | 'Info'
     checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    origin VARCHAR DEFAULT 'automatic' -- 'automatic' or 'manual'
+    origin VARCHAR NOT NULL DEFAULT 'automatic' -- 'automatic' | 'manual'
 );
 
 -- 7. Track system metadata (e.g. schema_version, config_hash)

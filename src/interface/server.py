@@ -1,9 +1,13 @@
 import asyncio
 import functools
+import io
+import logging
+from logging.handlers import RotatingFileHandler
+import os
 import sys
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 src_dir = Path(__file__).resolve().parent.parent
@@ -14,7 +18,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from change_tracker.watcher_manager import WatcherManager
 from db.repository import Repository
-from interface.project_registry import ProjectRegistry, find_project_root_with_db
+from interface.project_registry import ProjectContext, ProjectRegistry, find_project_root_with_db
 from interface.tools.analyze import handle_analyze
 from interface.tools.audit import handle_audit
 from interface.tools.clear_pending import handle_clear_pending
@@ -37,8 +41,109 @@ from interface.validators import (
     validate_resolution,
     validate_sections,
 )
+from utils.single_instance import get_global_arch_dir
 
+logger = logging.getLogger(__name__)
 mcp = FastMCP("arch")
+
+
+def _configure_mcp_logging() -> None:
+    """Routes all internal logs to stderr and ~/.arch/mcp.log (never stdout, preserving stdio JSON-RPC)."""
+    root_logger = logging.getLogger()
+    if getattr(root_logger, "_arch_mcp_logging_configured", False):
+        return
+
+    root_logger.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(fmt)
+    root_logger.addHandler(stderr_handler)
+
+    try:
+        log_dir = get_global_arch_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_dir / "mcp.log",
+            maxBytes=2 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(fmt)
+        root_logger.addHandler(file_handler)
+    except OSError:
+        pass
+
+    root_logger._arch_mcp_logging_configured = True  # type: ignore[attr-defined]
+
+
+def _bootstrap_watchers(port: int) -> None:
+    """
+    Pre-starts filesystem watchers on server boot (guarded by per-workspace .arch/watcher.lock):
+    - Always boots the watcher for explicitly bound ARCH_PROJECT_ROOT (if initialized).
+    - In single-instance SSE daemon mode (port > 0), also boots watchers for all registered workspaces.
+    """
+    registry = ProjectRegistry.get_instance()
+
+    env_root = os.environ.get("ARCH_PROJECT_ROOT")
+    if env_root:
+        db_root = find_project_root_with_db(env_root)
+        if db_root is not None:
+            try:
+                registry.register_project(db_root, start_watcher=True)
+            except Exception:
+                logger.exception("Failed to bootstrap watcher for ARCH_PROJECT_ROOT=%s", db_root)
+
+    if port > 0:
+        for proj in registry.list_projects():
+            if proj.get("db_exists"):
+                try:
+                    registry.register_project(proj["root"], start_watcher=True)
+                except Exception:
+                    logger.exception("Failed to bootstrap SSE daemon watcher for %s", proj["root"])
+
+
+def _run_stdio_isolated() -> None:
+    """
+    Isolates OS FD 1 exclusively for MCP JSON-RPC framing:
+    duplicates FD 1 to a private non-inheritable descriptor, redirects FD 1 and sys.stdout
+    to stderr, and binds stdio_server(stdout=...) to the private descriptor so no print(),
+    C extension, DuckDB message, or subprocess can ever corrupt the JSON-RPC stream.
+    """
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+    proto_fd = os.dup(1)
+    os.set_inheritable(proto_fd, False)
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+
+    proto_raw = os.fdopen(proto_fd, "wb", buffering=0)
+    proto_text = io.TextIOWrapper(proto_raw, encoding="utf-8", newline="\n", write_through=True)
+    proto_async = anyio.wrap_file(proto_text)
+
+    async def _serve():
+        async with stdio_server(stdout=proto_async) as (read_stream, write_stream):
+            lowlevel = mcp._mcp_server
+            await lowlevel.run(
+                read_stream,
+                write_stream,
+                lowlevel.create_initialization_options(),
+            )
+
+    try:
+        anyio.run(_serve)
+    finally:
+        try:
+            proto_text.flush()
+            proto_text.close()
+        except Exception:
+            pass
 
 
 def uri_to_path(uri: str) -> Path:
@@ -72,24 +177,24 @@ def _tool():
     return decorator
 
 
-async def _resolve_context(
+async def _resolve_project_context(
     ctx: Optional[Context] = None,
     project_root: Optional[Union[str, Path]] = None,
     filepath: Optional[str] = None,
-) -> tuple[Path, Repository]:
-    """Resolves active workspace root and repository."""
+) -> ProjectContext:
+    """Resolves active workspace ProjectContext (root, Repository, scoped db_session)."""
     registry = ProjectRegistry.get_instance()
 
     if project_root:
         db_root = find_project_root_with_db(project_root)
         if db_root is not None:
-            return db_root, registry.get_repository(project_root=db_root)
+            return registry.get_context(project_root=db_root)
         if filepath and Path(filepath).is_absolute():
             fp_root = find_project_root_with_db(filepath)
             if fp_root is not None:
-                return fp_root, registry.get_repository(project_root=fp_root)
+                return registry.get_context(project_root=fp_root)
         target = Path(project_root).resolve()
-        return target, registry.get_repository(project_root=target)
+        return registry.get_context(project_root=target)
 
     if ctx is not None:
         try:
@@ -103,20 +208,28 @@ async def _resolve_context(
                         candidate = uri_to_path(uri)
                         db_root = find_project_root_with_db(candidate)
                         if db_root is not None:
-                            return db_root, registry.get_repository(project_root=db_root)
+                            return registry.get_context(project_root=db_root)
                         if (candidate / ".arch" / "arch.db").exists():
-                            return candidate, registry.get_repository(project_root=candidate)
+                            return registry.get_context(project_root=candidate)
         except Exception:
             pass
 
     if filepath:
         db_root = find_project_root_with_db(filepath)
         if db_root is not None:
-            return db_root, registry.get_repository(project_root=db_root)
+            return registry.get_context(project_root=db_root)
 
     resolved_root = registry.resolve_project(project_root=project_root, filepath=filepath)
-    repository = registry.get_repository(project_root=resolved_root)
-    return resolved_root, repository
+    return registry.get_context(project_root=resolved_root)
+
+
+async def _resolve_context(
+    ctx: Optional[Context] = None,
+    project_root: Optional[Union[str, Path]] = None,
+    filepath: Optional[str] = None,
+) -> Tuple[Path, Repository]:
+    pctx = await _resolve_project_context(ctx=ctx, project_root=project_root, filepath=filepath)
+    return pctx.root, pctx.repository
 
 
 def get_server_repository(
@@ -145,23 +258,24 @@ async def graph(
     open_browser: bool = False,
     ctx: Context = None,
 ) -> str:
-    """
-    Builds the interactive Electronic PCB Circuit Diagram HTML architecture visualizer directly from the DuckDB index.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    """
+    """Builds the interactive Electronic PCB Circuit Diagram HTML architecture visualizer directly from DuckDB."""
     try:
-        resolved_root, _ = await _resolve_context(ctx=ctx, project_root=project_root)
-        return handle_graph(
-            project_root=resolved_root,
-            output_path=output_path,
-            scope=scope,
-            include_tests=include_tests,
-            include_occurrences=include_occurrences,
-            include_external=include_external,
-            include_parameters=include_parameters,
-            max_refs=max_refs,
-            open_browser=open_browser,
-        )
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root)
+        WatcherManager.get_instance().flush_pending(pctx.root)
+        # handle_graph opens its own DuckDB connection; serialize via db_lock and ensure pctx handle is closed
+        with pctx.db_lock:
+            pctx.db_conn.close()
+            return handle_graph(
+                project_root=pctx.root,
+                output_path=output_path,
+                scope=scope,
+                include_tests=include_tests,
+                include_occurrences=include_occurrences,
+                include_external=include_external,
+                include_parameters=include_parameters,
+                max_refs=max_refs,
+                open_browser=open_browser,
+            )
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -170,15 +284,12 @@ async def graph(
 
 @_tool()
 async def lookup(target: Union[List[str], str], project_root: str, ctx: Context = None) -> str:
-    """
-    Resolves symbol and file locations, definitions, occurrences, and direct call relationships.
-    target: Symbol name(s) or file path(s) to locate.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    """
+    """Resolves symbol and file locations, definitions, occurrences, and direct call relationships."""
     filepath_hint = target if isinstance(target, str) and ("/" in target or "\\" in target) else None
     try:
-        _, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
-        return handle_lookup(target, repository)
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
+        with pctx.db_session() as repo:
+            return handle_lookup(target, repo)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -187,15 +298,12 @@ async def lookup(target: Union[List[str], str], project_root: str, ctx: Context 
 
 @_tool()
 async def context(filepaths: Union[List[str], str], project_root: str, ctx: Context = None) -> str:
-    """
-    Returns structural outlines, declared symbols, class/method signatures, and line ranges for specified files.
-    filepaths: File path or list of file paths to inspect.
-    project_root: Root workspace path of the project containing .arch/arch.db (mandatory).
-    """
+    """Returns structural outlines, declared symbols, class/method signatures, and line ranges for specified files."""
     filepath_hint = filepaths if isinstance(filepaths, str) else (filepaths[0] if filepaths else None)
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
-        return handle_context(filepaths, repository, project_root=resolved_root)
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
+        with pctx.db_session() as repo:
+            return handle_context(filepaths, repo, project_root=pctx.root)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -211,25 +319,23 @@ async def impact(
     max_nodes: int = 50,
     ctx: Context = None,
 ) -> str:
-    """
-    Performs blast radius analysis by computing the transitive call tree up to max_depth,
-    enriched with live Git hotspot risk and Lift-ranked temporal co-change coupling for the focal file.
-    """
+    """Performs blast radius analysis with transitive call tree, Git hotspot risk, and temporal co-change coupling."""
     direction = direction.lower()
     valid, msg = validate_direction(direction)
     if not valid:
         return f"Error: {msg}"
 
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        return handle_impact(
-            symbol,
-            max_depth,
-            repository,
-            direction=direction,
-            max_nodes=max_nodes,
-            project_root=resolved_root,
-        )
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root)
+        with pctx.db_session() as repo:
+            return handle_impact(
+                symbol,
+                max_depth,
+                repo,
+                direction=direction,
+                max_nodes=max_nodes,
+                project_root=pctx.root,
+            )
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -247,9 +353,7 @@ async def compile_context(
     max_tokens: int = 4000,
     ctx: Context = None,
 ) -> str:
-    """
-    Compiles a bounded architectural context document by traversing the call graph neighborhood of a focal symbol.
-    """
+    """Compiles a bounded architectural context document by traversing the call graph neighborhood of a focal symbol."""
     direction = direction.lower()
     valid, msg = validate_direction(direction)
     if not valid:
@@ -261,10 +365,11 @@ async def compile_context(
         return f"Error: {msg}"
 
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        return handle_compile_context(
-            symbol, radius, direction, resolution, out_filepath, repository, resolved_root, max_tokens
-        )
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root)
+        with pctx.db_session() as repo:
+            return handle_compile_context(
+                symbol, radius, direction, resolution, out_filepath, repo, pctx.root, max_tokens
+            )
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -273,13 +378,11 @@ async def compile_context(
 
 @_tool()
 async def audit(project_root: str, summary_only: bool = False, ctx: Context = None) -> str:
-    """
-    Runs project-wide architectural boundary and layer compliance checks against configured rules,
-    returning a compact compliance scorecard plus concrete violation traces.
-    """
+    """Runs project-wide compliance checks returning a 3-axis scorecard (automatic rules, manual findings, pending review)."""
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        return handle_audit(repository, resolved_root, summary_only=summary_only)
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root)
+        with pctx.db_session() as repo:
+            return handle_audit(repo, pctx.root, summary_only=summary_only)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -296,25 +399,24 @@ async def history(
     limit: int = 10,
     ctx: Context = None,
 ) -> str:
-    """
-    Performs on-the-fly Git evolution and risk intelligence intersected with the static code graph.
-    """
+    """Performs on-the-fly Git evolution and risk intelligence intersected with the static code graph."""
     valid, parsed = validate_sections(sections, has_target=bool(target))
     if not valid:
         return f"Error: {parsed}"
 
     try:
         filepath_hint = target if isinstance(target, str) and ("/" in target or "\\" in target) else None
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
-        return handle_history(
-            repository=repository,
-            project_root=resolved_root,
-            sections=parsed,
-            target=target,
-            scope=scope,
-            commits=commits,
-            limit=limit,
-        )
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
+        with pctx.db_session() as repo:
+            return handle_history(
+                repository=repo,
+                project_root=pctx.root,
+                sections=parsed,
+                target=target,
+                scope=scope,
+                commits=commits,
+                limit=limit,
+            )
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -325,8 +427,8 @@ async def history(
 async def analyze(project_root: str, ctx: Context = None) -> str:
     """Validates architectural configuration ontology completeness, reachability, and referential sanity."""
     try:
-        resolved_root, _ = await _resolve_context(ctx=ctx, project_root=project_root)
-        report_text, _ = handle_analyze(resolved_root)
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root)
+        report_text, _ = handle_analyze(pctx.root)
         return report_text
     except Exception as e:
         return f"Error analyzing configuration: {e}"
@@ -342,9 +444,10 @@ async def set_fields(
 ) -> str:
     """Sets manual architectural metadata fields and tags for a registered file."""
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath)
-        msg, _ = handle_set_fields(repository, resolved_root, filepath, fields_json, justification)
-        return msg
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root, filepath=filepath)
+        with pctx.db_session() as repo:
+            msg, _ = handle_set_fields(repo, pctx.root, filepath, fields_json, justification)
+            return msg
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -353,10 +456,11 @@ async def set_fields(
 
 @_tool()
 async def clear_pending(justification: str, project_root: str, ctx: Context = None) -> str:
-    """Clears the pending audit flag on all files in the database."""
+    """Clears the pending_audit review flag on all files in the database."""
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        return handle_clear_pending(repository, resolved_root, justification)
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root)
+        with pctx.db_session() as repo:
+            return handle_clear_pending(repo, pctx.root, justification)
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -375,15 +479,16 @@ async def map(
 ) -> str:
     """Returns a structured, multi-level architectural blueprint map of the repository."""
     try:
-        _, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=path or None)
-        return handle_map(
-            repository,
-            targets=targets,
-            path=path,
-            tree_depth=tree_depth,
-            detail_level=detail_level,
-            include_external=include_external,
-        )
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root, filepath=path or None)
+        with pctx.db_session() as repo:
+            return handle_map(
+                repo,
+                targets=targets,
+                path=path,
+                tree_depth=tree_depth,
+                detail_level=detail_level,
+                include_external=include_external,
+            )
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -396,13 +501,36 @@ async def set_status(
     status: str,
     project_root: str,
     justification: Optional[str] = None,
+    category: str = "logical_audit",
+    severity: str = "Warning",
+    symbol: Optional[str] = None,
+    line: int = 1,
     ctx: Context = None,
 ) -> str:
-    """Sets manual AI logical compliance status for a file (COMPLIANT or VIOLATION_DETECTED)."""
+    """
+    Sets or clears manual AI logical compliance status (Axis 3) for a file.
+    status: 'COMPLIANT', 'VIOLATION_DETECTED', or 'CLEAR' (resets manual_status to NULL).
+    justification: Explanation or finding description (required when status='VIOLATION_DETECTED').
+    category: Finding category / rule_id (default: 'logical_audit', e.g., 'symmetry', 'architecture', 'bug', 'security').
+    severity: 'Critical', 'Error', 'Warning' (default), or 'Info'.
+    symbol: Optional symbol name or canonical ID associated with the finding.
+    line: Optional 1-based line number (defaults to symbol start_line if symbol is provided, else 1).
+    """
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath)
-        msg, _ = handle_set_status(repository, resolved_root, filepath, status, justification)
-        return msg
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root, filepath=filepath)
+        with pctx.db_session() as repo:
+            msg, _ = handle_set_status(
+                repo,
+                pctx.root,
+                filepath,
+                status,
+                justification,
+                category=category,
+                severity=severity,
+                symbol=symbol,
+                line=line,
+            )
+            return msg
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -419,8 +547,22 @@ async def update(
     """Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges."""
     filepath_hint = filepaths if isinstance(filepaths, str) else (filepaths[0] if filepaths else None)
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
-        return handle_update(repository, resolved_root, filepaths=filepaths, force=force)
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
+        # Pass pctx.db_session as session_factory so DuckDB is unlocked while external SCIP indexers run
+        result = handle_update(
+            pctx.repository,
+            pctx.root,
+            filepaths=filepaths,
+            force=force,
+            session_factory=pctx.db_session,
+        )
+        cleared_files = (
+            None
+            if force or not filepaths
+            else ({filepaths} if isinstance(filepaths, str) else set(filepaths))
+        )
+        WatcherManager.get_instance().clear_pending(pctx.root, cleared_files)
+        return result
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -443,19 +585,20 @@ async def query(
     - edges (source, target, relation, weight, call_line)
     - occurrences (symbol, filepath, start_line, start_col, end_line, end_col, role)
     - compliance_rules (rule_id, description, severity)
-    - compliance_violations (violation_id, rule_id, symbol, filepath, line, message, origin)
+    - compliance_violations (violation_id, rule_id, symbol, filepath, line, message, severity, origin)
     - diagnostics (filepath, symbol, line, col, severity, code, message, tags)
     - system_metadata (key, value)
     """
     try:
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root)
-        return handle_query(
-            repository=repository,
-            project_root=resolved_root,
-            sql=sql,
-            limit=limit,
-            output_path=output_path,
-        )
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root)
+        with pctx.db_session() as repo:
+            return handle_query(
+                repository=repo,
+                project_root=pctx.root,
+                sql=sql,
+                limit=limit,
+                output_path=output_path,
+            )
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -507,19 +650,21 @@ async def clusters(
             )
             else None
         )
-        resolved_root, repository = await _resolve_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
-        return handle_clusters(
-            repository=repository,
-            project_root=resolved_root,
-            cluster=cluster,
-            depth=depth_val,
-            unit=unit_or_err,
-            view=view_or_err,
-            scope=scope,
-            language=language,
-            include_tests=include_tests,
-            include_drift=include_drift,
-        )
+        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
+        WatcherManager.get_instance().flush_pending(pctx.root)
+        with pctx.db_session() as repo:
+            return handle_clusters(
+                repository=repo,
+                project_root=pctx.root,
+                cluster=cluster,
+                depth=depth_val,
+                unit=unit_or_err,
+                view=view_or_err,
+                scope=scope,
+                language=language,
+                include_tests=include_tests,
+                include_drift=include_drift,
+            )
     except FileNotFoundError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -527,13 +672,15 @@ async def clusters(
 
 
 def run_server(port: int = 0):
+    _configure_mcp_logging()
+    _bootstrap_watchers(port)
     try:
         if port > 0:
             if hasattr(mcp, "settings"):
                 mcp.settings.port = port
             mcp.run(transport="sse")
         else:
-            mcp.run()
+            _run_stdio_isolated()
     finally:
         WatcherManager.get_instance().stop_all()
         close_server_connection()

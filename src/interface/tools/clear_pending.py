@@ -1,11 +1,8 @@
-"""Shared handler for clearing all pending audit flags."""
+"""Shared handler for clearing all pending_audit review flags (Axis 2)."""
 from pathlib import Path
-
-from auditor.analyzer import Auditor
 
 
 def handle_clear_pending(repository, project_root: Path, justification: str) -> str:
-    """Clears all pending audit flags in the database and re-runs the audit."""
+    """Clears the pending_audit flag on all files without touching automatic rules or manual_status."""
     repository.workspace.update_clear_pending_audits(justification)
-    Auditor(repository, project_root).run_audit()
-    return "Successfully cleared pending audit status for all files."
+    return "Successfully cleared pending review status for all files."

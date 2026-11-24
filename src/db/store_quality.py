@@ -1,21 +1,31 @@
-import uuid
 import logging
-from typing import Dict, List, Any, Optional
+import uuid
+from typing import Any, Dict, List, Optional
+
 from db.base import (
     BaseRepository,
+    UPSERT_DIAGNOSTICS_VECTORIZED_SQL,
     UPSERT_VIOLATION_SQL,
     UPSERT_VIOLATIONS_VECTORIZED_SQL,
-    UPSERT_DIAGNOSTICS_VECTORIZED_SQL,
     normalize_path,
 )
 
 logger = logging.getLogger(__name__)
 
+VALID_SEVERITIES = ("Critical", "Error", "Warning", "Info")
+_SEVERITY_CANON = {s.lower(): s for s in VALID_SEVERITIES}
+
+
+def normalize_severity(raw: Optional[str], default: str = "Warning") -> str:
+    if not raw:
+        return default
+    return _SEVERITY_CANON.get(str(raw).strip().lower(), default)
+
 
 class QualityStore(BaseRepository):
     """
-    Domain store owning compliance rules, violations, and compiler diagnostics.
-    Enforces POSIX path normalization on ingress.
+    Domain store owning compliance rules, automatic/manual violations, and compiler diagnostics.
+    Enforces POSIX path normalization and severity symmetry across ingress and egress.
     """
 
     # ------------------ Compliance Rules Domain ------------------
@@ -28,7 +38,7 @@ class QualityStore(BaseRepository):
                ON CONFLICT (rule_id) DO UPDATE SET
                    description = excluded.description,
                    severity = excluded.severity""",
-            (rule_id, description, severity),
+            (rule_id, description, normalize_severity(severity, default="Error")),
         )
 
     def get_rules(self) -> List[Dict[str, Any]]:
@@ -46,11 +56,21 @@ class QualityStore(BaseRepository):
         line: int,
         message: str,
         origin: str = "automatic",
+        severity: str = "Warning",
     ) -> str:
-        """Upserts a single compliance violation."""
+        """Upserts a single automatic or manual compliance violation."""
         self._execute(
             UPSERT_VIOLATION_SQL,
-            (violation_id, rule_id, symbol, normalize_path(filepath), line, message, origin),
+            (
+                violation_id,
+                rule_id,
+                symbol,
+                normalize_path(filepath),
+                int(line),
+                message,
+                normalize_severity(severity),
+                origin,
+            ),
         )
         return violation_id
 
@@ -64,20 +84,32 @@ class QualityStore(BaseRepository):
         fps = [normalize_path(v["filepath"]) for v in violations]
         lines = [int(v["line"]) for v in violations]
         msgs = [v["message"] for v in violations]
+        sevs = [normalize_severity(v.get("severity"), default="Error") for v in violations]
         origins = [v.get("origin", "automatic") for v in violations]
         self._execute(
             UPSERT_VIOLATIONS_VECTORIZED_SQL,
-            (v_ids, r_ids, syms, fps, lines, msgs, origins),
+            (v_ids, r_ids, syms, fps, lines, msgs, sevs, origins),
         )
 
     def get_violations(
         self,
         filepath: Optional[str] = None,
         rule_id: Optional[str] = None,
+        origin: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Retrieves recorded violations joined with compliance_rules for severity and description."""
+        """Retrieves recorded violations joined with compliance_rules for description metadata."""
         query = """
-            SELECT v.violation_id, v.rule_id, r.description, v.symbol, v.filepath, v.line, v.message, r.severity, v.checked_at, v.origin
+            SELECT
+                v.violation_id,
+                v.rule_id,
+                r.description,
+                v.symbol,
+                v.filepath,
+                v.line,
+                v.message,
+                COALESCE(NULLIF(v.severity, ''), r.severity, 'Warning') AS severity,
+                v.checked_at,
+                COALESCE(v.origin, 'automatic') AS origin
             FROM compliance_violations v
             LEFT JOIN compliance_rules r ON v.rule_id = r.rule_id
             WHERE 1=1
@@ -89,18 +121,33 @@ class QualityStore(BaseRepository):
         if rule_id:
             query += " AND v.rule_id = ?"
             params.append(rule_id)
-        query += " ORDER BY r.severity DESC, v.filepath ASC, v.line ASC"
+        if origin:
+            query += " AND v.origin = ?"
+            params.append(origin)
+        query += """
+            ORDER BY
+                CASE LOWER(COALESCE(NULLIF(v.severity, ''), r.severity, 'warning'))
+                    WHEN 'critical' THEN 1
+                    WHEN 'error' THEN 2
+                    WHEN 'warning' THEN 3
+                    WHEN 'info' THEN 4
+                    ELSE 5
+                END ASC,
+                v.filepath ASC,
+                v.line ASC
+        """
         rows = self._fetch_all(query, params)
         return [
             {
                 "violation_id": r["violation_id"],
                 "rule_id": r["rule_id"],
-                "rule_description": r.get("description") or "Manual Logical Audit",
+                "rule_description": r.get("description")
+                or ("Manual logical audit" if r.get("origin") == "manual" else "Architectural boundary rule"),
                 "symbol": r.get("symbol"),
                 "filepath": normalize_path(r["filepath"]),
                 "line": r["line"],
                 "message": r["message"],
-                "severity": r.get("severity") or "WARNING",
+                "severity": normalize_severity(r.get("severity")),
                 "checked_at": r.get("checked_at"),
                 "origin": r.get("origin") or "automatic",
             }

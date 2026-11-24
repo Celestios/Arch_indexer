@@ -1,23 +1,28 @@
-import sys
+import logging
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
 
-from db.repository import Repository
 from auditor.classifier import SymbolClassifier
-from auditor.propagation import MetadataPropagator
 from auditor.field_validator import FieldValidator
+from auditor.propagation import MetadataPropagator
 from auditor.snapshot import AuditSnapshot
 from auditor.violation_checkers.dependency import check as check_dependency_violations
 from auditor.violation_checkers.naming import check as check_naming_violations
-from auditor.violation_checkers.pending import check as check_pending_violations
 from change_tracker.tracker import check_config_changed, update_config_hash
+from db.repository import Repository
 from engines.edge_weights import update_edge_weights
 from utils.arch_config import ArchConfig
 from utils.helpers import config_path_for, load_config
 
+logger = logging.getLogger(__name__)
+
 
 class Auditor:
-    """Evaluates workspace architectural boundary compliance rules over an immutable AuditSnapshot."""
+    """Evaluates automatic architectural config rules (Axis 1) over an immutable AuditSnapshot.
+
+    Never mutates files.pending_audit (Axis 2), files.manual_status (Axis 3),
+    or origin='manual' rows in compliance_violations.
+    """
 
     def __init__(self, repository: Repository, project_root: Path):
         self.repository = repository
@@ -30,16 +35,17 @@ class Auditor:
         self.checkers = [
             check_dependency_violations,
             check_naming_violations,
-            check_pending_violations,
         ]
 
     def run_audit(self, filepath_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         config = load_config(self.project_root)
         if not config:
-            print("No architectural rules found in .arch/config.json. Skipping audit.", file=sys.stderr)
+            logger.info("No architectural rules found in .arch/config.json. Clearing automatic rule violations.")
+            with self.repository.transaction():
+                self._clear_old_violations(filepath_filter)
+                self.repository.workspace.reset_automatic_statuses(filepath_prefix=filepath_filter)
             return []
 
-        self._clear_old_violations(filepath_filter)
         self.field_validator.reset_invalid_manual_fields(config)
         self._handle_config_change()
 
@@ -54,25 +60,30 @@ class Auditor:
         propagation_sources = self.propagator.run_propagation(
             symbol_classifications, snapshot.all_edges, config
         )
-        with self.repository.transaction():
-            update_edge_weights(self.repository, snapshot.all_edges, symbol_classifications, config)
 
-            classification_updates = {sym: data["fields"] for sym, data in symbol_classifications.items()}
-            self.repository.graph.update_symbols_classification(classification_updates)
-
-            violations = []
-            for checker in self.checkers:
-                violations.extend(checker(
+        violations: List[Dict[str, Any]] = []
+        for checker in self.checkers:
+            violations.extend(
+                checker(
                     snapshot=snapshot,
                     symbol_classifications=symbol_classifications,
                     propagation_sources=propagation_sources,
                     config=config,
                     filepath_filter=filepath_filter,
-                ))
+                )
+            )
+
+        with self.repository.transaction():
+            self._clear_old_violations(filepath_filter)
+            update_edge_weights(self.repository, snapshot.all_edges, symbol_classifications, config)
+
+            classification_updates = {sym: data["fields"] for sym, data in symbol_classifications.items()}
+            self.repository.graph.update_symbols_classification(classification_updates)
 
             self.repository.quality.upsert_violations(violations)
             self._recompute_file_statuses(violations, snapshot.all_files, filepath_filter)
-        print(f"[Auditor] Completed audit. Found {len(violations)} architectural violations.", file=sys.stderr)
+
+        logger.info("[Auditor] Completed audit. Found %d automatic architectural violations.", len(violations))
         return violations
 
     def _clear_old_violations(self, filepath_filter: Optional[str]):
@@ -122,12 +133,14 @@ class Auditor:
         file_metadata: Dict[str, Dict[str, Any]],
         filepath_filter: Optional[str] = None,
     ):
-        violations_by_file: Dict[str, List[str]] = {}
-        for v in violations:
-            violations_by_file.setdefault(v["filepath"], []).append(v.get("origin", "automatic"))
+        violating_files = {
+            v["filepath"]
+            for v in violations
+            if v.get("origin", "automatic") == "automatic" and v.get("filepath")
+        }
 
         if filepath_filter:
-            files_to_update = set(violations_by_file.keys())
+            files_to_update = set(violating_files)
             for f_path in file_metadata.keys():
                 if f_path.startswith(filepath_filter):
                     files_to_update.add(f_path)
@@ -135,11 +148,7 @@ class Auditor:
             files_to_update = set(file_metadata.keys())
 
         statuses_to_update = {
-            f_path: (
-                "COMPLIANT"
-                if not violations_by_file.get(f_path) or all(o != "automatic" for o in violations_by_file[f_path])
-                else "VIOLATION_DETECTED"
-            )
+            f_path: ("VIOLATION_DETECTED" if f_path in violating_files else "COMPLIANT")
             for f_path in files_to_update
         }
         self.repository.workspace.update_file_statuses(statuses_to_update)

@@ -1,13 +1,35 @@
-import sys
+import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
-from utils.exclusions import load_include_dirs, is_included
-from utils.helpers import IS_WINDOWS
 from engines.registry import LanguageRegistry
 from engines.scip.utils import run_with_scroll
+from utils.exclusions import DEFAULT_EXCLUDED_DIRS, is_included, load_include_dirs
+from utils.helpers import IS_WINDOWS
+
+logger = logging.getLogger(__name__)
+
+
+def _has_excluded_part(p: Path) -> bool:
+    return any(part in DEFAULT_EXCLUDED_DIRS for part in p.parts)
+
+
+def _run_subprocess(cmd: list, cwd: str, check: bool = False, capture: bool = True) -> subprocess.CompletedProcess:
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+        stderr=subprocess.PIPE if capture else subprocess.DEVNULL,
+        text=True if capture else False,
+        shell=IS_WINDOWS,
+        check=check,
+        creationflags=creationflags,
+    )
 
 
 def _find_arch_dir(start_dir: Path) -> Path:
@@ -23,7 +45,7 @@ def _find_arch_dir(start_dir: Path) -> Path:
     return start_dir / ".arch"
 
 
-def _move_index_to_arch(project_dir: Path, language: str, cargo_root: Path = None) -> Optional[Path]:
+def _move_index_to_arch(project_dir: Path, language: str, cargo_root: Optional[Path] = None) -> Optional[Path]:
     """Move generated index.scip to .arch/index_{language}.scip."""
     arch_dir = _find_arch_dir(project_dir)
     arch_index = arch_dir / f"index_{language}.scip"
@@ -42,12 +64,12 @@ def _move_index_to_arch(project_dir: Path, language: str, cargo_root: Path = Non
 
 
 def _find_cargo_root(project_dir: Path) -> Path:
-    """Find the directory containing Cargo.toml, preferring root, then subdirectories."""
+    """Find the directory containing Cargo.toml, preferring root, then included subdirectories."""
     if (project_dir / "Cargo.toml").exists():
         return project_dir
     include_dirs = load_include_dirs(project_dir)
     for p in project_dir.rglob("Cargo.toml"):
-        if "target" in str(p) or ".arch" in str(p):
+        if _has_excluded_part(p):
             continue
         if include_dirs is not None:
             rel = str(p.relative_to(project_dir))
@@ -64,7 +86,7 @@ def _find_cargo_root(project_dir: Path) -> Path:
 
 def index_rust(project_dir: Path) -> Optional[Path]:
     cargo_root = _find_cargo_root(project_dir)
-    print(f"[SCIP] Indexing Rust project under {cargo_root}...")
+    logger.info("[SCIP] Indexing Rust project under %s...", cargo_root)
     ra_cmd = ["rust-analyzer", "scip", "."]
     if shutil.which("rustup"):
         ra_cmd = ["rustup", "run", "stable", "rust-analyzer", "scip", "."]
@@ -75,37 +97,36 @@ def index_rust(project_dir: Path) -> Optional[Path]:
             raise subprocess.CalledProcessError(rc, "rust-analyzer")
         return _move_index_to_arch(project_dir, "rust", cargo_root)
     except subprocess.CalledProcessError:
-        print("Warning: rust-analyzer CLI was not found. Attempting to add it via rustup...")
+        logger.warning("rust-analyzer CLI failed or missing. Attempting to add via rustup...")
         try:
-            subprocess.run(["rustup", "component", "add", "rust-analyzer"], check=True, shell=IS_WINDOWS)
+            _run_subprocess(["rustup", "component", "add", "rust-analyzer"], cwd=str(cargo_root), check=True)
             rc = run_with_scroll(["rust-analyzer", "scip", "."], cwd=str(cargo_root), shell=IS_WINDOWS)
             if rc != 0:
                 raise subprocess.CalledProcessError(rc, "rust-analyzer")
             return _move_index_to_arch(project_dir, "rust", cargo_root)
         except Exception as err:
-            print(f"Error: Failed to execute rust-analyzer scip: {err}", file=sys.stderr)
-            print("Notice: If you are using the rust-analyzer extension inside VS Code, the CLI component must still be installed globally.", file=sys.stderr)
-            print("To enable Rust indexing on the command-line, run:\n    rustup component add rust-analyzer", file=sys.stderr)
+            logger.error(
+                "Failed to execute rust-analyzer scip: %s. Install via 'rustup component add rust-analyzer'.",
+                err,
+            )
             return None
 
 
 def index_dart(project_dir: Path) -> Optional[Path]:
-    print(f"[SCIP] Indexing Dart project under {project_dir}...")
+    logger.info("[SCIP] Indexing Dart project under %s...", project_dir)
     if not shutil.which("dart"):
-        print("Error: Dart SDK is not on the system PATH.", file=sys.stderr)
+        logger.error("Dart SDK is not on the system PATH.")
         return None
 
     pubspec_dir = project_dir
     if not (project_dir / "pubspec.yaml").exists():
-        pubspecs = [p for p in project_dir.rglob("pubspec.yaml")
-                    if ".dart_tool" not in str(p) and "dart_analyzer" not in str(p)]
+        pubspecs = [p for p in project_dir.rglob("pubspec.yaml") if not _has_excluded_part(p)]
         if not pubspecs:
-            print("[SCIP] No pubspec.yaml found, skipping Dart indexing.")
+            logger.info("[SCIP] No pubspec.yaml found, skipping Dart indexing.")
             return None
         pubspec_dir = pubspecs[0].parent
-        print(f"[SCIP] Using pubspec at {pubspec_dir}")
+        logger.info("[SCIP] Using pubspec at %s", pubspec_dir)
 
-    # Ensure package resolution exists before running indexer
     pkg_config = pubspec_dir / ".dart_tool" / "package_config.json"
     pubspec_file = pubspec_dir / "pubspec.yaml"
     is_flutter = False
@@ -113,27 +134,21 @@ def index_dart(project_dir: Path) -> Optional[Path]:
         try:
             pubspec_content = pubspec_file.read_text(encoding="utf-8", errors="replace")
             is_flutter = "flutter:" in pubspec_content or "sdk: flutter" in pubspec_content
-        except Exception:
+        except OSError:
             pass
 
     if not pkg_config.exists():
         try:
             get_cmd = ["flutter", "pub", "get"] if (is_flutter and shutil.which("flutter")) else ["dart", "pub", "get"]
-            print(f"[SCIP] Resolving Dart dependencies with {' '.join(get_cmd)}...")
-            subprocess.run(get_cmd, cwd=str(pubspec_dir), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=IS_WINDOWS)
+            logger.info("[SCIP] Resolving Dart dependencies with %s...", " ".join(get_cmd))
+            _run_subprocess(get_cmd, cwd=str(pubspec_dir), capture=False)
         except Exception:
-            pass
+            logger.debug("Dart pub get failed", exc_info=True)
 
-    # Check if scip_dart is already activated globally
     is_activated = False
     try:
-        res = subprocess.run(
-            ["dart", "pub", "global", "list"],
-            cwd=str(pubspec_dir),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, shell=IS_WINDOWS
-        )
-        if res.returncode == 0:
+        res = _run_subprocess(["dart", "pub", "global", "list"], cwd=str(pubspec_dir), capture=True)
+        if res.returncode == 0 and res.stdout:
             for line in res.stdout.splitlines():
                 parts = line.strip().split()
                 if parts and parts[0] == "scip_dart":
@@ -144,50 +159,46 @@ def index_dart(project_dir: Path) -> Optional[Path]:
 
     if not is_activated:
         try:
-            res = subprocess.run(
-                ["dart", "pub", "global", "activate", "scip_dart"],
-                cwd=str(pubspec_dir),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, shell=IS_WINDOWS
-            )
+            res = _run_subprocess(["dart", "pub", "global", "activate", "scip_dart"], cwd=str(pubspec_dir), capture=True)
             if res.returncode != 0:
-                print(f"Warning: Failed to activate scip_dart. Output:\n{res.stderr or res.stdout}", file=sys.stderr)
+                logger.warning("Failed to activate scip_dart: %s", res.stderr or res.stdout)
         except Exception as e:
-            print(f"Warning: Failed to run dart pub global activate scip_dart: {e}", file=sys.stderr)
+            logger.warning("Failed to run dart pub global activate scip_dart: %s", e)
 
     try:
         rc = run_with_scroll(
             ["dart", "pub", "global", "run", "scip_dart", "."],
-            cwd=str(pubspec_dir), shell=IS_WINDOWS
+            cwd=str(pubspec_dir),
+            shell=IS_WINDOWS,
         )
         if rc != 0:
             raise subprocess.CalledProcessError(rc, "scip_dart")
         return _move_index_to_arch(project_dir, "dart", pubspec_dir)
     except subprocess.CalledProcessError as e:
-        print(f"Error executing scip_dart indexer: {e}", file=sys.stderr)
+        logger.error("Error executing scip_dart indexer: %s", e)
         return None
 
 
 def index_python(project_dir: Path) -> Optional[Path]:
-    print(f"[SCIP] Indexing Python project under {project_dir}...")
+    logger.info("[SCIP] Indexing Python project under %s...", project_dir)
     if not shutil.which("scip-python"):
-        print("Error: scip-python CLI is not on the system PATH.", file=sys.stderr)
+        logger.error("scip-python CLI is not on the system PATH.")
         return None
     try:
-        arch_index = project_dir / ".arch" / f"index_python.scip"
+        arch_index = project_dir / ".arch" / "index_python.scip"
         arch_index.parent.mkdir(parents=True, exist_ok=True)
         rc = run_with_scroll(
-            ["scip-python", "index", "--project-name", str(project_dir.name),
-             "--output", str(arch_index)],
-            cwd=str(project_dir), shell=IS_WINDOWS
+            ["scip-python", "index", "--project-name", str(project_dir.name), "--output", str(arch_index)],
+            cwd=str(project_dir),
+            shell=IS_WINDOWS,
         )
         if rc != 0:
             raise subprocess.CalledProcessError(rc, "scip-python")
         if arch_index.exists():
             return arch_index
     except subprocess.CalledProcessError as e:
-        print(f"Error executing scip-python: {e}", file=sys.stderr)
-        return None
+        logger.error("Error executing scip-python: %s", e)
+    return None
 
 
 def index_generic(project_dir: Path, language: str) -> Optional[Path]:
@@ -199,9 +210,9 @@ def index_generic(project_dir: Path, language: str) -> Optional[Path]:
         tool_name = spec.scip_binary if spec and spec.scip_binary else f"scip-{language}"
         cmd = [tool_name]
     tool_name = cmd[0]
-    print(f"[SCIP] Indexing {language.capitalize()} project under {project_dir}...")
+    logger.info("[SCIP] Indexing %s project under %s...", language.capitalize(), project_dir)
     if not shutil.which(tool_name):
-        print(f"Error: {tool_name} CLI is not on the system PATH.", file=sys.stderr)
+        logger.error("%s CLI is not on the system PATH.", tool_name)
         return None
     try:
         rc = run_with_scroll(cmd, cwd=str(project_dir), shell=IS_WINDOWS)
@@ -209,7 +220,7 @@ def index_generic(project_dir: Path, language: str) -> Optional[Path]:
             raise subprocess.CalledProcessError(rc, tool_name)
         return _move_index_to_arch(project_dir, language)
     except subprocess.CalledProcessError as e:
-        print(f"Error executing {tool_name}: {e}", file=sys.stderr)
+        logger.error("Error executing %s: %s", tool_name, e)
         return None
 
 

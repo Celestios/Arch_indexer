@@ -3,6 +3,7 @@ import os
 import sys
 from pathlib import Path
 
+from interface.project_registry import find_project_root_with_db
 from utils.session import get_project_root
 
 
@@ -19,12 +20,14 @@ def register(subparsers):
     p.set_defaults(func=cmd_mcp)
 
 
-def _handle_stdio(args, project_root, global_arch_dir):
-    passed_root = getattr(args, "project_root", None)
-    if passed_root and passed_root != ".":
+def _handle_stdio(args, project_root: Path, global_arch_dir: Path):
+    # Bind explicit project_root (or ancestor with .arch/arch.db) so run_server boots its watcher immediately
+    db_root = find_project_root_with_db(project_root)
+    if db_root is not None:
+        os.environ["ARCH_PROJECT_ROOT"] = str(db_root)
         try:
             from utils.single_instance import register_workspace
-            register_workspace(project_root, global_arch_dir)
+            register_workspace(db_root, global_arch_dir)
         except Exception:
             pass
     from interface.server import run_server
@@ -32,7 +35,7 @@ def _handle_stdio(args, project_root, global_arch_dir):
     sys.exit(0)
 
 
-def _handle_stop(global_arch_dir):
+def _handle_stop(global_arch_dir: Path):
     from utils.single_instance import stop_server
     stopped_pid = stop_server(global_arch_dir)
     if stopped_pid:
@@ -42,7 +45,7 @@ def _handle_stop(global_arch_dir):
     sys.exit(0)
 
 
-def _handle_status(global_arch_dir):
+def _handle_status(global_arch_dir: Path):
     from utils.single_instance import get_server_status
     status = get_server_status(global_arch_dir)
     if status and status.get("healthy"):
@@ -72,14 +75,14 @@ def _handle_status(global_arch_dir):
     sys.exit(0)
 
 
-def _handle_restart(global_arch_dir):
+def _handle_restart(global_arch_dir: Path):
     from utils.single_instance import stop_server
     stopped_pid = stop_server(global_arch_dir)
     if stopped_pid:
         print(f"[Arch MCP] Stopped existing server (PID {stopped_pid}).")
 
 
-def _handle_headless(args, project_root, global_arch_dir, req_port, cmd_prefix):
+def _handle_headless(args, project_root: Path, global_arch_dir: Path, req_port: int, cmd_prefix: str):
     from utils.single_instance import get_server_status, register_workspace, start_headless
     existing = get_server_status(global_arch_dir)
     if existing and existing.get("healthy"):
@@ -103,7 +106,7 @@ def _handle_headless(args, project_root, global_arch_dir, req_port, cmd_prefix):
         print("[Arch MCP] Server started successfully:")
         print(f"  URL:     {info['url']}")
         print(f"  PID:     {info['pid']}")
-        print(f"  Logs:    ~/.arch/daemon.log")
+        print("  Logs:    ~/.arch/daemon.log")
         print("  Status:  Healthy")
         print(f"\nTo stop it:    {cmd_prefix} mcp --stop")
         sys.exit(0)
@@ -112,8 +115,8 @@ def _handle_headless(args, project_root, global_arch_dir, req_port, cmd_prefix):
         sys.exit(1)
 
 
-def _handle_foreground(args, project_root, global_arch_dir, req_port, cmd_prefix):
-    from utils.single_instance import get_server_status, register_workspace, acquire_server, read_lock
+def _handle_foreground(args, project_root: Path, global_arch_dir: Path, req_port: int, cmd_prefix: str):
+    from utils.single_instance import acquire_server, get_server_status, read_lock, register_workspace
     is_foreground_worker = getattr(args, "foreground", False)
     if not is_foreground_worker:
         existing = get_server_status(global_arch_dir)
@@ -147,7 +150,6 @@ def _handle_foreground(args, project_root, global_arch_dir, req_port, cmd_prefix
     port = lock.get("port", 0) if lock else req_port
     url = f"http://127.0.0.1:{port}" if port > 0 else "stdio"
 
-    # In stdio mode, stdout is strictly reserved for JSON-RPC messages
     out_dest = sys.stderr if port <= 0 else sys.stdout
 
     print("[Arch MCP] Starting server in foreground...", file=out_dest)
@@ -175,25 +177,19 @@ def cmd_mcp(args):
     cmd_prefix = "arch" if getattr(sys, "frozen", False) else "python src/main.py"
     req_port = getattr(args, "port", 0)
 
-    # Handle --stdio mode for IDEs (Antigravity, Cursor, etc.)
     if getattr(args, "stdio", False):
         return _handle_stdio(args, project_root, global_arch_dir)
 
-    # 1. Handle --stop
     if getattr(args, "stop", False):
         return _handle_stop(global_arch_dir)
 
-    # 2. Handle --status
     if getattr(args, "status", False):
         return _handle_status(global_arch_dir)
 
-    # 3. Handle --restart
     if getattr(args, "restart", False):
         _handle_restart(global_arch_dir)
 
-    # 4. Handle --headless
     if getattr(args, "headless", False):
         return _handle_headless(args, project_root, global_arch_dir, req_port, cmd_prefix)
 
-    # 5. Foreground mode (default or internal child)
     return _handle_foreground(args, project_root, global_arch_dir, req_port, cmd_prefix)

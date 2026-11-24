@@ -111,6 +111,7 @@ def _check_package_restrictions(
         "filepath": filepath,
         "line": line_number,
         "message": msg,
+        "severity": rule.get("severity", "Error"),
         "origin": "automatic",
     }]
 
@@ -165,6 +166,7 @@ def _check_single_dependency(
         "filepath": filepath,
         "line": line_number,
         "message": trace_msg,
+        "severity": rule.get("severity", "Error"),
         "origin": "automatic",
     }
 

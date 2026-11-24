@@ -2,6 +2,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from db.base import BaseRepository, normalize_path
+from db.store_quality import normalize_severity
 from engines.polymorphism import (
     IMPLEMENTS_RELATION,
     POLYMORPHIC_KINDS,
@@ -14,7 +15,7 @@ _POLY_KINDS_LIST = sorted(POLYMORPHIC_KINDS)
 
 class AnalyticsStore(BaseRepository):
     """
-    Domain store providing read-only analytical queries, graph intelligence summaries,
+    Domain store providing read-only analytical queries, 3-axis compliance scorecards,
     symmetrical transitive closures, and clustering graph projections.
     """
 
@@ -40,18 +41,22 @@ class AnalyticsStore(BaseRepository):
 
     def get_compliance_summary(self, top_files: int = 5) -> Dict[str, Any]:
         """
-        Returns a read-only aggregated compliance scorecard directly from DuckDB:
-        file posture, normalized severity counts, origin split, per-rule rollups,
-        and top offending files (excluding pending_audit markers from rule counts).
+        Returns a read-only 3-axis compliance scorecard directly from DuckDB:
+        - Axis 1 (Automatic config rules): compliant_files vs violating_files
+        - Axis 2 (Changed-file review queue): pending_audit
+        - Axis 3 (Manual agent review): manual_violating_files, manual_overrides (explicit waivers)
+        - Composite: clean_files (rule-compliant, not manually flagged, not pending review)
         """
         posture_row = self._fetch_one(
             """
             SELECT
                 COUNT(*) AS total_files,
                 COALESCE(SUM(CASE WHEN status = 'COMPLIANT' THEN 1 ELSE 0 END), 0) AS compliant_files,
-                COALESCE(SUM(CASE WHEN status <> 'COMPLIANT' THEN 1 ELSE 0 END), 0) AS violating_files,
+                COALESCE(SUM(CASE WHEN status = 'VIOLATION_DETECTED' THEN 1 ELSE 0 END), 0) AS violating_files,
+                COALESCE(SUM(CASE WHEN manual_status = 'VIOLATION_DETECTED' THEN 1 ELSE 0 END), 0) AS manual_violating_files,
+                COALESCE(SUM(CASE WHEN manual_status = 'COMPLIANT' AND status = 'VIOLATION_DETECTED' THEN 1 ELSE 0 END), 0) AS manual_overrides,
                 COALESCE(SUM(CASE WHEN pending_audit = TRUE THEN 1 ELSE 0 END), 0) AS pending_audit,
-                COALESCE(SUM(CASE WHEN manual_status <> status THEN 1 ELSE 0 END), 0) AS manual_overrides
+                COALESCE(SUM(CASE WHEN status = 'COMPLIANT' AND COALESCE(manual_status, 'COMPLIANT') = 'COMPLIANT' AND pending_audit = FALSE THEN 1 ELSE 0 END), 0) AS clean_files
             FROM files
             """
         ) or {}
@@ -60,10 +65,7 @@ class AnalyticsStore(BaseRepository):
             """
             SELECT
                 COALESCE(v.rule_id, 'unknown') AS rule_id,
-                COALESCE(
-                    r.severity,
-                    CASE WHEN COALESCE(v.origin, 'automatic') = 'manual' THEN 'Manual' ELSE 'Warning' END
-                ) AS severity,
+                COALESCE(NULLIF(v.severity, ''), r.severity, 'Warning') AS severity,
                 COALESCE(
                     r.description,
                     CASE WHEN COALESCE(v.origin, 'automatic') = 'manual'
@@ -75,7 +77,6 @@ class AnalyticsStore(BaseRepository):
                 COUNT(DISTINCT v.filepath) AS file_count
             FROM compliance_violations v
             LEFT JOIN compliance_rules r ON v.rule_id = r.rule_id
-            WHERE COALESCE(v.rule_id, '') <> 'pending_audit'
             GROUP BY 1, 2, 3, 4
             ORDER BY hit_count DESC, rule_id ASC
             """
@@ -85,7 +86,6 @@ class AnalyticsStore(BaseRepository):
             """
             SELECT filepath, COUNT(*) AS hit_count
             FROM compliance_violations
-            WHERE COALESCE(rule_id, '') <> 'pending_audit'
             GROUP BY filepath
             ORDER BY hit_count DESC, filepath ASC
             LIMIT ?
@@ -93,26 +93,15 @@ class AnalyticsStore(BaseRepository):
             (int(top_files),),
         )
 
-        def _norm_severity(raw: Any) -> str:
-            val = str(raw or "Warning").strip().lower()
-            mapping = {
-                "critical": "Critical",
-                "error": "Error",
-                "warning": "Warning",
-                "info": "Info",
-                "manual": "Manual",
-            }
-            return mapping.get(val, val.capitalize() if val else "Warning")
-
         by_severity: Dict[str, int] = {}
-        merged_rules: Dict[str, Dict[str, Any]] = {}
+        merged_rules: Dict[tuple, Dict[str, Any]] = {}
         total_violations = 0
         automatic_violations = 0
         manual_violations = 0
 
         for r in rule_rows:
             hits = int(r.get("hit_count") or 0)
-            sev = _norm_severity(r.get("severity"))
+            sev = normalize_severity(r.get("severity"))
             origin = str(r.get("origin") or "automatic").lower()
             rid = str(r.get("rule_id") or "unknown")
             desc = str(r.get("description") or "").strip()
@@ -126,19 +115,21 @@ class AnalyticsStore(BaseRepository):
 
             by_severity[sev] = by_severity.get(sev, 0) + hits
 
-            if rid not in merged_rules:
-                merged_rules[rid] = {
+            key = (rid, origin, sev)
+            if key not in merged_rules:
+                merged_rules[key] = {
                     "rule_id": rid,
+                    "origin": origin,
                     "severity": sev,
                     "description": desc,
                     "count": hits,
                     "file_count": f_cnt,
                 }
             else:
-                merged_rules[rid]["count"] += hits
-                merged_rules[rid]["file_count"] = max(merged_rules[rid]["file_count"], f_cnt)
+                merged_rules[key]["count"] += hits
+                merged_rules[key]["file_count"] = max(merged_rules[key]["file_count"], f_cnt)
 
-        by_rule = sorted(merged_rules.values(), key=lambda x: (-x["count"], x["rule_id"]))
+        by_rule = sorted(merged_rules.values(), key=lambda x: (-x["count"], x["rule_id"], x["origin"]))
         hotspot_files = [
             {"filepath": normalize_path(r["filepath"]), "count": int(r.get("hit_count") or 0)}
             for r in file_rows
@@ -149,8 +140,10 @@ class AnalyticsStore(BaseRepository):
             "total_files": int(posture_row.get("total_files") or 0),
             "compliant_files": int(posture_row.get("compliant_files") or 0),
             "violating_files": int(posture_row.get("violating_files") or 0),
-            "pending_audit": int(posture_row.get("pending_audit") or 0),
+            "manual_violating_files": int(posture_row.get("manual_violating_files") or 0),
             "manual_overrides": int(posture_row.get("manual_overrides") or 0),
+            "pending_audit": int(posture_row.get("pending_audit") or 0),
+            "clean_files": int(posture_row.get("clean_files") or 0),
             "total_violations": total_violations,
             "automatic_violations": automatic_violations,
             "manual_violations": manual_violations,
@@ -190,12 +183,10 @@ class AnalyticsStore(BaseRepository):
                 if not current_frontier:
                     break
                 nodes = list(current_frontier.keys())
-                # Standard callers (exclude Implements so abstract T does not bounce to sibling concrete classes)
                 direct_rows = self._fetch_all(
                     "SELECT source AS next_sym, target AS curr_sym, relation FROM edges WHERE target IN (SELECT UNNEST(?::VARCHAR[])) AND relation <> ?",
                     (nodes, IMPLEMENTS_RELATION),
                 )
-                # Virtual dispatch upstream: concrete C --[Implements]--> abstract T
                 virtual_rows = self._fetch_all(
                     """SELECT e.target AS next_sym, e.source AS curr_sym, ? AS relation
                        FROM edges e
@@ -226,12 +217,10 @@ class AnalyticsStore(BaseRepository):
                 if not current_frontier:
                     break
                 nodes = list(current_frontier.keys())
-                # Standard callees (exclude Implements so concrete C does not bounce through T to siblings)
                 direct_rows = self._fetch_all(
                     "SELECT target AS next_sym, source AS curr_sym, relation FROM edges WHERE source IN (SELECT UNNEST(?::VARCHAR[])) AND relation <> ?",
                     (nodes, IMPLEMENTS_RELATION),
                 )
-                # Virtual dispatch downstream: abstract T (in POLYMORPHIC_KINDS) <--[Implements]-- concrete C
                 virtual_rows = self._fetch_all(
                     """SELECT e.source AS next_sym, e.target AS curr_sym, ? AS relation
                        FROM edges e

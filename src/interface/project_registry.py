@@ -1,18 +1,23 @@
-"""Dynamic multi-project registry and database pool for Arch MCP daemon.
+"""Dynamic multi-project registry and scoped DuckDB session manager for Arch MCP daemon.
 
-Manages isolated DuckDB connections and repositories per project workspace.
+Manages isolated ProjectContexts with reentrant scoped DuckDB sessions so .arch/arch.db
+is released and checkpointed immediately when idle, allowing concurrent CLI & multi-client access.
 """
+from contextlib import contextmanager
 import json
+import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from db.connection import DbConnection
 from db.repository import Repository
 from utils.single_instance import PROJECTS_FILE_NAME, get_global_arch_dir
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_path(path: Union[str, Path]) -> str:
@@ -42,10 +47,27 @@ class ProjectContext:
     db_conn: DbConnection
     repository: Repository
     last_accessed: float
+    db_lock: threading.RLock = field(default_factory=threading.RLock)
+    _session_depth: int = field(default=0, init=False, repr=False)
+
+    @contextmanager
+    def db_session(self):
+        """
+        Reentrant scoped DB session: acquires db_lock, reuses the open DuckDB connection across
+        nested calls, and closes DuckDB on outermost exit to flush WAL and release OS file locks.
+        """
+        with self.db_lock:
+            self._session_depth += 1
+            try:
+                yield self.repository
+            finally:
+                self._session_depth -= 1
+                if self._session_depth == 0:
+                    self.db_conn.close()
 
 
 class ProjectRegistry:
-    """Thread-safe registry of active workspace projects and their database connections."""
+    """Thread-safe registry of active workspace projects and their scoped database contexts."""
 
     _instance: Optional["ProjectRegistry"] = None
     _singleton_lock = threading.Lock()
@@ -115,7 +137,7 @@ class ProjectRegistry:
         start_watcher: bool = True,
         set_active: Optional[bool] = None,
     ) -> ProjectContext:
-        """Initializes or retrieves an isolated project context."""
+        """Initializes or retrieves a ProjectContext without opening a persistent DuckDB handle."""
         root_path = Path(project_root).resolve()
         db_root = find_project_root_with_db(root_path)
         if db_root is not None:
@@ -133,6 +155,17 @@ class ProjectRegistry:
             if norm_key in self._projects:
                 ctx = self._projects[norm_key]
                 ctx.last_accessed = now
+                if start_watcher:
+                    try:
+                        from change_tracker.watcher_manager import WatcherManager
+                        WatcherManager.get_instance().ensure_watcher(
+                            root_path,
+                            repository=ctx.repository,
+                            db_lock=ctx.db_lock,
+                            db_session_factory=ctx.db_session,
+                        )
+                    except Exception:
+                        logger.exception("Failed to ensure watcher for %s", root_path)
                 return ctx
 
             conn = DbConnection(db_path)
@@ -163,9 +196,14 @@ class ProjectRegistry:
             if start_watcher:
                 try:
                     from change_tracker.watcher_manager import WatcherManager
-                    WatcherManager.get_instance().ensure_watcher(root_path)
+                    WatcherManager.get_instance().ensure_watcher(
+                        root_path,
+                        repository=ctx.repository,
+                        db_lock=ctx.db_lock,
+                        db_session_factory=ctx.db_session,
+                    )
                 except Exception:
-                    pass
+                    logger.exception("Failed to start watcher for %s", root_path)
 
             return ctx
 
@@ -259,12 +297,12 @@ class ProjectRegistry:
 
             return Path.cwd().resolve()
 
-    def get_repository(
+    def get_context(
         self,
         project_root: Optional[Union[str, Path]] = None,
         filepath: Optional[Union[str, Path]] = None,
-    ) -> Repository:
-        """Resolves and returns the Repository for the given workspace context."""
+    ) -> ProjectContext:
+        """Resolves and returns the ProjectContext (Repository + scoped db_session) for the workspace."""
         resolved_root = self.resolve_project(project_root=project_root, filepath=filepath)
         norm_key = normalize_path(resolved_root)
 
@@ -272,10 +310,16 @@ class ProjectRegistry:
             if norm_key in self._projects:
                 ctx = self._projects[norm_key]
                 ctx.last_accessed = time.time()
-                return ctx.repository
+                return ctx
+            return self.register_project(resolved_root)
 
-            ctx = self.register_project(resolved_root)
-            return ctx.repository
+    def get_repository(
+        self,
+        project_root: Optional[Union[str, Path]] = None,
+        filepath: Optional[Union[str, Path]] = None,
+    ) -> Repository:
+        """Resolves and returns the Repository for the given workspace context."""
+        return self.get_context(project_root=project_root, filepath=filepath).repository
 
     def list_projects(self) -> List[Dict[str, Any]]:
         """Returns metadata for all registered projects."""
@@ -299,31 +343,31 @@ class ProjectRegistry:
             return result
 
     def close_project(self, project_root: Union[str, Path]) -> bool:
-        """Closes the connection pool for a specific project."""
+        """Stops watcher and closes the connection pool for a specific project."""
         norm_key = normalize_path(project_root)
         with self._lock:
+            try:
+                from change_tracker.watcher_manager import WatcherManager
+                WatcherManager.get_instance().stop_watcher(project_root)
+            except Exception:
+                pass
             if norm_key in self._projects:
                 ctx = self._projects.pop(norm_key)
-                try:
-                    ctx.db_conn.close()
-                except Exception:
-                    pass
+                with ctx.db_lock:
+                    try:
+                        ctx.db_conn.close()
+                    except Exception:
+                        pass
                 return True
             return False
 
     def unregister_project(self, project_root: Union[str, Path]) -> bool:
-        """Unregisters a workspace: closes DB connection, stops watcher, and removes from projects.json."""
+        """Unregisters a workspace: stops watcher, closes DB connection, and removes from projects.json."""
         root_path = Path(project_root).resolve()
         norm_key = normalize_path(root_path)
 
         with self._lock:
             self.close_project(root_path)
-
-            try:
-                from change_tracker.watcher_manager import WatcherManager
-                WatcherManager.get_instance().stop_watcher(root_path)
-            except Exception:
-                pass
 
             data = self._read_persisted_projects()
             projects = data.get("projects", {})
@@ -342,11 +386,17 @@ class ProjectRegistry:
             return removed
 
     def close_all(self):
-        """Closes all active database connections in the pool."""
+        """Stops all watchers and closes all active database connections."""
         with self._lock:
+            try:
+                from change_tracker.watcher_manager import WatcherManager
+                WatcherManager.get_instance().stop_all()
+            except Exception:
+                pass
             for ctx in self._projects.values():
-                try:
-                    ctx.db_conn.close()
-                except Exception:
-                    pass
+                with ctx.db_lock:
+                    try:
+                        ctx.db_conn.close()
+                    except Exception:
+                        pass
             self._projects.clear()

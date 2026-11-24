@@ -77,7 +77,7 @@ class BaseRepository:
 
 UPSERT_FILE_SQL = """
 INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification)
-VALUES (?, ?, ?, now(), 'COMPLIANT', 'COMPLIANT', TRUE, '{}', 'New file, pending initial audit')
+VALUES (?, ?, ?, now(), 'COMPLIANT', NULL, TRUE, '{}', 'New file, pending initial audit')
 ON CONFLICT (filepath) DO UPDATE SET
     pending_audit = CASE WHEN files.sha256 <> excluded.sha256 THEN TRUE ELSE files.pending_audit END,
     justification = CASE WHEN files.sha256 <> excluded.sha256 THEN 'File modified, pending re-audit' ELSE files.justification END,
@@ -88,7 +88,7 @@ ON CONFLICT (filepath) DO UPDATE SET
 
 UPSERT_AST_FILE_SQL = """
 INSERT INTO files (filepath, sha256, ast_sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification)
-VALUES (?, '', ?, ?, now(), 'COMPLIANT', 'COMPLIANT', TRUE, '{}', 'New file, pending initial audit')
+VALUES (?, '', ?, ?, now(), 'COMPLIANT', NULL, TRUE, '{}', 'New file, pending initial audit')
 ON CONFLICT (filepath) DO UPDATE SET
     ast_sha256 = excluded.ast_sha256,
     language = excluded.language
@@ -97,7 +97,7 @@ ON CONFLICT (filepath) DO UPDATE SET
 UPSERT_FILES_VECTORIZED_SQL = """
 INSERT INTO files (filepath, sha256, language, last_indexed, status, manual_status, pending_audit, manual_fields, justification)
 SELECT UNNEST(?::VARCHAR[]), UNNEST(?::VARCHAR[]), UNNEST(?::VARCHAR[]),
-       now(), 'COMPLIANT', 'COMPLIANT', TRUE, '{}', 'New file, pending initial audit'
+       now(), 'COMPLIANT', NULL, TRUE, '{}', 'New file, pending initial audit'
 ON CONFLICT (filepath) DO UPDATE SET
     pending_audit = CASE WHEN files.sha256 <> excluded.sha256 THEN TRUE ELSE files.pending_audit END,
     justification = CASE WHEN files.sha256 <> excluded.sha256 THEN 'File modified, pending re-audit' ELSE files.justification END,
@@ -107,27 +107,30 @@ ON CONFLICT (filepath) DO UPDATE SET
 """
 
 UPSERT_VIOLATION_SQL = """
-INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message, origin)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message, severity, origin)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (violation_id) DO UPDATE SET
     rule_id = excluded.rule_id,
     symbol = excluded.symbol,
     filepath = excluded.filepath,
     line = excluded.line,
     message = excluded.message,
+    severity = excluded.severity,
     origin = excluded.origin
 """
 
 UPSERT_VIOLATIONS_VECTORIZED_SQL = """
-INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message, origin)
+INSERT INTO compliance_violations (violation_id, rule_id, symbol, filepath, line, message, severity, origin)
 SELECT UNNEST(?::VARCHAR[]), UNNEST(?::VARCHAR[]), UNNEST(?::VARCHAR[]),
-       UNNEST(?::VARCHAR[]), UNNEST(?::INTEGER[]), UNNEST(?::VARCHAR[]), UNNEST(?::VARCHAR[])
+       UNNEST(?::VARCHAR[]), UNNEST(?::INTEGER[]), UNNEST(?::VARCHAR[]),
+       UNNEST(?::VARCHAR[]), UNNEST(?::VARCHAR[])
 ON CONFLICT (violation_id) DO UPDATE SET
     rule_id = excluded.rule_id,
     symbol = excluded.symbol,
     filepath = excluded.filepath,
     line = excluded.line,
     message = excluded.message,
+    severity = excluded.severity,
     origin = excluded.origin
 """
 

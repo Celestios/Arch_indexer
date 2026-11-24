@@ -18,7 +18,8 @@ def _resolve_changed_and_deleted(
     project_root: Optional[Path] = None,
     force: bool = False,
 ) -> Tuple[List[str], List[str], List[str], List[str], bool]:
-    """Resolves changed files, deleted files, unchanged files, and shrink-guard checks."""
+    """Resolves changed files, deleted files, unchanged files, and full-index shrink-guard checks."""
+    is_partial = bool(parsed_data.get("is_partial"))
     files_to_register = set()
     for f in parsed_data.get("files", []):
         if f:
@@ -35,7 +36,9 @@ def _resolve_changed_and_deleted(
     db_files = repository.workspace.get_all_files_metadata()
 
     if not languages_in_index:
-        if project_root:
+        requested = parsed_data.get("requested_files") or []
+        languages_in_index = {LanguageRegistry.detect_language(fp) or "unknown" for fp in requested}
+        if not languages_in_index and project_root:
             try:
                 from engines.scip.wrapper import detect_languages
                 languages_in_index = set(detect_languages(project_root))
@@ -57,7 +60,10 @@ def _resolve_changed_and_deleted(
 
     changed_files: List[str] = []
     unchanged_files: List[str] = []
-    if project_root and not force:
+    if is_partial:
+        # Partial parse was already scoped (including dependents) before parse_index()
+        changed_files = file_list
+    elif project_root and not force:
         for fp in file_list:
             current_hash = calculate_sha256(project_root / fp)
             db_hash = db_files.get(fp, {}).get("sha256", "")
@@ -78,14 +84,15 @@ def _resolve_changed_and_deleted(
     else:
         changed_files = file_list
 
-    if force or not unchanged_files:
+    # Full-repo Shrink Guard applies strictly to complete workspace parses, never partial dirty-file syncs
+    if not is_partial and not force and not unchanged_files:
         new_symbols_count = sum(1 for v in parsed_data.get("symbols", {}).values() if v.get("filepath"))
         existing_symbols_count = (
             repository.analytics.get_symbol_count_by_languages(list(languages_in_index))
             if languages_in_index
             else 0
         )
-        if not force and len(deleted_files) == 0 and existing_symbols_count > 0:
+        if len(deleted_files) == 0 and existing_symbols_count > 0:
             is_suspicious_shrink = (
                 new_symbols_count == 0
                 or (new_symbols_count < existing_symbols_count * 0.90 and (existing_symbols_count - new_symbols_count) > 50)

@@ -125,6 +125,7 @@ def parse_index(
     """
     Parses a binary index.scip file into canonical symbols, occurrences, diagnostics, and edges.
     Uses a Pass-0 workspace definition scan so cross-file references never poison the SCIP->canonical cache.
+    Sets is_partial=True when filtered by changed_files so downstream ingestion skips full-repo shrink guards.
     """
     if not scip_file.exists():
         raise FileNotFoundError(f"SCIP index file not found at {scip_file}")
@@ -181,6 +182,8 @@ def parse_index(
             "tool_name": index.metadata.tool_info.name,
             "tool_version": index.metadata.tool_info.version,
         },
+        "is_partial": changed_set is not None,
+        "requested_files": sorted(changed_set) if changed_set is not None else None,
         "symbols": {},
         "occurrences": [],
         "edges": [],
@@ -188,7 +191,6 @@ def parse_index(
         "diagnostics": [],
     }
 
-    # Pre-seed from existing DB scip_id map for incremental fallback; Pass 0 overwrites with current workspace defs
     scip_to_canonical: Dict[str, str] = dict(existing_scip_map) if existing_scip_map else {}
     scip_to_leaf: Dict[str, str] = {}
     scip_to_derived_parent: Dict[str, Optional[str]] = {}
@@ -236,7 +238,6 @@ def parse_index(
             c_id = scip_to_canonical[raw_scip]
             leaf = scip_to_leaf.get(raw_scip) or parse_canonical_id(c_id)[2]
             return c_id, leaf, scip_to_derived_parent.get(raw_scip)
-        # Not defined in any workspace document -> external symbol
         c_id, leaf, p_id = scip_to_canonical_id(raw_scip, resolved_filepath=None, kind=kind)
         scip_to_canonical[raw_scip] = c_id
         scip_to_leaf[raw_scip] = leaf
@@ -244,7 +245,6 @@ def parse_index(
         canonical_to_raw_scip[c_id] = raw_scip
         return c_id, leaf, p_id
 
-    # Map external symbols (deferred ingestion: only emit if referenced by active occurrences/edges)
     external_symbols_map: Dict[str, Tuple[Any, str, Optional[str]]] = {}
     for sym_info in index.external_symbols:
         k_str = _kind_name(sym_info.kind)

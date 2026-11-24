@@ -77,6 +77,24 @@ class WorkspaceStore(BaseRepository):
         """Returns dictionary of filepath -> file metadata for all files."""
         return {f["filepath"]: f for f in self.get_all_files() if f}
 
+    def get_pending_files(self) -> List[Dict[str, Any]]:
+        """Returns all files currently flagged in the pending_audit review queue."""
+        rows = self._fetch_all(
+            "SELECT filepath, language, status, manual_status, pending_audit, justification FROM files WHERE pending_audit = TRUE ORDER BY filepath"
+        )
+        return [
+            {
+                "filepath": normalize_path(r["filepath"]),
+                "language": r.get("language"),
+                "status": r.get("status"),
+                "manual_status": r.get("manual_status"),
+                "pending_audit": bool(r.get("pending_audit")),
+                "justification": r.get("justification") or "",
+            }
+            for r in rows
+            if r.get("filepath")
+        ]
+
     def get_files_pending_audit_count(self) -> int:
         """Returns the count of files pending audit."""
         row = self._fetch_one("SELECT COUNT(*) AS cnt FROM files WHERE pending_audit = TRUE")
@@ -109,7 +127,7 @@ class WorkspaceStore(BaseRepository):
         self._execute(UPSERT_FILES_VECTORIZED_SQL, (fps, hashes, langs))
 
     def update_file_statuses(self, statuses: Dict[str, str]):
-        """Vectorized batch update of file compliance statuses."""
+        """Vectorized batch update of automatic rule compliance statuses (Axis 1)."""
         if not statuses:
             return
         stats = list(statuses.values())
@@ -125,12 +143,35 @@ class WorkspaceStore(BaseRepository):
             (stats, fps),
         )
 
-    def update_file_manual_status(self, filepath: str, status: str, justification: Optional[str] = None):
-        """Sets a manual override status for a file and clears its pending audit flag."""
-        self._execute(
-            "UPDATE files SET manual_status = ?, pending_audit = FALSE, justification = ? WHERE filepath = ?",
-            (status, justification, normalize_path(filepath)),
-        )
+    def reset_automatic_statuses(self, filepath_prefix: Optional[str] = None):
+        """Resets automatic rule status (Axis 1) to COMPLIANT without touching manual_status or pending_audit."""
+        if filepath_prefix:
+            self._execute(
+                "UPDATE files SET status = 'COMPLIANT' WHERE filepath LIKE ?",
+                (f"{normalize_path(filepath_prefix)}%",),
+            )
+        else:
+            self._execute("UPDATE files SET status = 'COMPLIANT'")
+
+    def update_file_manual_status(
+        self,
+        filepath: str,
+        status: Optional[str],
+        justification: Optional[str] = None,
+        clear_pending: bool = True,
+    ):
+        """Sets or clears manual review status (Axis 3), optionally clearing pending_audit (Axis 2)."""
+        norm_fp = normalize_path(filepath)
+        if clear_pending:
+            self._execute(
+                "UPDATE files SET manual_status = ?, pending_audit = FALSE, justification = ? WHERE filepath = ?",
+                (status, justification, norm_fp),
+            )
+        else:
+            self._execute(
+                "UPDATE files SET manual_status = ?, justification = COALESCE(?, justification) WHERE filepath = ?",
+                (status, justification, norm_fp),
+            )
 
     def update_manual_fields(self, filepath: str, manual_fields: dict, justification: Optional[str] = None):
         """Replaces manual metadata fields for a specific file."""
@@ -141,14 +182,14 @@ class WorkspaceStore(BaseRepository):
         )
 
     def update_clear_pending_audits(self, justification: str):
-        """Marks all files as audited with a justification."""
+        """Marks all files as reviewed in the pending_audit queue (Axis 2) without touching manual_status."""
         self._execute(
             "UPDATE files SET pending_audit = FALSE, justification = ?",
             (justification,),
         )
 
     def update_mark_file_pending(self, filepath: str, justification: str):
-        """Explicitly flags a file as pending audit."""
+        """Explicitly flags a file as pending review (Axis 2)."""
         self._execute(
             "UPDATE files SET pending_audit = TRUE, justification = ? WHERE filepath = ?",
             (justification, normalize_path(filepath)),

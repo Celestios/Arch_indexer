@@ -95,3 +95,25 @@ In `src/engines/scip/ingester.py` and `src/db/store_graph.py`, `_reconcile_and_s
 **Rejected alternative:** Keeping duplicate Tree-sitter symbol rows in `symbols` alongside SCIP symbols was rejected because it produces fragmented duplicate symbols, confuses symbol lookup tools, and breaks 1:1 symbol coordinate mappings.
 
 **Rejected alternative (SCIP-only indexing for Dart):** Relying solely on `scip-dart` without Tree-sitter was rejected because SCIP lacks sub-millisecond AST synchronization on file save and cannot extract multi-line signatures or docstrings in real time when files contain transient syntax errors.
+
+---
+
+## Weighted hybrid Tier-2 SCIP gate, 2.5h max-age timer, and crash-safe pending queue
+
+**Id:** 33c75ea2-db59-423a-a807-24adb1cc3868
+**Type:** decision
+**Status:** active
+**Evidence:** confirmed
+**Source:** maintainer session, 2026-11-25
+**Revisit when:** incremental SCIP compilers (e.g., `rust-analyzer scip` / `scip_dart`) complete in under a few seconds per edit
+
+Tier-1 Tree-sitter AST synchronization still runs immediately on every Watchdog file event, while Tier-2 SCIP re-indexing in `src/change_tracker/watcher_manager.py` is gated by a weighted hybrid trigger:
+- **Weighted score (`>= 3500` after `10.0s` coalesce)**: `5 * files + 1 * line_delta + 10 * ast_changed + 25 * (forced_deletes + ffi_bridge)`.
+- **Max-age timer (`9000.0s` / 2.5 hours)**: forces a background SCIP run once the oldest pending dirty edit reaches 2.5 hours, even if volume stayed below `3500`.
+- **Crash-safe persistence**: pending Tier-2 dirty state is atomically persisted to `.arch/scip_pending.json` (`.tmp` + `os.replace`) and cleared only after `_run_scip_reindex` completes, so abrupt process termination never drops un-indexed edits whose `ast_sha256` already updated in Tier-1.
+
+**Reason:** On real multi-language workspaces (e.g., `centrode` Rust + Flutter), `rust-analyzer scip .` takes ~2.5 minutes per run. Triggering SCIP on a 3s debounce wastes CPU on every small edit, while a low volume threshold (`100`) still fires prematurely mid-refactor (a 30-file, 2,000-line AST refactor scores `2450`). Raising the threshold to `3500` with a 2.5h max-age keeps routine editing and medium refactors quiet while bounding worst-case staleness.
+
+**Rejected alternative (pure 3s time-based debounce):** Triggered multi-minute compiler runs after every minor save.
+
+**Rejected alternative (pure volume-count gate without max-age):** Small 1–2 file edits would never trigger background SCIP indefinitely unless followed by unrelated edits.

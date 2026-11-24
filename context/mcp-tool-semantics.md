@@ -33,3 +33,40 @@ All exposed MCP tools (`graph`, `lookup`, `context`, `impact`, `compile_context`
 **Reason:** In GUI desktop environments like Google Antigravity, the IDE host runs a single global stdio MCP server process whose working directory is fixed at startup (typically the IDE application install directory or the workspace open during launch). Crucially, GUI desktop agent hosts do not advertise or implement the optional MCP server-to-client reverse RPC `roots/list`. When `project_root` was omitted or made optional, tool calls from secondary open workspaces lacked any workspace context: `ctx.session.list_roots()` silently failed with `MethodNotFound`, causing the resolution logic to fall back to the global process CWD or the persisted `active_project`. Consequently, tools invoked from external repositories (e.g. `centrode`) silently defaulted to and generated artifacts inside the Arch indexer workspace. Making `project_root` strictly mandatory in the schema forces the agent model—which always knows its active workspace path from system prompt metadata—to explicitly pass the target project path on every invocation, eliminating cross-project state pollution.
 
 **Rejected alternative:** Relying solely on `ctx.session.list_roots()` was rejected because desktop MCP client implementations commonly omit reverse root querying capabilities, causing calls to raise exceptions or time out. Relying on optional parameters with CWD/registry fallback was rejected because autonomous agents omit optional parameters whenever possible, silently triggering CWD fallbacks and mutating unintended repositories.
+
+---
+
+## Scoped on-demand SCIP flush only for graph, clusters, and update
+
+**Id:** 65bd99da-97a7-4985-91e2-8247c6ca4990
+**Type:** decision
+**Status:** active
+**Evidence:** confirmed
+**Source:** maintainer session, 2026-11-25
+**Revisit when:** Tier-2 SCIP runs are fast enough to flush before high-frequency query tools without noticeable latency
+
+In `src/interface/server.py`, only `graph` and `clusters` call `WatcherManager.get_instance().flush_pending(pctx.root)` before reading DuckDB, and `update` calls `clear_pending()` after syncing so the watcher does not redundantly re-run SCIP. High-frequency tools (`impact`, `context`, `compile_context`, `map`, `audit`, `lookup`, `query`) do **not** flush pending SCIP.
+
+**Reason:** `impact`, `context`, `compile_context`, `map`, and `audit` are invoked frequently during normal agent exploration; flushing SCIP before them would defeat the hybrid Tier-2 gate and trigger repeated multi-minute compiler runs. `graph` and `clusters` are whole-architecture structural commands where fresh cross-file edges are essential and occasional sync latency is acceptable.
+
+**Rejected alternative:** Flushing pending SCIP before every tool that reads `edges` (`impact`, `context`, `compile_context`, `map`, `audit`) — rejected due to excessive re-indexing frequency.
+
+---
+
+## Three-axis compliance model and removal of synthetic pending_audit violations
+
+**Id:** 29112a20-f814-49f6-b3e2-f09bba068314
+**Type:** decision
+**Status:** active
+**Evidence:** confirmed
+**Source:** maintainer session, 2026-11-25
+**Revisit when:** compliance storage moves away from DuckDB schema v5
+
+In schema v5 (`src/db/schema.sql`, `src/auditor/analyzer.py`, `src/interface/tools/set_status.py`), compliance state is strictly separated into three orthogonal axes:
+1. **Axis 1 (Automatic rules)**: `files.status` (`COMPLIANT` / `VIOLATION_DETECTED`) and `origin = 'automatic'` rows in `compliance_violations`.
+2. **Axis 2 (Review queue)**: `files.pending_audit` boolean flag only — `src/auditor/violation_checkers/pending.py` was removed so pending files are never emitted as synthetic violation rows.
+3. **Axis 3 (Manual logical review)**: `files.manual_status` defaults to `NULL` (not `'COMPLIANT'`), and `set_status` supports `COMPLIANT`, `VIOLATION_DETECTED`, and `CLEAR` without mutating Axis 1 or triggering `Auditor.run_audit()`.
+
+**Reason:** Modeling `pending_audit` as synthetic violation rows and defaulting `manual_status` to `'COMPLIANT'` caused a freshly initialized repository with zero rule violations to report every file as both violating and manually overridden (e.g., 663/663 violating and 663 manual overrides on `centrode`).
+
+**Rejected alternative:** Filtering `rule_id <> 'pending_audit'` in analytics SQL queries and running `Auditor.run_audit()` inside `set_status` — rejected because it leaked synthetic state across axes and coupled manual review actions to full automatic re-audits.

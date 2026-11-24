@@ -72,6 +72,7 @@ def check(
                     "filepath": filepath,
                     "line": line_number,
                     "message": msg,
+                    "severity": rule.get("severity", "Error"),
                     "origin": "automatic",
                 })
     return violations

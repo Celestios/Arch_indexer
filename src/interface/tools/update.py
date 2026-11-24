@@ -1,11 +1,19 @@
+from contextlib import nullcontext
+import logging
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, Callable, ContextManager, List, Optional, Union
 
 from auditor.analyzer import Auditor
-from engines.sync_pipeline import sync_workspace
-from setup.initializer import initialize_workspace, sync_rules_to_db
+from engines.sync_pipeline import checkpoint_db, sync_workspace
+from setup.initializer import sync_rules_to_db
 from utils.helpers import load_config
 from utils.symbol_id import canonical_display_name
+
+logger = logging.getLogger(__name__)
+
+
+def _session(session_factory: Optional[Callable[[], ContextManager[Any]]]):
+    return session_factory() if session_factory is not None else nullcontext()
 
 
 def handle_update(
@@ -13,14 +21,20 @@ def handle_update(
     project_root: Path,
     filepaths: Optional[Union[List[str], str]] = None,
     force: bool = False,
+    session_factory: Optional[Callable[[], ContextManager[Any]]] = None,
 ) -> str:
-    """Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges."""
-    arch_dir = initialize_workspace(project_root)
+    """
+    Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges.
+    Uses the provided repository (and optional scoped session_factory) without opening a second DbConnection.
+    """
+    arch_dir = project_root / ".arch"
+    arch_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        sync_rules_to_db(repository, load_config(project_root))
-    except Exception:
-        pass
+    with _session(session_factory):
+        try:
+            sync_rules_to_db(repository, load_config(project_root))
+        except Exception:
+            logger.warning("Failed to sync compliance rules from config.json", exc_info=True)
 
     if force:
         for f in arch_dir.glob("index_*.scip"):
@@ -53,6 +67,7 @@ def handle_update(
         dirty_files=dirty_files,
         force=force,
         run_ffi=True,
+        session_factory=session_factory,
     )
     languages = sync_res["languages"]
     if not languages:
@@ -62,9 +77,11 @@ def handle_update(
     failed_langs = sync_res["failed_languages"]
     bridge_edges = sync_res["ffi_edges_created"]
 
-    auditor = Auditor(repository, project_root)
-    violations = auditor.run_audit()
-    totals = repository.analytics.get_repo_totals()
+    with _session(session_factory):
+        auditor = Auditor(repository, project_root)
+        violations = auditor.run_audit()
+        checkpoint_db(repository)
+        totals = repository.analytics.get_repo_totals()
 
     md = ["## Workspace Update Complete\n"]
     md.append("*Mode: Full rebuild (`force=True`)*\n" if force else "*Mode: Incremental update*\n")
