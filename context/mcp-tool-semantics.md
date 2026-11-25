@@ -70,3 +70,21 @@ In schema v5 (`src/db/schema.sql`, `src/auditor/analyzer.py`, `src/interface/too
 **Reason:** Modeling `pending_audit` as synthetic violation rows and defaulting `manual_status` to `'COMPLIANT'` caused a freshly initialized repository with zero rule violations to report every file as both violating and manually overridden (e.g., 663/663 violating and 663 manual overrides on `centrode`).
 
 **Rejected alternative:** Filtering `rule_id <> 'pending_audit'` in analytics SQL queries and running `Auditor.run_audit()` inside `set_status` — rejected because it leaked synthetic state across axes and coupled manual review actions to full automatic re-audits.
+
+---
+
+## Moving workspace update from MCP tool to simplified CLI command
+
+**Id:** 87b22379-61d2-47c2-b26c-1b86440293d1
+**Type:** decision
+**Status:** active
+**Evidence:** confirmed
+**Source:** maintainer session, 2026-11-25
+**See:** mcp-tool-semantics.md#scoped-on-demand-scip-flush-only-for-graph-clusters-and-update — 65bd99da-97a7-4985-91e2-8247c6ca4990 — as of 2026-11-25
+**Revisit when:** Tier-2 SCIP indexers become fast enough (sub-second or incremental) to complete reliably within MCP tool-call timeouts
+
+The `update` MCP tool was removed from `src/interface/server.py`, `docs/mcp_api.md`, and the `arch` skill, and replaced by the simplified CLI command `arch update [--force] [project_root]` (`src/commands/update.py`). The `filepaths` and `incremental` flags were omitted from the CLI surface.
+
+**Reason:** `sync_workspace` (`src/engines/sync_pipeline.py`) always executes the full external SCIP indexer (`run_indexer`) in Phase 2 regardless of whether `dirty_files` or `force=False` is passed; `dirty_files` only filters fast Tree-sitter AST sync and post-parse `parse_index` filtering. Running full SCIP indexing inside an MCP tool call regularly exceeds client timeouts, and exposing `filepaths`/`incremental` options suggested partial indexing that could not skip the slow SCIP step.
+
+**Rejected alternative:** Keeping `update` as an MCP tool with `filepaths` / incremental parameters, or restricting `update` to Tree-sitter only — rejected because MCP calls time out on multi-minute SCIP runs, Tree-sitter is already kept current by the background watcher, and `filepaths` did not avoid `run_indexer`.

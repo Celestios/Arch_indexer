@@ -100,3 +100,33 @@ def test_cmd_mcp(tmp_path):
         import os
         assert os.environ.get("ARCH_PROJECT_ROOT") == str(tmp_path)
 
+
+def test_cmd_update(tmp_path, capsys):
+    """cmd_update runs workspace sync via CLI."""
+    from setup.initializer import initialize_workspace
+    from commands import cmd_update
+    initialize_workspace(tmp_path)
+
+    args = type("Args", (), {
+        "project_root": str(tmp_path),
+        "force": False,
+    })()
+    cmd_update(args)
+
+    captured = capsys.readouterr()
+    assert "## Workspace Update" in captured.out
+
+
+def test_cli_update_help(capsys):
+    """arch update --help exposes simplified update options."""
+    with patch("sys.argv", ["arch", "update", "--help"]):
+        try:
+            main()
+        except SystemExit as e:
+            assert e.code == 0
+
+    captured = capsys.readouterr()
+    assert "--force" in captured.out
+    assert "project_root" in captured.out
+    assert "--filepaths" not in captured.out
+

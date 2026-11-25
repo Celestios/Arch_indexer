@@ -33,7 +33,6 @@ from interface.tools.map import handle_map
 from interface.tools.query import handle_query
 from interface.tools.set_fields import handle_set_fields
 from interface.tools.set_status import handle_set_status
-from interface.tools.update import handle_update
 from interface.validators import (
     validate_cluster_unit,
     validate_cluster_view,
@@ -535,38 +534,6 @@ async def set_status(
         return f"Error: {e}"
     except Exception as e:
         return f"Error setting status: {e}"
-
-
-@_tool()
-async def update(
-    project_root: str,
-    filepaths: Optional[Union[List[str], str]] = None,
-    force: bool = False,
-    ctx: Context = None,
-) -> str:
-    """Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges."""
-    filepath_hint = filepaths if isinstance(filepaths, str) else (filepaths[0] if filepaths else None)
-    try:
-        pctx = await _resolve_project_context(ctx=ctx, project_root=project_root, filepath=filepath_hint)
-        # Pass pctx.db_session as session_factory so DuckDB is unlocked while external SCIP indexers run
-        result = handle_update(
-            pctx.repository,
-            pctx.root,
-            filepaths=filepaths,
-            force=force,
-            session_factory=pctx.db_session,
-        )
-        cleared_files = (
-            None
-            if force or not filepaths
-            else ({filepaths} if isinstance(filepaths, str) else set(filepaths))
-        )
-        WatcherManager.get_instance().clear_pending(pctx.root, cleared_files)
-        return result
-    except FileNotFoundError as e:
-        return f"Error: {e}"
-    except Exception as e:
-        return f"Error updating workspace: {e}"
 
 
 @_tool()

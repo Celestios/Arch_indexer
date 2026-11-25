@@ -33,7 +33,6 @@ Select Arch tools based on the abstraction level and lifecycle phase of your tas
 | **Metadata & Compliance State** | `set_status`, `set_fields` | Update architectural compliance flags, justification notes, or metadata fields. |
 | **Audit Workflow Closure** | `clear_pending` | Clear pending audit flags after reviewing or updating compliant modules. |
 | **Audit Timeline & Audit Trail** | `history` | Inspect past audit runs, state transitions, and compliance history. |
-| **Index Synchronization** | `update` | Trigger incremental or full re-indexing of modified or newly added files. |
 | **Custom Graph / Component Analytics** | `query` | Read-only SQL on DuckDB index (`.arch/arch.db`). **Last resort only**: Do not use frequently; only when no other tool can answer the question. |
 
 ---
@@ -49,7 +48,12 @@ Select Arch tools based on the abstraction level and lifecycle phase of your tas
 
 3. **Database Staleness & Lag Awareness**:
    - Full SCIP index updates may lag behind recent file edits, though Arch MCP performs fast Tree-sitter updates for immediate symbol/structural changes.
-   - When files are modified, created, or deleted during work, call `update` to refresh the index or use alternative methods (such as targeted, bounded line reads).
+   - When a manual full/SCIP sync is needed after modifying, creating, or deleting files, run the CLI command `arch update` (instead of an MCP tool):
+     ```bash
+     arch update [--force] [project_root]
+     ```
+     - `project_root`: Optional project root path (defaults to `.`).
+     - `--force`: Deletes cached `.arch/index_*.scip` files and forces a full rebuild.
 
 4. **Query Tool Discipline (Last Resort)**:
    - Do **NOT** use `query` frequently. Always prefer specialized tools (`lookup`, `context`, `graph`, `impact`, `compile_context`, `clusters`, `map`, `audit`).
@@ -65,7 +69,7 @@ Select Arch tools based on the abstraction level and lifecycle phase of your tas
 3. Safety Check: impact (assess blast radius before touching code)
 4. Contextualize: compile_context (gather caller/callee code context if needed)
 5. Execute:      Targeted edit on bounded lines
-6. Sync & Verify: update (re-index) → audit (verify boundary compliance)
+6. Sync & Verify: arch update (if needed) → audit (verify boundary compliance)
 ```
 
 ---

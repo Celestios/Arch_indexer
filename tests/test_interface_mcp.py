@@ -427,7 +427,6 @@ def test_mcp_tools_database_missing(tmp_path, monkeypatch):
     assert "database not found" in mcp_server.compile_context("symbol").lower()
     assert "database not found" in mcp_server.audit().lower()
     assert "database not found" in mcp_server.map().lower()
-    assert "database not found" in mcp_server.update().lower()
     assert "database not found" in mcp_server.graph().lower()
     assert "database not found" in mcp_server.history().lower()
 
@@ -435,7 +434,7 @@ def test_mcp_tools_database_missing(tmp_path, monkeypatch):
 def test_mcp_tool_registered_names():
     import src.interface.server as mcp_server
     tools = getattr(mcp_server.mcp, "tools", [])
-    assert "update" in tools
+    assert "update" not in tools
     assert "graph" in tools
     assert "history" in tools
     assert "report" not in tools
@@ -444,15 +443,6 @@ def test_mcp_tool_registered_names():
     assert "projects" not in tools
     assert "register_project" not in tools
     assert "unregister_project" not in tools
-
-
-def test_mcp_tools_update(tmp_path, monkeypatch):
-    repository, db_conn, root = setup_workspace(tmp_path)
-    _patch_server_config(monkeypatch, root)
-    import src.interface.server as mcp_server
-
-    res = mcp_server.update()
-    assert "## Workspace Update" in res
 
 
 def test_mcp_tools_map(tmp_path, monkeypatch):

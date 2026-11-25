@@ -288,9 +288,3 @@ The FastMCP server exposes tools returning clean, token-efficient Markdown strin
     *   `include_tests` (boolean, optional, default: False): Whether to include test files and symbols.
     *   `include_drift` (boolean, optional, default: True): Whether to compute and append architectural drift diagnostics.
 
-### `update`
-*   **Purpose**: Triggers incremental or forced full synchronization of workspace symbols, relationships, and call graph edges. Note that the MCP watcher module already auto-updates the database in the background (tree-sitter updates are quick, while SCIP-gathered info might lag). Use this tool only for manual updates when forced synchronization or explicit re-indexing is required.
-*   **Parameters**:
-    *   `filepaths` (Union[list[str], str], optional): Target file(s) to incrementally update. If omitted, checks all detected languages.
-    *   `force` (boolean, optional, default: False): If True, performs a clean full re-index.
-

@@ -12,6 +12,7 @@ from commands.clear_pending import cmd_clear_pending
 from commands.clusters import cmd_clusters
 from commands.graph import cmd_graph
 from commands.mcp import cmd_mcp
+from commands.update import cmd_update
 
 # Explicit list of CLI command modules. Order = order shown in --help.
 COMMANDS = [
@@ -26,6 +27,7 @@ COMMANDS = [
     "mcp",
     "set_fields",
     "set_status",
+    "update",
     "watch",
 ]
 
@@ -50,5 +52,6 @@ __all__ = [
     "cmd_set_status",
     "cmd_set_fields",
     "cmd_clear_pending",
+    "cmd_update",
     "cmd_mcp",
 ]
