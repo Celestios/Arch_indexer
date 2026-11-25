@@ -1,8 +1,9 @@
 """Unit-consistent containment scoring, boundary accounting, and transitive closure BFS."""
 from collections import defaultdict, deque
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from clustering.models import ClusterNode
+from clustering.scc import iterative_tarjan_scc
 
 
 def populate_index_and_leaves(
@@ -18,6 +19,65 @@ def populate_index_and_leaves(
     else:
         for c in node.children:
             populate_index_and_leaves(c, index_by_id, symbol_to_leaf)
+
+
+def compute_quotient_cycles(nodes: List[ClusterNode]) -> Dict[str, Any]:
+    """Detects macro quotient cycles (subsystem SCCs) across a list of sibling/frontier nodes."""
+    if len(nodes) < 2:
+        return {
+            "cycle_count": 0,
+            "peers_by_cid": {},
+            "cyclic_deps_by_cid": {},
+            "cyclic_edges": set(),
+        }
+
+    desc_to_idx: Dict[str, int] = {}
+
+    def _map_desc(n: ClusterNode, idx: int):
+        desc_to_idx[n.cluster_id] = idx
+        for ch in n.children:
+            _map_desc(ch, idx)
+
+    for idx, n in enumerate(nodes):
+        _map_desc(n, idx)
+
+    edge_targets: Dict[Tuple[int, int], Set[str]] = defaultdict(set)
+    adj_sets: Dict[int, Set[int]] = defaultdict(set)
+    for i, n in enumerate(nodes):
+        for tgt_cid, targets in n.ext_deps_by_cluster.items():
+            j = desc_to_idx.get(tgt_cid)
+            if j is not None and j != i and targets:
+                adj_sets[i].add(j)
+                edge_targets[(i, j)].update(targets)
+
+    adj: Dict[int, List[int]] = {i: sorted(js) for i, js in adj_sets.items()}
+    sccs = iterative_tarjan_scc(list(range(len(nodes))), adj)
+
+    cycle_count = 0
+    peers_by_cid: Dict[str, Tuple[str, ...]] = {}
+    cyclic_deps_by_cid: Dict[str, int] = {}
+    cyclic_edges: Set[Tuple[str, str]] = set()
+
+    for scc in sccs:
+        if len(scc) < 2:
+            continue
+        cycle_count += 1
+        for i in scc:
+            src_cid = nodes[i].cluster_id
+            peers_by_cid[src_cid] = tuple(sorted(nodes[j].cluster_id for j in scc if j != i))
+            cyclic_targets: Set[str] = set()
+            for j in scc:
+                if j != i and (i, j) in edge_targets:
+                    cyclic_targets.update(edge_targets[(i, j)])
+                    cyclic_edges.add((src_cid, nodes[j].cluster_id))
+            cyclic_deps_by_cid[src_cid] = len(cyclic_targets)
+
+    return {
+        "cycle_count": cycle_count,
+        "peers_by_cid": peers_by_cid,
+        "cyclic_deps_by_cid": cyclic_deps_by_cid,
+        "cyclic_edges": cyclic_edges,
+    }
 
 
 def compute_metrics(
@@ -42,6 +102,15 @@ def compute_metrics(
             external_callers_by_target,
             symbol_to_leaf,
         )
+
+    if node.children:
+        q_res = compute_quotient_cycles(node.children)
+        node.internal_macro_cycles = q_res["cycle_count"]
+        for c in node.children:
+            c.macro_cycle_peers = q_res["peers_by_cid"].get(c.cluster_id, ())
+            c.cyclic_ext_dep_count = q_res["cyclic_deps_by_cid"].get(c.cluster_id, 0)
+    else:
+        node.internal_macro_cycles = 0
 
     by_file = unit == "file"
     owned_units: Set[str] = set(node.filepaths) if by_file else set(node.symbol_ids)
@@ -81,6 +150,8 @@ def compute_metrics(
 
     node.ext_dep_count = len(ext_targets)
     node.ext_caller_count = len(ext_callers)
+    total_coupling = node.ext_caller_count + node.ext_dep_count
+    node.instability = (node.ext_dep_count / total_coupling) if total_coupling > 0 else 0.0
     total_units = len(owned_units) + node.ext_dep_count
     node.containment_pct = round((len(owned_units) / total_units * 100.0) if total_units > 0 else 100.0, 1)
     node.ext_deps_by_cluster = {k: sorted(v) for k, v in sorted(deps_by_cluster.items())}

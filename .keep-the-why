@@ -4,6 +4,7 @@ README, for what Keep the Why actually is.
 
 <!-- keep-the-why:config -->
 - id: 9faf4ff1-6168-41ab-9285-bb6e0d4415c6---Arch_indexer
+- canonical: https://github.com/Celestios/Arch_indexer
 - context: context/
 - init: complete
 - context-schema: 0.20.0

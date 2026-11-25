@@ -21,6 +21,10 @@ class ClusterNode:
     closure_ext_count: int = 0             # |R(S) \ S|
     ext_deps_by_cluster: Dict[str, List[str]] = field(default_factory=dict)
     drift_notes: List[str] = field(default_factory=list)
+    instability: float = 0.0               # Ce / (Ca + Ce), 0.0 when Ca + Ce == 0
+    macro_cycle_peers: Tuple[str, ...] = ()  # Sorted sibling cluster_ids in same quotient SCC
+    cyclic_ext_dep_count: int = 0          # Unique external targets landing in macro_cycle_peers
+    internal_macro_cycles: int = 0         # Count of non-trivial quotient SCCs among direct children
 
 
 @dataclass

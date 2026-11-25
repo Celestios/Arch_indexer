@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from clustering.analyzer import build_cluster_hierarchy
+from clustering.metrics import compute_quotient_cycles
 from clustering.models import ClusterHierarchyResult, ClusterNode
 from interface.validators import validate_cluster_unit, validate_cluster_view
 from utils.symbol_id import canonical_display_name, parse_canonical_id
@@ -26,13 +27,26 @@ def _format_node_line(node: ClusterNode, unit: str, indent: str = "") -> str:
 
     if node.is_singleton:
         fp_str = f" | {node.filepaths[0]}" if node.filepaths else ""
-        return f"{indent}[{node.cluster_id}] {node.name} ({s_cnt}s | {f_cnt}f{fp_str}) [in: {node.ext_caller_count}, out: {node.ext_dep_count}]"
+        macro_str = (
+            f" [macro-cycle ↔️ {', '.join(node.macro_cycle_peers)} ({node.cyclic_ext_dep_count})]"
+            if node.macro_cycle_peers
+            else ""
+        )
+        return (
+            f"{indent}[{node.cluster_id}] {node.name} ({s_cnt}s | {f_cnt}f{fp_str}) "
+            f"[in: {node.ext_caller_count}, out: {node.ext_dep_count} | I: {node.instability:.2f}]{macro_str}"
+        )
 
-    cycle_str = " [cycle]" if node.is_cycle else ""
+    cycle_str = " [local-cycle]" if node.is_cycle else ""
+    macro_str = (
+        f" [macro-cycle ↔️ {', '.join(node.macro_cycle_peers)} ({node.cyclic_ext_dep_count})]"
+        if node.macro_cycle_peers
+        else ""
+    )
     closure_str = f" | closure: {node.closure_ext_count}" if node.closure_ext_count > 0 else ""
     return (
         f"{indent}[{node.cluster_id}] {node.name} "
-        f"({f_cnt}f, {s_cnt:,}s | containment: {round(node.containment_pct)}% | ext: {node.ext_dep_count}{closure_str}){cycle_str}"
+        f"({f_cnt}f, {s_cnt:,}s | containment: {round(node.containment_pct)}% | ext: {node.ext_dep_count}{closure_str} | I: {node.instability:.2f}){cycle_str}{macro_str}"
     )
 
 
@@ -86,12 +100,13 @@ def _render_summary_table(
     total_files: int,
     shared_hubs_count: int = 0,
     residuals_count: int = 0,
+    macro_cycles_count: int = 0,
 ) -> List[str]:
     lines: List[str] = [
         "### Macro Subsystems Overview",
         "",
-        "| Cluster | Files | Symbols | Containment | Ext Deps | Ext Callers | Dominant Path |",
-        "|:---|---:|---:|---:|---:|---:|:---|",
+        "| Cluster | Files | Symbols | Containment | Ext (Closure) | Ext Callers | I | Macro Cycle | Dominant Path |",
+        "|:---|---:|---:|---:|---:|---:|---:|:---|:---|",
     ]
     symbols_covered = 0
     for node in nodes:
@@ -100,14 +115,22 @@ def _render_summary_table(
         symbols_covered += s_cnt
         dom = node.dominant_dir or (node.filepaths[0] if node.filepaths else "-")
         c_pct = f"{round(node.containment_pct)}%" if not node.is_singleton else "-"
+        ext_col = f"{node.ext_dep_count:,} ({node.closure_ext_count:,})"
+        macro_col = (
+            f"↔️ {', '.join(node.macro_cycle_peers)} ({node.cyclic_ext_dep_count})"
+            if node.macro_cycle_peers
+            else "—"
+        )
         lines.append(
-            f"| `{node.cluster_id}` {node.name} | {f_cnt:,} | {s_cnt:,} | {c_pct} | {node.ext_dep_count:,} | {node.ext_caller_count:,} | `{dom}` |"
+            f"| `{node.cluster_id}` {node.name} | {f_cnt:,} | {s_cnt:,} | {c_pct} | {ext_col} | {node.ext_caller_count:,} | {node.instability:.2f} | {macro_col} | `{dom}` |"
         )
 
     lines.append("")
     cov_pct = round((symbols_covered / max(1, total_symbols)) * 100.0, 1)
+    macro_str = f"macro cycles: {macro_cycles_count} (DAG)" if macro_cycles_count == 0 else f"macro cycles: {macro_cycles_count}"
     telemetry = [
         f"**Coverage**: {len(nodes)} macro clusters covering {cov_pct}% of clustered symbols ({symbols_covered:,}/{total_symbols:,})",
+        macro_str,
     ]
     if shared_hubs_count > 0:
         telemetry.append(f"{shared_hubs_count} shared hubs")
@@ -188,6 +211,8 @@ def _render_mermaid(
                 for t in target_list:
                     frontier_edges[(src_cid, tgt_frontier_cid)].add(t)
 
+    cyclic_edges = compute_quotient_cycles(frontier_nodes)["cyclic_edges"]
+
     rendered_nodes: Set[str] = set()
     edge_lines: List[str] = []
 
@@ -209,7 +234,10 @@ def _render_mermaid(
         rendered_nodes.add(src_san)
         rendered_nodes.add(tgt_san)
 
-        edge_lines.append(f"  {src_def} -->|{len(tgts)}| {tgt_def}")
+        if (src_cid, tgt_cid) in cyclic_edges:
+            edge_lines.append(f"  {src_def} ==>|{len(tgts)} cyclic| {tgt_def}")
+        else:
+            edge_lines.append(f"  {src_def} -->|{len(tgts)}| {tgt_def}")
 
     for fn in frontier_nodes:
         san = fn.cluster_id.replace(".", "_")
@@ -268,11 +296,17 @@ def _render_leaf_inspection(
     result: ClusterHierarchyResult,
     repository,
 ) -> List[str]:
+    peers_str = (
+        f"{', '.join(node.macro_cycle_peers)} ({node.cyclic_ext_dep_count} cyclic targets)"
+        if node.macro_cycle_peers
+        else "None (acyclic)"
+    )
     lines: List[str] = [
         f"### Cluster Details: `[{node.cluster_id}] {node.name}`",
-        f"- **Level**: {node.level} | **Cycle**: {node.is_cycle} | **Containment**: {node.containment_pct}%",
+        f"- **Level**: {node.level} | **Cycle**: {node.is_cycle} | **Containment**: {node.containment_pct}% | **Instability (I)**: {node.instability:.2f}",
         f"- **Files**: {len(node.filepaths)} | **Symbols**: {len(node.symbol_ids)}",
-        f"- **External Targets**: {node.ext_dep_count} | **External Callers**: {node.ext_caller_count}",
+        f"- **External Targets**: {node.ext_dep_count} | **Closure**: {node.closure_ext_count} | **External Callers**: {node.ext_caller_count}",
+        f"- **Macro Cycle Peers**: {peers_str}",
         "",
         "#### Member Files & Symbols",
     ]
@@ -303,10 +337,26 @@ def _render_leaf_inspection(
     if not node.ext_deps_by_cluster:
         lines.append("*No external dependencies.*")
     else:
+        cyclic_peers: Set[str] = set()
+        curr: Optional[ClusterNode] = node
+        while curr is not None:
+            cyclic_peers.update(curr.macro_cycle_peers)
+            curr = result.index_by_id.get(curr.parent_id) if curr.parent_id else None
+
         for c_id, targets in sorted(node.ext_deps_by_cluster.items()):
             c_node = result.index_by_id.get(c_id)
             c_name = f" {c_node.name}" if c_node else ""
-            lines.append(f"- **`[{c_id}]{c_name}`** ({len(targets)} targets):")
+            inst_str = f" (I={c_node.instability:.2f})" if c_node else ""
+            is_cyclic_target = c_id in cyclic_peers
+            if not is_cyclic_target and c_node is not None:
+                anc = result.index_by_id.get(c_node.parent_id) if c_node.parent_id else None
+                while anc is not None:
+                    if anc.cluster_id in cyclic_peers:
+                        is_cyclic_target = True
+                        break
+                    anc = result.index_by_id.get(anc.parent_id) if anc.parent_id else None
+            cyclic_tag = " [CYCLIC]" if is_cyclic_target else ""
+            lines.append(f"- **`[{c_id}]{c_name}`**{inst_str}{cyclic_tag} ({len(targets)} targets):")
             for t in targets[:15]:
                 disp_t = canonical_display_name(t) if "::" in t else t
                 lines.append(f"  -> `{disp_t}`")
@@ -442,9 +492,15 @@ def handle_clusters(
             return f"Error: Cluster, symbol, or filepath '{cluster}' not found in cluster hierarchy."
 
     hdr_focus = target_node.cluster_id
+    macro_cycles_hdr = (
+        "0 (DAG)"
+        if target_node.internal_macro_cycles == 0
+        else f"{target_node.internal_macro_cycles} sibling cycle(s)"
+    )
     md: List[str] = [
         f"## Emergent Dependency Clusters ({result.total_files} files, {result.total_symbols:,} symbols, {result.total_edges:,} edges)",
         f"- **Focus**: `{hdr_focus}` (depth={depth_val}, unit=`{unit_mode}`)",
+        f"- **Macro Cycles**: {macro_cycles_hdr}",
         f"- **Unreferenced Symbols**: {len(result.unreferenced_symbols)} (pass `cluster=\"unreferenced\"` to inspect)",
         f"- **Residual Singletons**: {len(residual_roots)} (pass `cluster=\"residuals\"` to inspect)",
         "",
@@ -464,6 +520,7 @@ def handle_clusters(
                     total_files=len(target_node.filepaths),
                     shared_hubs_count=len(hub_roots) if target_node.cluster_id == "root" else 0,
                     residuals_count=len(residual_roots) if target_node.cluster_id == "root" else 0,
+                    macro_cycles_count=target_node.internal_macro_cycles,
                 )
             )
             md.append("")

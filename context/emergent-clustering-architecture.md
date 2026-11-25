@@ -89,3 +89,27 @@ Clustering aggregation was refactored to eliminate artificial numeric connectivi
 **Reason:** Replacing arbitrary numeric thresholds with topological invariants produces stable, scale-free emergent clusters across small and large codebases (tested up to 20,000+ symbols in Centrode). Methods remain naturally bonded to their classes without hard-locking God Classes, and singleton spam is eliminated.
 
 **Rejected alternative (Arbitrary connectivity floors like `deg >= 3` or `w_total >= 3.0`):** Adding arbitrary degree or weight cutoffs masked structural bugs in Phase B's community counting and dampened-vs-undampened scale mismatch, but produced brittle, language-dependent clustering that failed on lightly coupled or clean modular code.
+
+---
+
+## Post-clustering Instability, Macro Quotient Cycles, and Closure diagnostics
+
+**Id:** 32fd4dba-e429-4115-8b4e-cb4844e6e9d0
+**Type:** decision
+**Status:** active
+**Evidence:** confirmed
+**Source:** maintainer architecture decision, 2026-11-25
+**Revisit when:** `clusters` integrates optional `.arch/config.json` layer-rule annotations or DuckDB materializes quotient-graph metrics natively
+
+Moving shared code out to a lower layer (e.g., `features/graph/` to `lib/shared/`) turns internal calls into external dependencies (`Ext Deps`), which lowers raw `containment_pct` even when the refactor eliminates a dependency cycle and produces a clean acyclic DAG. Raw containment alone cannot distinguish healthy downward fan-out from cyclic subsystem coupling, and `is_cycle` (Level-0 Tarjan SCC) misses macro cycles formed by non-overlapping symbol pairs across modules (`c1::a -> c2::b` and `c2::c -> c1::d`).
+
+To surface architectural directionality without altering Louvain clustering (`affinity.py`, `aggregator.py`, `analyzer.py`), four orthogonal post-clustering fields were added to `ClusterNode` (`models.py`), computed in `metrics.py`, and surfaced across all four `clusters` views (`summary`, `tree`, `mermaid`, and leaf zoom):
+- **Instability (`I`)**: $C_e / (C_a + C_e) \in [0.0, 1.0]$ (`0.0` when $C_a + C_e = 0$).
+- **Macro Quotient Cycles**: `compute_quotient_cycles()` projects `ext_deps_by_cluster` onto sibling/frontier nodes and runs `iterative_tarjan_scc()` recursively at every hierarchy level, populating `internal_macro_cycles`, `macro_cycle_peers`, and `cyclic_ext_dep_count` while keeping `is_cycle` strictly scoped to Level-0 atomic symbol SCCs (`[local-cycle]`).
+- **Transitive Closure Amplification**: `summary` pairs `Ext (Closure)` directly so wide transitive cones are visible alongside direct boundary edges.
+
+**Reason:** Separating post-clustering diagnostics from graph aggregation preserves parameter-free clustering stability while exposing DAG directionality, DIP sink stability (`I = 0.0`), and subsystem-level cycles at every zoom depth.
+
+**Rejected alternative (Overloading `is_cycle` for both symbol SCCs and macro subsystem cycles):** Conflating atomic symbol cycles with boundary cycles between acyclic leaves obscures whether a cycle is local to a few symbols or spans module boundaries.
+
+**Rejected alternative (Layer-aware containment scoring inside `clusters`):** Importing `.arch/config.json` boundary rules into `clusters` was rejected to keep emergent clustering rule-independent; explicit layer compliance remains the responsibility of `audit`.
